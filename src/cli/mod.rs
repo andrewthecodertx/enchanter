@@ -70,10 +70,10 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     if let Some(user_prompt) = &args.prompt {
-        return run_single(&args, &config, &soul, &memory, &skills, &client, &model, user_prompt).await;
+        return run_single(&args, &config, &soul, &mut memory, &skills, &client, &model, user_prompt).await;
     }
 
-    run_repl(&args, &config, &soul, &memory, &skills, &client, &model).await
+    run_repl(&args, &config, &soul, &mut memory, &skills, &client, &model).await
 }
 
 fn handle_command(
@@ -173,7 +173,7 @@ async fn run_single(
     args: &Args,
     config: &Config,
     soul: &Soul,
-    memory: &MemoryStore,
+    memory: &mut MemoryStore,
     skills: &SkillsIndex,
     client: &LlmClient,
     _model: &str,
@@ -202,15 +202,13 @@ async fn run_single(
 
         if result.has_tool_calls() {
             let tool_calls = result.tool_calls.unwrap();
-            // Push assistant message with tool calls
             messages.push(Message::assistant_with_tools(tool_calls.clone(), result.content));
 
-            // Execute each tool call and push results
             for tc in &tool_calls {
                 print_tool_call(&tc.function.name, &tc.function.arguments);
                 let args: Value = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(Value::Null);
-                let output = tools::dispatch(&tc.function.name, &args);
+                let output = tools::dispatch(&tc.function.name, &args, memory);
                 messages.push(Message::tool_result(&tc.id, output));
             }
         } else {
@@ -231,7 +229,7 @@ async fn run_repl(
     args: &Args,
     config: &Config,
     soul: &Soul,
-    memory: &MemoryStore,
+    memory: &mut MemoryStore,
     skills: &SkillsIndex,
     client: &LlmClient,
     model: &str,
@@ -301,7 +299,7 @@ async fn run_repl(
 
                 messages.push(Message::user(&line));
 
-                match run_agent_loop(client, &mut messages, &tools_payload, max_turns, args.no_stream).await {
+                match run_agent_loop(client, &mut messages, &tools_payload, max_turns, args.no_stream, memory).await {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
@@ -333,6 +331,7 @@ async fn run_agent_loop(
     tools_payload: &Option<Value>,
     max_turns: u32,
     no_stream: bool,
+    memory: &mut MemoryStore,
 ) -> Result<()> {
     for _ in 0..max_turns {
         let result = if no_stream {
@@ -343,19 +342,16 @@ async fn run_agent_loop(
 
         if result.has_tool_calls() {
             let tool_calls = result.tool_calls.unwrap();
-            // Push assistant message with tool calls
             messages.push(Message::assistant_with_tools(tool_calls.clone(), result.content));
 
-            // Execute each tool call and push results
             for tc in &tool_calls {
                 print_tool_call(&tc.function.name, &tc.function.arguments);
                 let args: Value = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(Value::Null);
-                let output = tools::dispatch(&tc.function.name, &args);
+                let output = tools::dispatch(&tc.function.name, &args, memory);
                 messages.push(Message::tool_result(&tc.id, output));
             }
         } else {
-            // Model responded with plain text — we're done
             if let Some(content) = &result.content
                 && no_stream
             {

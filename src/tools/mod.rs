@@ -1,7 +1,9 @@
-//! Built-in tool definitions and dispatch — canonical set of 4.
+//! Built-in tool definitions and dispatch — canonical set of 7.
 
 use serde_json::{json, Value};
 use std::path::Path;
+
+use crate::memory::MemoryStore;
 
 /// A tool definition in OpenAI function-calling format.
 #[derive(Debug, Clone)]
@@ -11,7 +13,7 @@ pub struct ToolDef {
     pub parameters: Value,
 }
 
-/// Return the canonical 4 tool definitions.
+/// Return the canonical 7 tool definitions.
 pub fn tool_definitions() -> Vec<ToolDef> {
     vec![
         ToolDef {
@@ -75,6 +77,70 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "edit_file",
+            description: "Apply a targeted find-and-replace edit to a file. \
+                Finds an exact match of 'old_string' and replaces it with 'new_string'. \
+                The old_string must be unique in the file. Use this instead of write_file \
+                for code edits — it's safer because it only changes the targeted section. \
+                Set replace_all to true to replace all occurrences.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file (absolute or relative)"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact text to find in the file"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The text to replace it with"
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace all occurrences instead of requiring a unique match (default: false)"
+                    }
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
+        ToolDef {
+            name: "search_files",
+            description: "Search for a regex pattern in file contents, or find files by glob pattern. \
+                For content search: returns matching lines with line numbers and context. \
+                For file search: returns file paths sorted by modification time. \
+                Use this instead of grep/find shell commands — it's cross-platform and parsed output.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern for content search, or glob pattern (e.g. '*.py') for file search"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory or file to search in (default: current directory)"
+                    },
+                    "target": {
+                        "type": "string",
+                        "enum": ["content", "files"],
+                        "description": "'content' searches inside files, 'files' finds files by name pattern (default: 'content')"
+                    },
+                    "file_glob": {
+                        "type": "string",
+                        "description": "Filter files by pattern when searching content (e.g. '*.rs')"
+                    },
+                    "context": {
+                        "type": "integer",
+                        "description": "Lines of context before/after each match (content search only, default: 2)"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDef {
             name: "list_directory",
             description: "List entries in a directory. Returns file names, types \
                 (file/dir/symlink), and sizes. Sorted alphabetically.",
@@ -87,6 +153,33 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     }
                 },
                 "required": []
+            }),
+        },
+        ToolDef {
+            name: "memory",
+            description: "Read and modify persistent memory that survives across sessions. \
+                Use 'add' to save a new fact, 'remove' to delete one by substring, \
+                'replace' to update an existing entry, or 'list' to see all entries. \
+                Save durable facts: user preferences, project conventions, environment details, \
+                lessons learned. Do not save temporary state or task progress.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "remove", "replace", "list"],
+                        "description": "The memory operation to perform"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "For 'add': the entry to save. For 'remove': substring to match. For 'replace': old text to find."
+                    },
+                    "new_content": {
+                        "type": "string",
+                        "description": "For 'replace': the replacement text"
+                    }
+                },
+                "required": ["action"]
             }),
         },
     ]
@@ -109,13 +202,17 @@ pub fn tools_json() -> Vec<Value> {
         .collect()
 }
 
-/// Dispatch a tool call by name. Returns the result as a string.
-pub fn dispatch(name: &str, args: &Value) -> String {
+/// Dispatch a built-in tool call by name. Returns the result as a string.
+/// The memory tool requires a mutable reference to the MemoryStore.
+pub fn dispatch(name: &str, args: &Value, memory: &mut MemoryStore) -> String {
     match name {
         "exec_command" => tool_exec_command(args),
         "read_file" => tool_read_file(args),
         "write_file" => tool_write_file(args),
+        "edit_file" => tool_edit_file(args),
+        "search_files" => tool_search_files(args),
         "list_directory" => tool_list_directory(args),
+        "memory" => tool_memory(args, memory),
         _ => format!("Unknown tool: {}", name),
     }
 }
@@ -246,6 +343,217 @@ fn tool_write_file(args: &Value) -> String {
     }
 }
 
+fn tool_edit_file(args: &Value) -> String {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return "Error: missing required parameter 'path'".to_string(),
+    };
+    let old_string = match args.get("old_string").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return "Error: missing required parameter 'old_string'".to_string(),
+    };
+    let new_string = match args.get("new_string").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return "Error: missing required parameter 'new_string'".to_string(),
+    };
+    let replace_all = args
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let expanded_path = shellexpand::tilde(path).to_string();
+
+    let content = match std::fs::read_to_string(&expanded_path) {
+        Ok(c) => c,
+        Err(e) => return format!("Error reading file {}: {}", path, e),
+    };
+
+    if !content.contains(old_string) {
+        return format!("Error: old_string not found in {}. Make sure the text matches exactly, including whitespace and indentation.", path);
+    }
+
+    if !replace_all {
+        let count = content.matches(old_string).count();
+        if count > 1 {
+            return format!(
+                "Error: old_string found {} times in {}. It must be unique unless replace_all=true. \
+                Include more surrounding context to make it unique.",
+                count, path
+            );
+        }
+    }
+
+    if replace_all {
+        let new_content = content.replace(old_string, new_string);
+        match std::fs::write(&expanded_path, &new_content) {
+            Ok(()) => {
+                let count = content.matches(old_string).count();
+                format!("Replaced {} occurrence(s) in {}", count, path)
+            }
+            Err(e) => format!("Error writing file {}: {}", path, e),
+        }
+    } else {
+        let new_content = content.replacen(old_string, new_string, 1);
+        match std::fs::write(&expanded_path, &new_content) {
+            Ok(()) => format!("Edited {}", path),
+            Err(e) => format!("Error writing file {}: {}", path, e),
+        }
+    }
+}
+
+fn tool_search_files(args: &Value) -> String {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return "Error: missing required parameter 'pattern'".to_string(),
+    };
+
+    let search_path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("content");
+    let file_glob = args.get("file_glob").and_then(|v| v.as_str());
+    let context_lines = args
+        .get("context")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(2) as usize;
+
+    let expanded_path = shellexpand::tilde(search_path).to_string();
+
+    if target == "files" {
+        // File name search using glob pattern
+        let walk_result = walk_files(&expanded_path, pattern);
+        match walk_result {
+            Ok(files) => {
+                if files.is_empty() {
+                    format!("No files matching '{}' in {}", pattern, search_path)
+                } else {
+                    let mut result = String::new();
+                    for f in &files {
+                        result.push_str(f);
+                        result.push('\n');
+                    }
+                    result.push_str(&format!("\n{} files found", files.len()));
+                    result
+                }
+            }
+            Err(e) => format!("Error searching files: {}", e),
+        }
+    } else {
+        // Content search using regex
+        let regex = match regex::Regex::new(pattern) {
+            Ok(r) => r,
+            Err(e) => return format!("Error: invalid regex pattern '{}': {}", pattern, e),
+        };
+
+        let files = match walk_files(&expanded_path, file_glob.unwrap_or("*")) {
+            Ok(f) => f,
+            Err(e) => return format!("Error walking directory: {}", e),
+        };
+
+        let mut results = Vec::new();
+        let mut total_matches = 0;
+        let max_results = 50;
+
+        for file_path in &files {
+            if total_matches >= max_results {
+                break;
+            }
+
+            if let Ok(content) = std::fs::read_to_string(file_path) {
+                let lines: Vec<&str> = content.lines().collect();
+
+                for (line_num, line) in lines.iter().enumerate() {
+                    if total_matches >= max_results {
+                        break;
+                    }
+
+                    if regex.is_match(line) {
+                        total_matches += 1;
+                        let start = line_num.saturating_sub(context_lines);
+                        let end = (line_num + context_lines + 1).min(lines.len());
+
+                        results.push(format!(
+                            "\n{}:{}",
+                            file_path,
+                            line_num + 1
+                        ));
+
+                        for (i, ctx_line) in lines[start..end].iter().enumerate() {
+                            let actual_line = start + i + 1;
+                            let prefix = if actual_line == line_num + 1 {
+                                ">"
+                            } else {
+                                " "
+                            };
+                            results.push(format!(
+                                "{}{:>5}|{}",
+                                prefix, actual_line, ctx_line
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if results.is_empty() {
+            format!("No matches for '{}' in {}", pattern, search_path)
+        } else {
+            let mut result = results.join("\n");
+            if total_matches >= max_results {
+                result.push_str(&format!(
+                    "\n\n... showing first {} of total matches",
+                    max_results
+                ));
+            } else {
+                result.push_str(&format!("\n\n{} matches", total_matches));
+            }
+
+            // Truncate if needed
+            if result.len() > 10_000 {
+                result.truncate(10_000);
+                result.push_str("\n... [truncated]");
+            }
+
+            result
+        }
+    }
+}
+
+/// Walk directory for files matching a glob pattern, sorted by modification time.
+fn walk_files(dir: &str, pattern: &str) -> Result<Vec<String>, String> {
+    let glob = match glob::glob(&format!("{}/{}", dir, pattern)) {
+        Ok(g) => g,
+        Err(e) => return Err(format!("Invalid glob pattern '{}': {}", pattern, e)),
+    };
+
+    let mut files: Vec<(String, std::time::SystemTime)> = Vec::new();
+
+    for entry in glob {
+        match entry {
+            Ok(path) => {
+                if path.is_file() {
+                    let mtime = path.metadata().ok().and_then(|m| m.modified().ok());
+                    let mtime = mtime.unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    files.push((path.to_string_lossy().to_string(), mtime));
+                }
+            }
+            Err(e) => {
+                // Skip entries with errors
+                let _ = e;
+            }
+        }
+    }
+
+    // Sort by modification time, newest first
+    files.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+    Ok(files.into_iter().map(|(p, _)| p).collect())
+}
+
 fn tool_list_directory(args: &Value) -> String {
     let path = args
         .get("path")
@@ -291,6 +599,72 @@ fn tool_list_directory(args: &Value) -> String {
     result
 }
 
+fn tool_memory(args: &Value, memory: &mut MemoryStore) -> String {
+    let action = match args.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => return "Error: missing required parameter 'action'".to_string(),
+    };
+
+    match action {
+        "add" => {
+            let content = match args.get("content").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return "Error: 'add' requires 'content' parameter".to_string(),
+            };
+            match memory.add_memory(content.to_string()) {
+                Ok(()) => "Memory entry saved.".to_string(),
+                Err(e) => format!("Error saving memory: {}", e),
+            }
+        }
+        "remove" => {
+            let substring = match args.get("content").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => return "Error: 'remove' requires 'content' parameter (substring to match)".to_string(),
+            };
+            match memory.remove_memory(substring) {
+                Ok(true) => "Memory entry removed.".to_string(),
+                Ok(false) => "No matching memory entry found.".to_string(),
+                Err(e) => format!("Error removing memory: {}", e),
+            }
+        }
+        "replace" => {
+            let old_text = match args.get("content").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => return "Error: 'replace' requires 'content' parameter (old text to find)".to_string(),
+            };
+            let new_text = match args.get("new_content").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => return "Error: 'replace' requires 'new_content' parameter".to_string(),
+            };
+            match memory.replace_memory(old_text, new_text) {
+                Ok(true) => "Memory entry updated.".to_string(),
+                Ok(false) => "No matching memory entry found.".to_string(),
+                Err(e) => format!("Error updating memory: {}", e),
+            }
+        }
+        "list" => {
+            let mut result = String::new();
+            if memory.user_entries.is_empty() && memory.memory_entries.is_empty() {
+                return "(no memory entries)".to_string();
+            }
+            if !memory.user_entries.is_empty() {
+                result.push_str("── USER ──\n");
+                for entry in &memory.user_entries {
+                    result.push_str(&format!("  {}\n", entry));
+                }
+            }
+            if !memory.memory_entries.is_empty() {
+                result.push_str("── NOTES ──\n");
+                for (i, entry) in memory.memory_entries.iter().enumerate() {
+                    result.push_str(&format!("  [{}] {}\n", i + 1, entry));
+                }
+            }
+            result
+        }
+        _ => format!("Unknown memory action: '{}'. Use add, remove, replace, or list.", action),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,13 +672,13 @@ mod tests {
 
     #[test]
     fn tool_definitions_count() {
-        assert_eq!(tool_definitions().len(), 4);
+        assert_eq!(tool_definitions().len(), 7);
     }
 
     #[test]
     fn tools_json_format() {
         let tools = tools_json();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 7);
         for tool in &tools {
             assert_eq!(tool["type"], "function");
             assert!(tool["function"]["name"].is_string());
@@ -314,25 +688,28 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_tool() {
-        let result = dispatch("nonexistent", &json!({}));
+        let mut mem = MemoryStore::default();
+        let result = dispatch("nonexistent", &json!({}), &mut mem);
         assert!(result.contains("Unknown tool"));
     }
 
     #[test]
     fn dispatch_missing_required_param() {
-        let result = dispatch("exec_command", &json!({}));
+        let mut mem = MemoryStore::default();
+        let result = dispatch("exec_command", &json!({}), &mut mem);
         assert!(result.contains("missing required"));
     }
 
     #[test]
     fn write_and_read_file() {
+        let mut mem = MemoryStore::default();
         let tmp = std::env::temp_dir().join("enchanter_test_write_read.txt");
         let path = tmp.to_string_lossy().to_string();
 
-        let write_result = dispatch("write_file", &json!({"path": path, "content": "hello world"}));
+        let write_result = dispatch("write_file", &json!({"path": path, "content": "hello world"}), &mut mem);
         assert!(write_result.contains("Wrote"));
 
-        let read_result = dispatch("read_file", &json!({"path": path}));
+        let read_result = dispatch("read_file", &json!({"path": path}), &mut mem);
         assert!(read_result.contains("hello world"));
 
         let _ = std::fs::remove_file(&tmp);
@@ -340,13 +717,102 @@ mod tests {
 
     #[test]
     fn list_directory_works() {
-        let result = dispatch("list_directory", &json!({"path": "/tmp"}));
+        let mut mem = MemoryStore::default();
+        let result = dispatch("list_directory", &json!({"path": "/tmp"}), &mut mem);
         assert!(!result.contains("Error"));
     }
 
     #[test]
     fn exec_command_works() {
-        let result = dispatch("exec_command", &json!({"command": "echo hello"}));
+        let mut mem = MemoryStore::default();
+        let result = dispatch("exec_command", &json!({"command": "echo hello"}), &mut mem);
         assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn edit_file_basic() {
+        let mut mem = MemoryStore::default();
+        let tmp = std::env::temp_dir().join("enchanter_test_edit.txt");
+        let path = tmp.to_string_lossy().to_string();
+
+        // Write initial content
+        let _ = dispatch("write_file", &json!({"path": &path, "content": "fn main() {\n    println!(\"hello\");\n}\n"}), &mut mem);
+
+        // Edit it
+        let edit_result = dispatch("edit_file", &json!({
+            "path": &path,
+            "old_string": "println!(\"hello\")",
+            "new_string": "println!(\"world\")"
+        }), &mut mem);
+        assert!(edit_result.contains("Edited"));
+
+        // Verify
+        let read_result = dispatch("read_file", &json!({"path": &path}), &mut mem);
+        assert!(read_result.contains("world"));
+        assert!(!read_result.contains("hello"));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn edit_file_requires_unique_match() {
+        let mut mem = MemoryStore::default();
+        let tmp = std::env::temp_dir().join("enchanter_test_edit_multi.txt");
+        let path = tmp.to_string_lossy().to_string();
+
+        // Write content with duplicates
+        let _ = dispatch("write_file", &json!({"path": &path, "content": "foo\nbar\nfoo\n"}), &mut mem);
+
+        let edit_result = dispatch("edit_file", &json!({
+            "path": &path,
+            "old_string": "foo",
+            "new_string": "baz"
+        }), &mut mem);
+        assert!(edit_result.contains("2 times") || edit_result.contains("unique"));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn edit_file_replace_all() {
+        let mut mem = MemoryStore::default();
+        let tmp = std::env::temp_dir().join("enchanter_test_edit_all.txt");
+        let path = tmp.to_string_lossy().to_string();
+
+        let _ = dispatch("write_file", &json!({"path": &path, "content": "foo\nbar\nfoo\n"}), &mut mem);
+
+        let edit_result = dispatch("edit_file", &json!({
+            "path": &path,
+            "old_string": "foo",
+            "new_string": "baz",
+            "replace_all": true
+        }), &mut mem);
+        assert!(edit_result.contains("2 occurrence"));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn search_files_by_name() {
+        let mut mem = MemoryStore::default();
+        let result = dispatch("search_files", &json!({
+            "pattern": "*.toml",
+            "path": ".",
+            "target": "files"
+        }), &mut mem);
+        assert!(result.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn memory_add_and_list() {
+        let mut mem = MemoryStore::default();
+        let add_result = dispatch("memory", &json!({
+            "action": "add",
+            "content": "project uses rust 1.85"
+        }), &mut mem);
+        assert!(add_result.contains("saved"));
+
+        let list_result = dispatch("memory", &json!({"action": "list"}), &mut mem);
+        assert!(list_result.contains("rust 1.85"));
     }
 }
