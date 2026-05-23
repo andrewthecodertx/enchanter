@@ -1,6 +1,7 @@
 //! MCP (Model Context Protocol) client — stdio transport.
 //!
 //! Manages MCP server processes: spawn, discover tools, dispatch calls, shutdown.
+//! Supports automatic restart of crashed servers with a configurable retry limit.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,12 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum time to wait for a tools/call response.
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Maximum restart attempts per server before giving up.
+const MAX_RESTARTS: u32 = 3;
+
+/// Cooldown after a failed restart before trying again.
+const RESTART_COOLDOWN: Duration = Duration::from_secs(2);
 
 /// JSON-RPC request.
 #[derive(Serialize)]
@@ -58,7 +65,7 @@ pub struct McpToolDef {
     pub input_schema: Value,
 }
 
-/// A running MCP server with its stdin/stdout handles.
+/// A running MCP server with its stdin/stdout handles and restart tracking.
 struct McpServer {
     name: String,
     child: Child,
@@ -66,6 +73,8 @@ struct McpServer {
     stdout: Mutex<BufReader<tokio::process::ChildStdout>>,
     next_id: Mutex<u64>,
     tools: Vec<McpToolDef>,
+    config: McpServerConfig,
+    restart_count: u32,
 }
 
 /// Manager for all MCP server connections.
@@ -101,10 +110,26 @@ impl McpManager {
 
     /// Start a single MCP server, call initialize + tools/list.
     async fn start_server(&mut self, name: &str, config: &McpServerConfig) -> Result<()> {
+        let server = self.spawn_and_handshake(name, config).await?;
+        let tool_count = server.tools.len();
+        self.servers.push(server);
+
+        eprintln!(
+            "  {} MCP: {} ({} tools)",
+            "⟡".bright_magenta(),
+            name.bright_white(),
+            tool_count.to_string().bright_white()
+        );
+
+        Ok(())
+    }
+
+    /// Spawn a process, perform initialize handshake, discover tools.
+    /// Returns a fully initialized McpServer ready to accept dispatches.
+    async fn spawn_and_handshake(&self, name: &str, config: &McpServerConfig) -> Result<McpServer> {
         // Expand env vars in the env map
         let mut env_vars = HashMap::new();
         for (key, val) in &config.env {
-            // Support ${VAR} syntax — resolve from current env
             let expanded = if val.starts_with("${") && val.ends_with('}') {
                 let var_name = &val[2..val.len() - 1];
                 std::env::var(var_name).unwrap_or(val.clone())
@@ -136,6 +161,8 @@ impl McpManager {
             stdout: Mutex::new(BufReader::new(stdout)),
             next_id: Mutex::new(1),
             tools: Vec::new(),
+            config: config.clone(),
+            restart_count: 0,
         };
 
         // Send initialize request (with timeout)
@@ -188,18 +215,7 @@ impl McpManager {
         };
 
         server.tools = tools;
-
-        let tool_count = server.tools.len();
-        self.servers.push(server);
-
-        eprintln!(
-            "  {} MCP: {} ({} tools)",
-            "⟡".bright_magenta(),
-            name.bright_white(),
-            tool_count.to_string().bright_white()
-        );
-
-        Ok(())
+        Ok(server)
     }
 
     /// Get all MCP tool definitions merged with built-in format.
@@ -224,20 +240,36 @@ impl McpManager {
 
     /// Dispatch a tool call to the right MCP server.
     /// Returns None if the tool name doesn't match any MCP server.
+    /// If the server has crashed, attempts to restart it (up to MAX_RESTARTS).
     pub async fn dispatch(&mut self, full_name: &str, arguments: &Value) -> Option<Result<String>> {
         // Parse "server_name:tool_name"
         let (server_name, tool_name) = full_name.split_once(':')?;
 
-        let server = self.servers.iter_mut().find(|s| s.name == server_name)?;
+        let server_idx = self.servers.iter().position(|s| s.name == server_name)?;
 
-        // Check if server process is still alive before dispatching
-        if let Some(exit_status) = server.child.try_wait().ok().flatten() {
-            return Some(Err(anyhow::anyhow!(
-                "MCP server '{}' has exited with status {}",
-                server_name,
-                exit_status
-            )));
+        // Check if server process has exited — if so, attempt restart
+        let has_exited = self.servers[server_idx].child.try_wait().ok().flatten().is_some();
+        if has_exited {
+            match self.restart_server(server_idx).await {
+                Ok(()) => {
+                    eprintln!(
+                        "  {} MCP server '{}' restarted",
+                        "↻".bright_green(),
+                        server_name
+                    );
+                }
+                Err(e) => {
+                    return Some(Err(anyhow::anyhow!(
+                        "MCP server '{}' crashed and could not be restarted (after {} attempts): {}",
+                        server_name,
+                        MAX_RESTARTS,
+                        e
+                    )));
+                }
+            }
         }
+
+        let server = &self.servers[server_idx];
 
         let params = json!({
             "name": tool_name,
@@ -257,6 +289,43 @@ impl McpManager {
                 DISPATCH_TIMEOUT.as_secs()
             ))),
         }
+    }
+
+    /// Attempt to restart a crashed MCP server.
+    /// Resets the ID counter and re-performs the full handshake.
+    async fn restart_server(&mut self, idx: usize) -> Result<()> {
+        let server = &mut self.servers[idx];
+
+        if server.restart_count >= MAX_RESTARTS {
+            anyhow::bail!(
+                "MCP server '{}' has exceeded maximum restart attempts ({})",
+                server.name,
+                MAX_RESTARTS
+            );
+        }
+
+        server.restart_count += 1;
+
+        // Kill old process if still lingering
+        let _ = server.child.kill().await;
+
+        // Brief cooldown before restarting
+        tokio::time::sleep(RESTART_COOLDOWN).await;
+
+        let name = server.name.clone();
+        let config = server.config.clone();
+
+        // Re-spawn and handshake
+        let new_server = self.spawn_and_handshake(&name, &config).await?;
+
+        // Replace the old server entry
+        self.servers[idx] = new_server;
+
+        // Reset restart count on successful restart so transient crashes
+        // don't accumulate across the whole session
+        self.servers[idx].restart_count = 0;
+
+        Ok(())
     }
 
     /// Gracefully shut down all servers.
@@ -381,10 +450,9 @@ impl McpServer {
                 Err(_) => {
                     // Not valid JSON-RPC — skip it (could be a server log line)
                     eprintln!(
-                        "{} MCP server '{}' sent non-JSON line, skipping: {}",
+                        "{} MCP server '{}' sent non-JSON line, skipping",
                         "Warning:".yellow(),
-                        self.name,
-                        trimmed.chars().take(100).collect::<String>()
+                        self.name
                     );
                     continue;
                 }
