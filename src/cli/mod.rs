@@ -496,7 +496,7 @@ fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &
 
     println!(
         "\n  {} {}",
-        "⟡".bright_magenta(),
+        "✦".bright_magenta(),
         name.bright_cyan().bold()
     );
     println!(
@@ -578,7 +578,7 @@ fn print_init_guidance() {
     let home = crate::home::enchanter_home();
     println!(
         "\n  {} Initialized {}\n",
-        "⟡".bright_magenta(),
+        "✦".bright_magenta(),
         home.display().to_string().bright_white()
     );
     println!("  Created:");
