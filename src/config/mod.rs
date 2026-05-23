@@ -47,16 +47,16 @@ impl Config {
         }
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let config: Config = serde_yaml::from_str(&contents)
+        let config: Config = serde_yml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
         Ok(config)
     }
 
-    /// Model ID: config > ENCHANTER_MODEL > "gpt-4o".
+    /// Model ID: config > ENCHANTER_MODEL > "gpt-4.1-mini".
     pub fn model_id(&self) -> String {
         self.model.default.clone()
             .or_else(|| std::env::var("ENCHANTER_MODEL").ok())
-            .unwrap_or_else(|| "gpt-4o".to_string())
+            .unwrap_or_else(|| "gpt-4.1-mini".to_string())
     }
 
     /// Base URL: config > ENCHANTER_BASE_URL > OPENAI_BASE_URL > OpenAI default.
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn default_config() {
         let c = Config::default();
-        assert_eq!(c.model_id(), "gpt-4o");
+        assert_eq!(c.model_id(), "gpt-4.1-mini");
         assert_eq!(c.max_turns(), 30);
     }
 }

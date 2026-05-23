@@ -24,12 +24,12 @@ Then configure a provider in `config.yaml`. A few examples:
 ```yaml
 # Ollama (local, no API key needed)
 model:
-  default: llama3
+  default: qwen3
   base_url: http://localhost:11434/v1
 
 # OpenAI
 model:
-  default: gpt-4o
+  default: gpt-4.1-mini
   api_key: sk-...
 
 # OpenRouter
@@ -42,7 +42,7 @@ model:
 You can also use environment variables instead of the config file:
 
 ```bash
-export ENCHANTER_MODEL=gpt-4o
+export ENCHANTER_MODEL=gpt-4.1-mini
 export ENCHANTER_API_KEY=sk-...
 export ENCHANTER_BASE_URL=https://api.openai.com/v1
 ```
@@ -75,7 +75,7 @@ enchanter
 enchanter -p "Explain Rust ownership in one paragraph"
 
 # Use a different model for this session
-enchanter -m llama3
+enchanter -m qwen3
 
 # Disable streaming (wait for the full reply)
 enchanter --no-stream -p "Summarize this"

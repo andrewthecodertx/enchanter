@@ -48,10 +48,10 @@ impl SkillsIndex {
             .into_iter()
             .filter_map(|e| e.ok())
         {
-            if entry.file_name() == "SKILL.md" {
-                if let Some(skill) = parse_skill_file(entry.path(), &skills_dir) {
-                    skills.push(skill);
-                }
+            if entry.file_name() == "SKILL.md"
+                && let Some(skill) = parse_skill_file(entry.path(), &skills_dir)
+            {
+                skills.push(skill);
             }
         }
 
@@ -137,7 +137,7 @@ fn parse_frontmatter(content: &str) -> (SkillFrontmatter, String) {
     if let Some(end_idx) = after_open.find("\n---") {
         let yaml_str = &after_open[..end_idx];
         let body = after_open[end_idx + 4..].trim_start().to_string();
-        let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_str).unwrap_or_default();
+        let frontmatter: SkillFrontmatter = serde_yml::from_str(yaml_str).unwrap_or_default();
         return (frontmatter, body);
     }
 

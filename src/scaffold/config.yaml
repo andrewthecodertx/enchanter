@@ -6,7 +6,7 @@
 # Local providers (Ollama, LM Studio) typically don't need an API key.
 
 model:
-  # default: gpt-4o                    # Model ID (override with ENCHANTER_MODEL env var)
+  # default: gpt-4.1-mini               # Model ID (override with ENCHANTER_MODEL env var)
   # base_url: https://api.openai.com/v1 # API base URL (override with ENCHANTER_BASE_URL)
   # api_key: your-key-here             # API key (override with ENCHANTER_API_KEY env var)
   #
