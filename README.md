@@ -106,18 +106,20 @@ enchanter --no-stream -p "Summarize this"
 
 ### Inside the REPL
 
-| Command    | What it does                |
-|------------|-----------------------------|
-| `/help`    | Show available commands     |
-| `/clear`   | Reset conversation history  |
-| `/soul`    | Show SOUL.md content        |
-| `/memory`  | Show loaded memory           |
-| `/skills`  | List discovered skills       |
-| `/tools`   | List all available tools     |
-| `/model`   | Switch model or provider     |
-| `/config`  | Show resolved configuration |
-| `/prompt`  | Show full system prompt     |
-| `/exit`    | Quit                        |
+| Command    | What it does                            |
+|------------|------------------------------------------|
+| `/help`    | Show available commands                  |
+| `/clear`   | Reset conversation history                |
+| `/soul`    | Show SOUL.md content                     |
+| `/memory`  | Show loaded memory                        |
+| `/skills`  | List discovered skills                    |
+| `/tools`   | List all available tools                  |
+| `/model`   | Switch model or named provider            |
+| `/retry`   | Re-send the last user message             |
+| `/undo`    | Remove last exchange from history         |
+| `/config`  | Show resolved configuration               |
+| `/prompt`  | Show full system prompt                   |
+| `/exit`    | Quit (also Ctrl+D for clean exit)        |
 
 ### Info subcommands
 
@@ -128,6 +130,17 @@ enchanter skills    # List discovered skills
 enchanter config    # Show resolved configuration
 enchanter prompt    # Show assembled system prompt
 ```
+
+### Session summaries
+
+When you exit the REPL with `/exit` or Ctrl+D, Enchanter generates a concise summary of your session and saves it to memory. Your next session automatically loads this context, so you can pick up where you left off.
+
+- Summaries are skipped for single-shot mode (`-p` flag)
+- Skipped if the session was too short (no real exchange)
+- Timeout of 10 seconds; falls back to a simple message count on failure
+- Disable with `summarize_on_exit: false` in the `agent` section of config.yaml
+
+> **Ctrl+C is a force-quit.** It bypasses the exit hook, so no session summary is saved. Use `/exit` or Ctrl+D for a clean exit.
 
 ## How it works
 
