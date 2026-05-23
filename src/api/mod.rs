@@ -90,6 +90,15 @@ pub struct ToolCallFunction {
     pub arguments: String,
 }
 
+/// Accumulator for streaming tool call deltas.
+#[derive(Debug, Default)]
+struct ToolCallAccum {
+    id: String,
+    call_type: String,
+    name: String,
+    arguments: String,
+}
+
 // ── Result type for chat calls ──────────────────────────────────
 
 #[derive(Debug)]
@@ -232,15 +241,19 @@ impl LlmClient {
         }
 
         let mut full_content = String::new();
-        let mut tool_calls_map: std::collections::BTreeMap<u64, (String, String, String)> =
+        let mut tool_calls_accum: std::collections::BTreeMap<u64, ToolCallAccum> =
             std::collections::BTreeMap::new();
         let mut stream = response.bytes_stream();
         use futures_util::StreamExt;
         use std::io::Write;
 
         let mut buffer = String::new();
+        let mut done = false;
 
         while let Some(chunk) = stream.next().await {
+            if done {
+                break;
+            }
             let chunk = chunk.context("reading stream chunk")?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -250,6 +263,7 @@ impl LlmClient {
 
                 if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
+                        done = true;
                         break;
                     }
 
@@ -265,23 +279,20 @@ impl LlmClient {
                             if let Some(tc_deltas) = &choice.delta.tool_calls {
                                 for tc_delta in tc_deltas {
                                     let idx = tc_delta.index.unwrap_or(0);
-                                    let entry = tool_calls_map.entry(idx).or_default();
+                                    let entry = tool_calls_accum.entry(idx).or_default();
 
                                     if let Some(id) = &tc_delta.id {
-                                        entry.0 = id.clone();
+                                        entry.id = id.clone();
                                     }
                                     if let Some(ct) = &tc_delta.call_type {
-                                        entry.1 = ct.clone();
+                                        entry.call_type = ct.clone();
                                     }
                                     if let Some(func) = &tc_delta.function {
                                         if let Some(name) = &func.name {
-                                            entry.2.clear();
-                                            entry.2.push_str("::");
-                                            entry.2.push_str(name);
-                                            entry.2.push_str("::");
+                                            entry.name = name.clone();
                                         }
                                         if let Some(args) = &func.arguments {
-                                            entry.2.push_str(args);
+                                            entry.arguments.push_str(args);
                                         }
                                     }
                                 }
@@ -293,26 +304,18 @@ impl LlmClient {
         }
 
         // Reconstruct tool calls from accumulated deltas
-        let tool_calls = if tool_calls_map.is_empty() {
+        let tool_calls = if tool_calls_accum.is_empty() {
             None
         } else {
             let mut calls = Vec::new();
-            for (id, call_type, raw) in tool_calls_map.values() {
-                // raw format: "::name::arguments_json"
-                let (name, arguments) = if let Some(rest) = raw.strip_prefix("::") {
-                    if let Some(pos) = rest.find("::") {
-                        (rest[..pos].to_string(), rest[pos + 2..].to_string())
-                    } else {
-                        (rest.to_string(), String::new())
-                    }
-                } else {
-                    (String::new(), String::new())
-                };
-
+            for accum in tool_calls_accum.values() {
                 calls.push(ToolCall {
-                    id: id.clone(),
-                    call_type: call_type.clone(),
-                    function: ToolCallFunction { name, arguments },
+                    id: accum.id.clone(),
+                    call_type: accum.call_type.clone(),
+                    function: ToolCallFunction {
+                        name: accum.name.clone(),
+                        arguments: accum.arguments.clone(),
+                    },
                 });
             }
             Some(calls)
