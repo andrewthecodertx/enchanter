@@ -12,6 +12,7 @@ use crate::memory::MemoryStore;
 use crate::prompt;
 use crate::skills::SkillsIndex;
 use crate::soul::Soul;
+use crate::summary;
 use crate::tools;
 
 #[derive(Parser, Debug)]
@@ -481,6 +482,48 @@ async fn run_repl(
             Err(e) => {
                 eprintln!("{} {}", "Input error:".red(), e);
                 break;
+            }
+        }
+    }
+
+    // Exit summary hook — only on clean exit, only in REPL mode, only if there was a real conversation
+    if config.summarize_on_exit() && summary::should_summarize(&messages) {
+        eprintln!("{}", "  Generating session summary...".dimmed());
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            summary::generate_session_summary(&client, &messages),
+        )
+        .await
+        {
+            Ok(Ok(summary_text)) if !summary_text.is_empty() => {
+                if let Err(e) = memory.add_memory(format!("session_summary\n{}", summary_text)) {
+                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
+                } else {
+                    eprintln!("{}", "  Session summary saved to memory.".dimmed());
+                }
+            }
+            Ok(Ok(_)) => {
+                // Empty summary (not enough conversation) — skip silently
+            }
+            Ok(Err(e)) => {
+                // LLM call failed — use fallback
+                let fallback = summary::fallback_summary(&messages);
+                if let Err(e2) = memory.add_memory(format!("session_summary\n{}", fallback)) {
+                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e2);
+                } else {
+                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
+                }
+                eprintln!("{} Summary generation failed: {}", "Warning:".yellow(), e);
+            }
+            Err(_) => {
+                // Timeout — use fallback
+                let fallback = summary::fallback_summary(&messages);
+                if let Err(e) = memory.add_memory(format!("session_summary\n{}", fallback)) {
+                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
+                } else {
+                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
+                }
+                eprintln!("{}", "  Summary timed out, using fallback.".dimmed());
             }
         }
     }

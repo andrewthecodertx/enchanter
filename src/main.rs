@@ -9,6 +9,7 @@ mod memory;
 mod prompt;
 mod skills;
 mod soul;
+mod summary;
 mod tools;
 
 use anyhow::Result;

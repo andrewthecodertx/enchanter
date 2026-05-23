@@ -55,6 +55,12 @@ pub struct AgentConfig {
     pub personalities: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default = "default_true")]
+    pub summarize_on_exit: Option<bool>,
+}
+
+fn default_true() -> Option<bool> {
+    Some(true)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +222,10 @@ impl Config {
 
     pub fn max_turns(&self) -> u32 {
         self.agent.max_turns.unwrap_or(60)
+    }
+
+    pub fn summarize_on_exit(&self) -> bool {
+        self.agent.summarize_on_exit.unwrap_or(true)
     }
 
     pub fn memory_config(&self) -> &MemoryConfig {
