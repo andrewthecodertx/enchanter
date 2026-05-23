@@ -155,7 +155,7 @@ impl Config {
     }
 
     pub fn max_turns(&self) -> u32 {
-        self.agent.max_turns.unwrap_or(30)
+        self.agent.max_turns.unwrap_or(60)
     }
 
     pub fn memory_config(&self) -> &MemoryConfig {
@@ -175,6 +175,6 @@ mod tests {
     fn default_config() {
         let c = Config::default();
         assert_eq!(c.model_id(), "gpt-4.1-mini");
-        assert_eq!(c.max_turns(), 30);
+        assert_eq!(c.max_turns(), 60);
     }
 }
