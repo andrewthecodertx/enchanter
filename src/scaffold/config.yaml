@@ -8,13 +8,30 @@
 model:
   # default: gpt-4.1-mini               # Model ID (override with ENCHANTER_MODEL env var)
   # base_url: https://api.openai.com/v1 # API base URL (override with ENCHANTER_BASE_URL)
-  # api_key: your-key-here             # API key (override with ENCHANTER_API_KEY env var)
+  # api_key: your-key-here             # API key (override with ENCHANTER_API_KEY)
   #
   # Examples:
-  #   OpenRouter:  base_url: https://openrouter.ai/api/v1
-  #   Groq:        base_url: https://api.groq.com/openai/v1
-  #   Ollama:      base_url: http://localhost:11434/v1   (no api_key needed)
-  #   LM Studio:   base_url: http://localhost:1234/v1    (no api_key needed)
+  #   OpenAI:      default: gpt-4.1-mini  api_key: sk-...
+  #   OpenRouter:  base_url: https://openrouter.ai/api/v1  api_key: sk-or-...
+  #   Ollama:      base_url: http://localhost:11434/v1  (no api_key needed)
+  #   LM Studio:   base_url: http://localhost:1234/v1   (no api_key needed)
+
+# Named providers — switch with /model <name> in the REPL.
+# Each provider can set model, base_url, and api_key.
+# Fields left blank inherit from the top-level model config or env vars.
+#
+# providers:
+#   ollama:
+#     model: qwen3
+#     base_url: http://localhost:11434/v1
+#   openrouter:
+#     model: anthropic/claude-sonnet-4
+#     base_url: https://openrouter.ai/api/v1
+#     api_key: sk-or-...
+#   groq:
+#     model: llama-3.3-70b-versatile
+#     base_url: https://api.groq.com/openai/v1
+#     api_key: ${GROQ_API_KEY}
 
 agent:
   # max_turns: 30                       # Max agent loop turns

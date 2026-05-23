@@ -11,9 +11,23 @@ pub struct Config {
     #[serde(default)]
     pub model: ModelConfig,
     #[serde(default)]
+    pub providers: std::collections::HashMap<String, ProviderConfig>,
+    #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+}
+
+/// A named provider preset: model + base_url + api_key.
+/// Any field left blank inherits from the top-level model config or env vars.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderConfig {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -119,6 +133,14 @@ pub enum McpTransportType {
     Http,
 }
 
+/// Resolved connection settings for a specific model+provider.
+#[derive(Debug, Clone)]
+pub struct ResolvedModel {
+    pub model: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let path = config_path();
@@ -154,6 +176,44 @@ impl Config {
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
     }
 
+    /// Resolve a named provider, falling back to defaults for unset fields.
+    /// Returns None if no provider exists with that name.
+    pub fn resolve_provider(&self, name: &str) -> Option<ResolvedModel> {
+        let provider = self.providers.get(name)?;
+        let model = provider.model.clone()
+            .or_else(|| self.model.default.clone())
+            .or_else(|| std::env::var("ENCHANTER_MODEL").ok())
+            .unwrap_or_else(|| "gpt-4.1-mini".to_string());
+        let base_url = provider.base_url.clone()
+            .or_else(|| self.model.base_url.clone())
+            .or_else(|| std::env::var("ENCHANTER_BASE_URL").ok())
+            .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+        let api_key = provider.api_key.clone()
+            .or_else(|| self.model.api_key.clone())
+            .or_else(|| std::env::var("ENCHANTER_API_KEY").ok())
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok());
+
+        // Expand ${VAR} in api_key and base_url
+        let api_key = api_key.map(|k| shellexpand::env(&k).unwrap_or_else(|_| k.clone().into()).to_string());
+        let base_url_clone = base_url.clone();
+        let base_url = shellexpand::env(&base_url).unwrap_or_else(|_| base_url_clone.into()).to_string();
+
+        Some(ResolvedModel { model, base_url, api_key })
+    }
+
+    /// Resolve the default connection settings (top-level model config + env).
+    pub fn resolve_default(&self) -> ResolvedModel {
+        let model = self.model_id();
+        let base_url = shellexpand::env(&self.base_url())
+            .unwrap_or_else(|_| self.base_url().into())
+            .to_string();
+        let api_key = self.api_key().map(|k| {
+            shellexpand::env(&k).unwrap_or_else(|_| k.clone().into()).to_string()
+        });
+        ResolvedModel { model, base_url, api_key }
+    }
+
     pub fn max_turns(&self) -> u32 {
         self.agent.max_turns.unwrap_or(60)
     }
@@ -176,5 +236,34 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.model_id(), "gpt-4.1-mini");
         assert_eq!(c.max_turns(), 60);
+    }
+
+    #[test]
+    fn resolve_provider_returns_none_for_unknown() {
+        let c = Config::default();
+        assert!(c.resolve_provider("nonexistent").is_none());
+    }
+
+    #[test]
+    fn resolve_provider_fills_defaults() {
+        let mut c = Config::default();
+        c.providers.insert("ollama".to_string(), ProviderConfig {
+            model: Some("qwen3".to_string()),
+            base_url: Some("http://localhost:11434/v1".to_string()),
+            api_key: None,
+        });
+        let resolved = c.resolve_provider("ollama").unwrap();
+        assert_eq!(resolved.model, "qwen3");
+        assert_eq!(resolved.base_url, "http://localhost:11434/v1");
+        // api_key falls back to top-level or env — should be None in default config
+        assert!(resolved.api_key.is_none());
+    }
+
+    #[test]
+    fn resolve_default_uses_top_level() {
+        let c = Config::default();
+        let resolved = c.resolve_default();
+        assert_eq!(resolved.model, "gpt-4.1-mini");
+        assert_eq!(resolved.base_url, "https://api.openai.com/v1");
     }
 }

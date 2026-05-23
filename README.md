@@ -53,6 +53,29 @@ Or point the whole data directory elsewhere:
 export ENCHANTER_HOME=/path/to/your/config
 ```
 
+### Named providers
+
+Define multiple providers in `config.yaml` and switch between them mid-session:
+
+```yaml
+providers:
+  ollama:
+    model: qwen3
+    base_url: http://localhost:11434/v1
+  openrouter:
+    model: anthropic/claude-sonnet-4
+    base_url: https://openrouter.ai/api/v1
+    api_key: sk-or-...
+```
+
+Then in the REPL:
+
+```
+/model ollama       # Switches model, base_url, and api_key
+/model openrouter   # Full provider switch
+/model gpt-4.1      # Bare model ID keeps current provider
+```
+
 ## Install
 
 From source:
@@ -90,6 +113,8 @@ enchanter --no-stream -p "Summarize this"
 | `/soul`    | Show SOUL.md content        |
 | `/memory`  | Show loaded memory           |
 | `/skills`  | List discovered skills       |
+| `/tools`   | List all available tools     |
+| `/model`   | Switch model or provider     |
 | `/config`  | Show resolved configuration |
 | `/prompt`  | Show full system prompt     |
 | `/exit`    | Quit                        |

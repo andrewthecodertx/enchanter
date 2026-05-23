@@ -6,11 +6,23 @@ use crate::skills::SkillsIndex;
 use crate::soul::Soul;
 use chrono::Local;
 
+/// Build system prompt using the default model from config.
 pub fn build_system_prompt(
     soul: &Soul,
     memory: &MemoryStore,
     skills: &SkillsIndex,
     config: &Config,
+) -> String {
+    build_system_prompt_with_model(soul, memory, skills, config, &config.model_id())
+}
+
+/// Build system prompt with an explicit model name (used after /model switching).
+pub fn build_system_prompt_with_model(
+    soul: &Soul,
+    memory: &MemoryStore,
+    skills: &SkillsIndex,
+    config: &Config,
+    model: &str,
 ) -> String {
     let mut sections = Vec::new();
 
@@ -18,7 +30,7 @@ pub fn build_system_prompt(
     sections.push(soul.content.clone());
 
     // CONTEXT
-    sections.push(build_environment_block(config));
+    sections.push(build_environment_block(config, model));
 
     if !skills.skills.is_empty() {
         sections.push(skills.format_index_for_prompt());
@@ -56,10 +68,10 @@ pub fn build_system_prompt(
     sections.join("\n\n")
 }
 
-fn build_environment_block(config: &Config) -> String {
+fn build_environment_block(_config: &Config, model: &str) -> String {
     let mut lines = Vec::new();
 
-    lines.push(format!("Model: {}", config.model_id()));
+    lines.push(format!("Model: {}", model));
 
     if let Ok(username) = std::env::var("USER") {
         lines.push(format!("User: {}", username));
@@ -128,5 +140,19 @@ mod tests {
         let prompt = build_system_prompt(&soul, &memory, &skills, &config);
         assert!(prompt.contains("project uses rust"));
         assert!(prompt.contains("Andrew"));
+    }
+
+    #[test]
+    fn prompt_with_model_override() {
+        let soul = Soul {
+            content: "I am Test.".to_string(),
+            source: PathBuf::from("<test>"),
+        };
+        let memory = MemoryStore::default();
+        let skills = SkillsIndex::default();
+        let config = Config::default();
+
+        let prompt = build_system_prompt_with_model(&soul, &memory, &skills, &config, "qwen3");
+        assert!(prompt.contains("Model: qwen3"));
     }
 }

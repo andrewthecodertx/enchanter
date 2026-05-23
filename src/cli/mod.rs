@@ -6,7 +6,7 @@ use colored::Colorize;
 use serde_json::Value;
 
 use crate::api::{LlmClient, Message};
-use crate::config::Config;
+use crate::config::{Config, ResolvedModel};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::prompt;
@@ -59,10 +59,24 @@ pub async fn run(args: Args) -> Result<()> {
         return handle_command(cmd, &config, &soul, &memory, &skills);
     }
 
-    // Create LLM client early for memory management
-    let model = args.model.clone().unwrap_or_else(|| config.model_id());
-    let api_key = config.api_key();
-    let client = LlmClient::new(&config.base_url(), api_key.as_deref(), &model);
+    // Resolve initial model: -m flag > config
+    let resolved = if let Some(model_flag) = &args.model {
+        // If -m matches a named provider, use that provider's settings
+        config.resolve_provider(model_flag)
+            .unwrap_or_else(|| {
+                // Otherwise, use the flag as a bare model name with default provider settings
+                let default = config.resolve_default();
+                ResolvedModel {
+                    model: model_flag.clone(),
+                    base_url: default.base_url,
+                    api_key: default.api_key,
+                }
+            })
+    } else {
+        config.resolve_default()
+    };
+
+    let client = LlmClient::new(&resolved.base_url, resolved.api_key.as_deref(), &resolved.model);
 
     // Cap + summarize memory if needed
     let mem_config = config.memory_config().clone();
@@ -80,12 +94,12 @@ pub async fn run(args: Args) -> Result<()> {
     let tools_payload = build_tools(&args, &mcp);
 
     if let Some(user_prompt) = &args.prompt {
-        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &model, &mut mcp, &tools_payload, user_prompt).await;
+        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &resolved, &mut mcp, &tools_payload, user_prompt).await;
         mcp.shutdown_all().await;
         return result;
     }
 
-    let result = run_repl(&args, &config, &soul, &mut memory, &skills, client, model, &mut mcp, &tools_payload).await;
+    let result = run_repl(&args, &config, &soul, &mut memory, &skills, client, resolved, &mut mcp, &tools_payload).await;
     mcp.shutdown_all().await;
     result
 }
@@ -164,6 +178,19 @@ fn handle_command(
                     "not set (not needed for local providers)".dimmed()
                 }
             );
+            if !config.providers.is_empty() {
+                println!("  Providers:");
+                let mut providers: Vec<_> = config.providers.keys().collect();
+                providers.sort();
+                for name in providers {
+                    if let Some(p) = config.providers.get(name) {
+                        let model = p.model.as_deref().unwrap_or("(default)");
+                        let base = p.base_url.as_deref().unwrap_or("(default)");
+                        let key_status = if p.api_key.is_some() { "✓" } else { "—" };
+                        println!("    {} → {} | {} | key: {}", name.bright_green(), model, base, key_status);
+                    }
+                }
+            }
         }
         Commands::Prompt => {
             let system_prompt = prompt::build_system_prompt(soul, memory, skills, config);
@@ -218,14 +245,14 @@ async fn run_single(
     memory: &mut MemoryStore,
     skills: &SkillsIndex,
     client: &LlmClient,
-    _model: &str,
+    resolved: &ResolvedModel,
     mcp: &mut McpManager,
     tools_payload: &Option<Value>,
     user_prompt: &str,
 ) -> Result<()> {
     let system_content = match &args.system {
         Some(s) => s.clone(),
-        None => prompt::build_system_prompt(soul, memory, skills, config),
+        None => prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model),
     };
 
     let mut messages = vec![
@@ -274,20 +301,20 @@ async fn run_repl(
     memory: &mut MemoryStore,
     skills: &SkillsIndex,
     mut client: LlmClient,
-    mut model: String,
+    mut resolved: ResolvedModel,
     mcp: &mut McpManager,
     tools_payload: &Option<Value>,
 ) -> Result<()> {
     let system_prompt = if let Some(ref sys_override) = args.system {
         sys_override.clone()
     } else {
-        prompt::build_system_prompt(soul, memory, skills, config)
+        prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model)
     };
 
     let mut messages = vec![Message::system(&system_prompt)];
     let max_turns = config.max_turns();
 
-    print_banner(&model, soul, skills, tools_payload, mcp);
+    print_banner(&resolved.model, &resolved.base_url, soul, skills, tools_payload, mcp);
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -304,12 +331,17 @@ async fn run_repl(
                     match line.as_str() {
                         "/exit" | "/quit" => break,
                         "/clear" => {
-                            messages = vec![Message::system(&system_prompt)];
+                            let fresh_prompt = if let Some(ref sys_override) = args.system {
+                                sys_override.clone()
+                            } else {
+                                prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model)
+                            };
+                            messages = vec![Message::system(&fresh_prompt)];
                             println!("{}", "Conversation cleared.".dimmed());
                             continue;
                         }
                         "/help" => {
-                            print_help();
+                            print_help(config);
                             continue;
                         }
                         "/soul" => {
@@ -325,12 +357,19 @@ async fn run_repl(
                             continue;
                         }
                         "/config" => {
-                            println!("Model: {} | Base: {} | Max: {}",
-                                model, config.base_url(), max_turns);
+                            let key_status = if resolved.api_key.is_some() {
+                                "configured ✓".green()
+                            } else {
+                                "not set (not needed for local providers)".dimmed()
+                            };
+                            println!("  Model:    {}", resolved.model.bright_white());
+                            println!("  Base URL: {}", resolved.base_url.bright_white());
+                            println!("  API key:  {}", key_status);
+                            println!("  Max:      {}", max_turns);
                             continue;
                         }
                         "/prompt" => {
-                            println!("{}", system_prompt);
+                            println!("{}", messages.first().map(|m| m.content.as_deref().unwrap_or("")).unwrap_or(""));
                             continue;
                         }
                         "/tools" => {
@@ -339,14 +378,49 @@ async fn run_repl(
                         }
                         _ => {
                             // Handle /model <name>, /retry, /undo
-                            if let Some(new_model) = line.strip_prefix("/model ") {
-                                let new_model = new_model.trim().to_string();
-                                if new_model.is_empty() {
-                                    println!("{} Usage: /model <model-name>", "Error:".red());
+                            if let Some(new_name) = line.strip_prefix("/model ") {
+                                let new_name = new_name.trim().to_string();
+                                if new_name.is_empty() {
+                                    println!("{} Usage: /model <name> (provider name from config or model ID)", "Error:".red());
                                 } else {
-                                    client = LlmClient::new(&config.base_url(), config.api_key().as_deref(), &new_model);
-                                    model = new_model.clone();
-                                    println!("{} Switched to model {}", "✓".green(), model.bright_white());
+                                    // Try named provider first, then fall back to bare model ID
+                                    let new_resolved = config.resolve_provider(&new_name)
+                                        .unwrap_or_else(|| {
+                                            let default = config.resolve_default();
+                                            ResolvedModel {
+                                                model: new_name.clone(),
+                                                base_url: default.base_url,
+                                                api_key: default.api_key,
+                                            }
+                                        });
+
+                                    let provider_label = if config.providers.contains_key(&new_name) {
+                                        format!("{} (provider: {})", new_resolved.model, new_name)
+                                    } else {
+                                        new_resolved.model.clone()
+                                    };
+
+                                    client = LlmClient::new(
+                                        &new_resolved.base_url,
+                                        new_resolved.api_key.as_deref(),
+                                        &new_resolved.model,
+                                    );
+                                    resolved = new_resolved.clone();
+
+                                    // Refresh system prompt to update the Model: line
+                                    if args.system.is_none() {
+                                        let refreshed = prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model);
+                                        if let Some(sys_msg) = messages.first_mut() {
+                                            sys_msg.content = Some(refreshed);
+                                        }
+                                    }
+
+                                    println!("{} Switched to {}", "✓".green(), provider_label.bright_white());
+                                    println!("  {} {} | API key: {}",
+                                        "↳".dimmed(),
+                                        resolved.base_url.bright_white(),
+                                        if resolved.api_key.is_some() { "set" } else { "none" }.dimmed()
+                                    );
                                 }
                                 continue;
                             }
@@ -470,7 +544,7 @@ fn print_tool_call(name: &str, arguments: &str) {
     );
 }
 
-fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>, mcp: &McpManager) {
+fn print_banner(model: &str, base_url: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>, mcp: &McpManager) {
     let name = soul
         .content
         .lines()
@@ -497,10 +571,19 @@ fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &
         "⟡".bright_magenta(),
         name.bright_cyan().bold()
     );
+    // Shorten common base URLs for display
+    let short_url = base_url
+        .trim_end_matches('/')
+        .replace("https://api.openai.com/v1", "openai")
+        .replace("http://localhost:11434/v1", "ollama")
+        .replace("http://127.0.0.1:11434/v1", "ollama")
+        .replace("https://openrouter.ai/api/v1", "openrouter")
+        .replace("https://api.groq.com/openai/v1", "groq");
     println!(
-        "  {} model={} | tools={}{} | skills={} | /help for commands\n",
+        "  {} model={} | provider={} | tools={}{} | skills={} | /help for commands\n",
         "  ↳".dimmed(),
         model.bright_white(),
+        short_url.bright_white(),
         tool_count.to_string().bright_white(),
         mcp_display.dimmed(),
         skills.skills.len().to_string().bright_white()
@@ -550,7 +633,7 @@ fn print_tools(mcp: &McpManager) {
     println!("\n  {} total tools", total);
 }
 
-fn print_help() {
+fn print_help(config: &Config) {
     let commands = vec![
         ("/help", "Show this help"),
         ("/clear", "Clear conversation history"),
@@ -558,7 +641,7 @@ fn print_help() {
         ("/memory", "Show loaded memory"),
         ("/skills", "List discovered skills"),
         ("/tools", "List all available tools (built-in + MCP)"),
-        ("/model <n>", "Switch model mid-session"),
+        ("/model <name>", "Switch model or provider (see config.yaml providers)"),
         ("/retry", "Re-send the last user message"),
         ("/undo", "Remove last exchange from history"),
         ("/config", "Show resolved configuration"),
@@ -569,6 +652,18 @@ fn print_help() {
     println!("{}", "═══ COMMANDS ═══".bright_cyan());
     for (cmd, desc) in commands {
         println!("  {:<12} {}", cmd.bright_green(), desc.dimmed());
+    }
+
+    if !config.providers.is_empty() {
+        println!("\n  {}Providers in config:", "↳".dimmed());
+        let mut providers: Vec<_> = config.providers.keys().collect();
+        providers.sort();
+        for name in providers {
+            if let Some(p) = config.providers.get(name) {
+                let model = p.model.as_deref().unwrap_or("(default)");
+                println!("    {} → {}", name.bright_green(), model);
+            }
+        }
     }
 }
 
