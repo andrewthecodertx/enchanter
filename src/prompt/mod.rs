@@ -120,6 +120,7 @@ mod tests {
         let memory = MemoryStore {
             memory_entries: vec!["project uses rust".to_string()],
             user_entries: vec!["User is Andrew".to_string()],
+            summary: None,
         };
         let skills = SkillsIndex::default();
         let config = Config::default();

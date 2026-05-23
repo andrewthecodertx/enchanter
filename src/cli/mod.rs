@@ -51,18 +51,29 @@ pub async fn run(args: Args) -> Result<()> {
 
     let config = Config::load()?;
     let soul = Soul::load_or_fallback()?;
-    let memory = MemoryStore::load()?;
+    let mut memory = MemoryStore::load()?;
     let skills = SkillsIndex::discover()?;
 
     if let Some(cmd) = &args.command {
         return handle_command(cmd, &config, &soul, &memory, &skills);
     }
 
-    if let Some(user_prompt) = &args.prompt {
-        return run_single(&args, &config, &soul, &memory, &skills, user_prompt).await;
+    // Create LLM client early for memory management
+    let model = args.model.clone().unwrap_or_else(|| config.model_id());
+    let api_key = config.api_key();
+    let client = LlmClient::new(&config.base_url(), api_key.as_deref(), &model);
+
+    // Cap + summarize memory if needed
+    let mem_config = config.memory_config().clone();
+    if let Err(e) = memory.manage(&client, &mem_config).await {
+        eprintln!("{} memory management: {}", "Warning:".yellow(), e);
     }
 
-    run_repl(&args, &config, &soul, &memory, &skills).await
+    if let Some(user_prompt) = &args.prompt {
+        return run_single(&args, &config, &soul, &memory, &skills, &client, &model, user_prompt).await;
+    }
+
+    run_repl(&args, &config, &soul, &memory, &skills, &client, &model).await
 }
 
 fn handle_command(
@@ -157,16 +168,17 @@ fn build_tools(args: &Args) -> Option<Value> {
     Some(serde_json::Value::Array(tools::tools_json()))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_single(
     args: &Args,
     config: &Config,
     soul: &Soul,
     memory: &MemoryStore,
     skills: &SkillsIndex,
+    client: &LlmClient,
+    _model: &str,
     user_prompt: &str,
 ) -> Result<()> {
-    let model = args.model.clone().unwrap_or_else(|| config.model_id());
-    let api_key = config.api_key();
     let tools_payload = build_tools(args);
 
     let system_content = match &args.system {
@@ -179,7 +191,6 @@ async fn run_single(
         Message::user(user_prompt),
     ];
 
-    let client = LlmClient::new(&config.base_url(), api_key.as_deref(), &model);
     let max_turns = config.max_turns();
 
     for _ in 0..max_turns {
@@ -222,9 +233,9 @@ async fn run_repl(
     soul: &Soul,
     memory: &MemoryStore,
     skills: &SkillsIndex,
+    client: &LlmClient,
+    model: &str,
 ) -> Result<()> {
-    let model = args.model.clone().unwrap_or_else(|| config.model_id());
-    let api_key = config.api_key();
     let tools_payload = build_tools(args);
 
     let system_prompt = if let Some(ref sys_override) = args.system {
@@ -234,10 +245,9 @@ async fn run_repl(
     };
 
     let mut messages = vec![Message::system(&system_prompt)];
-    let client = LlmClient::new(&config.base_url(), api_key.as_deref(), &model);
     let max_turns = config.max_turns();
 
-    print_banner(&model, soul, skills, &tools_payload);
+    print_banner(model, soul, skills, &tools_payload);
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -291,7 +301,7 @@ async fn run_repl(
 
                 messages.push(Message::user(&line));
 
-                match run_agent_loop(&client, &mut messages, &tools_payload, max_turns, args.no_stream).await {
+                match run_agent_loop(client, &mut messages, &tools_payload, max_turns, args.no_stream).await {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);

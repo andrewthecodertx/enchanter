@@ -37,6 +37,33 @@ pub struct AgentConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub personalities: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default = "default_max_entries")]
+    pub max_entries: u32,
+    #[serde(default = "default_summarize_threshold")]
+    pub summarize_threshold: u32,
+}
+
+fn default_max_entries() -> u32 {
+    50
+}
+
+fn default_summarize_threshold() -> u32 {
+    40
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: default_max_entries(),
+            summarize_threshold: default_summarize_threshold(),
+        }
+    }
 }
 
 impl Config {
@@ -76,6 +103,10 @@ impl Config {
 
     pub fn max_turns(&self) -> u32 {
         self.agent.max_turns.unwrap_or(30)
+    }
+
+    pub fn memory_config(&self) -> &MemoryConfig {
+        &self.agent.memory
     }
 }
 

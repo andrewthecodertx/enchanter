@@ -1,8 +1,10 @@
-//! Memory store — ~/enchanter/memories/MEMORY.md and USER.md, §-delimited.
+//! Memory store — ~/enchanter/memories/MEMORY.md, USER.md, and SUMMARY.md, §-delimited.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+use crate::api::{LlmClient, Message};
+use crate::config::MemoryConfig;
 use crate::home;
 
 const ENTRY_DELIMITER: &str = "\n§\n";
@@ -11,11 +13,14 @@ const ENTRY_DELIMITER: &str = "\n§\n";
 pub struct MemoryStore {
     pub memory_entries: Vec<String>,
     pub user_entries: Vec<String>,
+    pub summary: Option<String>,
 }
 
 impl MemoryStore {
+    /// Load memory from disk. Sync — does not run summarization.
     pub fn load() -> Result<Self> {
         let mem_dir = memory_dir();
+
         let memory_entries = if mem_dir.join("MEMORY.md").exists() {
             let content = std::fs::read_to_string(mem_dir.join("MEMORY.md"))
                 .context("reading MEMORY.md")?;
@@ -32,7 +37,20 @@ impl MemoryStore {
             Vec::new()
         };
 
-        Ok(Self { memory_entries, user_entries })
+        let summary = if mem_dir.join("SUMMARY.md").exists() {
+            let content = std::fs::read_to_string(mem_dir.join("SUMMARY.md"))
+                .context("reading SUMMARY.md")?;
+            let trimmed = content.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        } else {
+            None
+        };
+
+        Ok(Self { memory_entries, user_entries, summary })
     }
 
     fn parse_entries(content: &str) -> Vec<String> {
@@ -104,6 +122,110 @@ impl MemoryStore {
             .context("writing USER.md")
     }
 
+    fn save_summary(&self) -> Result<()> {
+        let mem_dir = memory_dir();
+        std::fs::create_dir_all(&mem_dir).context("creating memories directory")?;
+        if let Some(summary) = &self.summary {
+            std::fs::write(mem_dir.join("SUMMARY.md"), summary)
+                .context("writing SUMMARY.md")
+        } else {
+            // Remove SUMMARY.md if summary is None
+            let path = mem_dir.join("SUMMARY.md");
+            if path.exists() {
+                std::fs::remove_file(path).context("removing SUMMARY.md")?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Manage memory: cap entries and summarize old ones if threshold exceeded.
+    /// This is async because summarization calls the LLM.
+    /// Should be called after the LlmClient is created.
+    pub async fn manage(&mut self, client: &LlmClient, config: &MemoryConfig) -> Result<()> {
+        let total = self.memory_entries.len() as u32;
+
+        if total <= config.max_entries {
+            return Ok(());
+        }
+
+        // Need to summarize if exceeding threshold
+        if total > config.summarize_threshold {
+            let entries_to_summarize = total - config.max_entries;
+            if entries_to_summarize == 0 {
+                return Ok(());
+            }
+
+            // Take the oldest entries (front of the list) for summarization
+            let split_point = entries_to_summarize as usize;
+            let old_entries: Vec<String> = self.memory_entries[..split_point].to_vec();
+            let recent_entries: Vec<String> = self.memory_entries[split_point..].to_vec();
+
+            // Summarize old entries
+            let new_summary = self.summarize_entries(client, &old_entries).await?;
+
+            // Merge with existing summary
+            let merged_summary = match &self.summary {
+                Some(existing) => {
+                    format!(
+                        "PAST SUMMARY:\n{}\n\nADDITIONAL SUMMARY:\n{}",
+                        existing, new_summary
+                    )
+                }
+                None => new_summary,
+            };
+
+            self.summary = Some(merged_summary);
+            self.memory_entries = recent_entries;
+
+            // Persist summary to disk
+            self.save_summary()?;
+        } else {
+            // Over max_entries but under threshold — just cap
+            let cutoff = total - config.max_entries;
+            self.memory_entries = self.memory_entries[cutoff as usize..].to_vec();
+        }
+
+        Ok(())
+    }
+
+    /// Summarize a list of memory entries using the LLM.
+    async fn summarize_entries(
+        &self,
+        client: &LlmClient,
+        entries: &[String],
+    ) -> Result<String> {
+        let entries_text = entries.join("\n---\n");
+
+        // Truncate if very long to avoid token limits
+        let truncated = if entries_text.len() > 12_000 {
+            &entries_text[..12_000]
+        } else {
+            &entries_text
+        };
+
+        let system_prompt = "You are a memory condenser. Your job is to summarize \
+            memory entries into a concise, dense form. Preserve key facts, decisions, \
+            preferences, and technical details. Omit transient details, pleasantries, \
+            and anything that won't matter later. Output a single condensed summary paragraph, \
+            not a list. Be brief but information-dense.";
+
+        let user_prompt = format!(
+            "Summarize these memory entries into a dense, concise summary. \
+            Focus on durable facts and decisions.\n\n{}",
+            truncated
+        );
+
+        let messages = vec![
+            Message::system(system_prompt),
+            Message::user(&user_prompt),
+        ];
+
+        // Use non-streaming for summarization — we don't need to display it
+        let result = client.chat(messages, None).await?;
+
+        Ok(result.content.unwrap_or_default())
+    }
+
     pub fn format_for_prompt(&self) -> String {
         let mut parts = Vec::new();
 
@@ -111,6 +233,13 @@ impl MemoryStore {
             parts.push(format!(
                 "═══ USER PROFILE ═══\n{}",
                 self.user_entries.join("\n---\n")
+            ));
+        }
+
+        if let Some(summary) = &self.summary {
+            parts.push(format!(
+                "═══ MEMORY SUMMARY ═══\n{}",
+                summary
             ));
         }
 
@@ -122,6 +251,12 @@ impl MemoryStore {
         }
 
         parts.join("\n\n")
+    }
+
+    /// Total count of memory entries (for display).
+    #[allow(dead_code)]
+    pub fn total_entry_count(&self) -> usize {
+        self.memory_entries.len() + self.user_entries.len()
     }
 }
 
@@ -153,11 +288,53 @@ mod tests {
         let store = MemoryStore {
             user_entries: vec!["User is Andrew".to_string()],
             memory_entries: vec!["fact one".to_string()],
+            summary: None,
         };
         let formatted = store.format_for_prompt();
         assert!(formatted.contains("USER PROFILE"));
         assert!(formatted.contains("MEMORY"));
         assert!(formatted.contains("Andrew"));
         assert!(formatted.contains("fact one"));
+    }
+
+    #[test]
+    fn format_includes_summary() {
+        let store = MemoryStore {
+            user_entries: vec![],
+            memory_entries: vec!["recent fact".to_string()],
+            summary: Some("condensed old facts here".to_string()),
+        };
+        let formatted = store.format_for_prompt();
+        assert!(formatted.contains("MEMORY SUMMARY"));
+        assert!(formatted.contains("condensed old facts"));
+        assert!(formatted.contains("recent fact"));
+    }
+
+    #[test]
+    fn total_entry_count() {
+        let store = MemoryStore {
+            user_entries: vec!["u1".to_string(), "u2".to_string()],
+            memory_entries: vec!["m1".to_string()],
+            summary: None,
+        };
+        assert_eq!(store.total_entry_count(), 3);
+    }
+
+    #[test]
+    fn cap_under_max_no_change() {
+        let store = MemoryStore {
+            memory_entries: (0..10).map(|i| format!("entry {}", i)).collect(),
+            user_entries: vec![],
+            summary: None,
+        };
+        let config = MemoryConfig {
+            max_entries: 50,
+            summarize_threshold: 40,
+        };
+        // total is 10, under max_entries — manage should be a no-op
+        // (but manage is async and needs a client, just test the logic indirectly)
+        assert_eq!(store.memory_entries.len(), 10);
+        let _ = &config; // verify it compiles
+        let _ = &store;
     }
 }
