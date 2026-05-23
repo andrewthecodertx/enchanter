@@ -7,11 +7,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+use tokio::time::timeout;
 
 use crate::config::McpServerConfig;
+
+/// Maximum time to wait for an MCP server to respond during initialization.
+const INIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum time to wait for a tools/call response.
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// JSON-RPC request.
 #[derive(Serialize)]
@@ -28,7 +36,6 @@ struct JsonRpcRequest {
 struct JsonRpcResponse {
     #[allow(dead_code)]
     jsonrpc: String,
-    #[allow(dead_code)]
     id: Option<u64>,
     result: Option<Value>,
     error: Option<JsonRpcError>,
@@ -112,10 +119,7 @@ impl McpManager {
             .envs(&env_vars)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Set stderr to inherit so server logs are visible
-        cmd.stderr(Stdio::inherit());
+            .stderr(Stdio::inherit());
 
         let mut child = cmd.spawn()
             .with_context(|| format!("spawning MCP server '{}': {}", name, config.command))?;
@@ -134,7 +138,7 @@ impl McpManager {
             tools: Vec::new(),
         };
 
-        // Send initialize request
+        // Send initialize request (with timeout)
         let init_params = json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -144,8 +148,11 @@ impl McpManager {
             }
         });
 
-        let init_result = server.send_request("initialize", Some(init_params)).await?;
-        
+        let init_result = timeout(INIT_TIMEOUT, server.send_request("initialize", Some(init_params)))
+            .await
+            .with_context(|| format!("MCP server '{}' timed out during initialization ({}s)", name, INIT_TIMEOUT.as_secs()))?
+            .with_context(|| format!("MCP server '{}' error during initialization", name))?;
+
         // Check protocol version compatibility
         if let Some(proto_ver) = init_result.get("protocolVersion").and_then(|v| v.as_str())
             && proto_ver != "2024-11-05"
@@ -161,8 +168,12 @@ impl McpManager {
         // Send initialized notification (no response expected)
         server.send_notification("notifications/initialized", None).await?;
 
-        // Discover tools
-        let tools_result = server.send_request("tools/list", None).await?;
+        // Discover tools (with timeout)
+        let tools_result = timeout(INIT_TIMEOUT, server.send_request("tools/list", None))
+            .await
+            .with_context(|| format!("MCP server '{}' timed out during tools/list ({}s)", name, INIT_TIMEOUT.as_secs()))?
+            .with_context(|| format!("MCP server '{}' error during tools/list", name))?;
+
         let tools = match serde_json::from_value::<ToolsListResponse>(tools_result) {
             Ok(resp) => resp.tools,
             Err(e) => {
@@ -213,35 +224,46 @@ impl McpManager {
 
     /// Dispatch a tool call to the right MCP server.
     /// Returns None if the tool name doesn't match any MCP server.
-    pub async fn dispatch(&self, full_name: &str, arguments: &Value) -> Option<Result<String>> {
+    pub async fn dispatch(&mut self, full_name: &str, arguments: &Value) -> Option<Result<String>> {
         // Parse "server_name:tool_name"
         let (server_name, tool_name) = full_name.split_once(':')?;
 
-        let server = self.servers.iter().find(|s| s.name == server_name)?;
+        let server = self.servers.iter_mut().find(|s| s.name == server_name)?;
+
+        // Check if server process is still alive before dispatching
+        if let Some(exit_status) = server.child.try_wait().ok().flatten() {
+            return Some(Err(anyhow::anyhow!(
+                "MCP server '{}' has exited with status {}",
+                server_name,
+                exit_status
+            )));
+        }
 
         let params = json!({
             "name": tool_name,
             "arguments": arguments
         });
 
-        match server.send_request("tools/call", Some(params)).await {
-            Ok(result) => {
-                // MCP tools/call returns { content: [{ type: "text", text: "..." }] }
+        match timeout(DISPATCH_TIMEOUT, server.send_request("tools/call", Some(params))).await {
+            Ok(Ok(result)) => {
                 let text = extract_tool_result_text(&result);
                 Some(Ok(text))
             }
-            Err(e) => Some(Err(e)),
+            Ok(Err(e)) => Some(Err(e)),
+            Err(_) => Some(Err(anyhow::anyhow!(
+                "MCP server '{}' timed out responding to '{}' ({}s)",
+                server_name,
+                tool_name,
+                DISPATCH_TIMEOUT.as_secs()
+            ))),
         }
     }
 
     /// Gracefully shut down all servers.
     pub async fn shutdown_all(&mut self) {
         for server in &mut self.servers {
-            // Send shutdown request, ignore errors
-            let _ = server.send_request("shutdown", None).await;
-            // Send exit notification
-            let _ = server.send_notification("notifications/cancelled", None).await;
-            // Kill the process
+            // Best-effort: kill the process. Per the MCP spec, the client
+            // closes the connection by terminating the process.
             let _ = server.child.kill().await;
         }
     }
@@ -258,9 +280,15 @@ impl McpManager {
 }
 
 /// Extract text content from an MCP tools/call response.
+/// Handles the standard format and respects the isError field.
 fn extract_tool_result_text(result: &Value) -> String {
     // Standard format: { content: [{ type: "text", text: "..." }] }
     if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+        // Check for isError flag on the result
+        let is_error = result.get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let texts: Vec<String> = content
             .iter()
             .filter_map(|item| {
@@ -273,7 +301,11 @@ fn extract_tool_result_text(result: &Value) -> String {
             .collect();
 
         if !texts.is_empty() {
-            return texts.join("\n");
+            let text = texts.join("\n");
+            if is_error {
+                return format!("MCP tool error: {}", text);
+            }
+            return text;
         }
     }
 
@@ -291,7 +323,8 @@ struct ToolsListResponse {
 }
 
 impl McpServer {
-    /// Send a JSON-RPC request and wait for the response.
+    /// Send a JSON-RPC request and wait for the matching response.
+    /// Skips any notifications or out-of-order messages.
     async fn send_request(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let id = {
             let mut next_id = self.next_id.lock().await;
@@ -321,29 +354,67 @@ impl McpServer {
                 .context("flushing MCP server stdin")?;
         }
 
-        // Read response from stdout
-        let response_line = {
-            let mut stdout = self.stdout.lock().await;
+        // Read lines from stdout until we get a response matching our request ID.
+        // MCP servers may emit notifications between requests, which we skip.
+        let mut stdout = self.stdout.lock().await;
+        loop {
             let mut line = String::new();
-            stdout.read_line(&mut line)
+            let bytes_read = stdout.read_line(&mut line)
                 .await
                 .context("reading from MCP server stdout")?;
-            line
-        };
 
-        let response: JsonRpcResponse = serde_json::from_str(response_line.trim())
-            .with_context(|| format!("parsing JSON-RPC response from MCP server '{}'", self.name))?;
+            if bytes_read == 0 {
+                // EOF — server closed its stdout, likely crashed
+                anyhow::bail!(
+                    "MCP server '{}' closed connection (process likely exited)",
+                    self.name
+                );
+            }
 
-        if let Some(error) = response.error {
-            anyhow::bail!(
-                "MCP server '{}' error: [{}] {}",
-                self.name,
-                error.code,
-                error.message
-            );
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let response: JsonRpcResponse = match serde_json::from_str(trimmed) {
+                Ok(r) => r,
+                Err(_) => {
+                    // Not valid JSON-RPC — skip it (could be a server log line)
+                    eprintln!(
+                        "{} MCP server '{}' sent non-JSON line, skipping: {}",
+                        "Warning:".yellow(),
+                        self.name,
+                        trimmed.chars().take(100).collect::<String>()
+                    );
+                    continue;
+                }
+            };
+
+            // Check if this is a notification (no id) or a response to a different request
+            match response.id {
+                Some(resp_id) if resp_id == id => {
+                    // This is our response
+                    if let Some(error) = response.error {
+                        anyhow::bail!(
+                            "MCP server '{}' error: [{}] {}",
+                            self.name,
+                            error.code,
+                            error.message
+                        );
+                    }
+                    return Ok(response.result.unwrap_or(Value::Null));
+                }
+                Some(_) => {
+                    // Response for a different request — shouldn't happen in
+                    // sequential mode, but skip it
+                    continue;
+                }
+                None => {
+                    // Notification — skip it
+                    continue;
+                }
+            }
         }
-
-        Ok(response.result.unwrap_or(Value::Null))
     }
 
     /// Send a JSON-RPC notification (no id, no response expected).
@@ -402,6 +473,28 @@ mod tests {
             ]
         });
         assert_eq!(extract_tool_result_text(&result), "line 1\nline 2");
+    }
+
+    #[test]
+    fn extract_text_from_error_response() {
+        let result = json!({
+            "isError": true,
+            "content": [
+                { "type": "text", "text": "file not found" }
+            ]
+        });
+        assert_eq!(extract_tool_result_text(&result), "MCP tool error: file not found");
+    }
+
+    #[test]
+    fn extract_text_from_non_error_with_is_error_false() {
+        let result = json!({
+            "isError": false,
+            "content": [
+                { "type": "text", "text": "all good" }
+            ]
+        });
+        assert_eq!(extract_tool_result_text(&result), "all good");
     }
 
     #[test]

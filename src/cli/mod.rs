@@ -80,12 +80,12 @@ pub async fn run(args: Args) -> Result<()> {
     let tools_payload = build_tools(&args, &mcp);
 
     if let Some(user_prompt) = &args.prompt {
-        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &model, &mcp, &tools_payload, user_prompt).await;
+        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &model, &mut mcp, &tools_payload, user_prompt).await;
         mcp.shutdown_all().await;
         return result;
     }
 
-    let result = run_repl(&args, &config, &soul, &mut memory, &skills, client, model, &mcp, &tools_payload).await;
+    let result = run_repl(&args, &config, &soul, &mut memory, &skills, client, model, &mut mcp, &tools_payload).await;
     mcp.shutdown_all().await;
     result
 }
@@ -189,7 +189,7 @@ async fn dispatch_tool(
     name: &str,
     args: &Value,
     memory: &mut MemoryStore,
-    mcp: &McpManager,
+    mcp: &mut McpManager,
 ) -> String {
     // Check if it's a built-in tool
     let built_in_names = ["exec_command", "read_file", "write_file", "edit_file",
@@ -219,7 +219,7 @@ async fn run_single(
     skills: &SkillsIndex,
     client: &LlmClient,
     _model: &str,
-    mcp: &McpManager,
+    mcp: &mut McpManager,
     tools_payload: &Option<Value>,
     user_prompt: &str,
 ) -> Result<()> {
@@ -263,8 +263,7 @@ async fn run_single(
         }
     }
 
-    eprintln!("{}", "Max agent turns reached.".yellow());
-    Ok(())
+    anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -276,7 +275,7 @@ async fn run_repl(
     skills: &SkillsIndex,
     mut client: LlmClient,
     mut model: String,
-    mcp: &McpManager,
+    mcp: &mut McpManager,
     tools_payload: &Option<Value>,
 ) -> Result<()> {
     let system_prompt = if let Some(ref sys_override) = args.system {
@@ -423,7 +422,7 @@ async fn run_agent_loop(
     max_turns: u32,
     no_stream: bool,
     memory: &mut MemoryStore,
-    mcp: &McpManager,
+    mcp: &mut McpManager,
 ) -> Result<()> {
     for _ in 0..max_turns {
         let result = if no_stream {
@@ -453,8 +452,7 @@ async fn run_agent_loop(
         }
     }
 
-    eprintln!("{}", "Max agent turns reached.".yellow());
-    Ok(())
+    anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
 }
 
 /// Print a visual indicator for a tool call.
