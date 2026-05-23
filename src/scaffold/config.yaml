@@ -1,0 +1,20 @@
+# Enchanter configuration.
+# See https://agentskills.io for the full specification.
+#
+# Enchanter works with any OpenAI-compatible provider:
+#   OpenAI, OpenRouter, Groq, Ollama, LM Studio, and more.
+# Local providers (Ollama, LM Studio) typically don't need an API key.
+
+model:
+  # default: gpt-4o                    # Model ID (override with ENCHANTER_MODEL env var)
+  # base_url: https://api.openai.com/v1 # API base URL (override with ENCHANTER_BASE_URL)
+  # api_key: your-key-here             # API key (override with ENCHANTER_API_KEY env var)
+  #
+  # Examples:
+  #   OpenRouter:  base_url: https://openrouter.ai/api/v1
+  #   Groq:        base_url: https://api.groq.com/openai/v1
+  #   Ollama:      base_url: http://localhost:11434/v1   (no api_key needed)
+  #   LM Studio:   base_url: http://localhost:1234/v1    (no api_key needed)
+
+agent:
+  # max_turns: 30                       # Max agent loop turns
