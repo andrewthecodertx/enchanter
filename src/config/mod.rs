@@ -76,13 +76,47 @@ pub struct McpConfig {
     pub servers: std::collections::HashMap<String, McpServerConfig>,
 }
 
+/// MCP server configuration. Supports two transports:
+/// - stdio: local process via `command` + `args` + `env`
+/// - http: remote server via `url` + optional `headers`
+///
+/// Exactly one of `command` or `url` must be set.
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
-    pub command: String,
+    /// Command to run for stdio transport (e.g. "npx", "uvx").
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Arguments for the stdio command.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Environment variables for the stdio command.
+    /// Values support ${VAR} expansion from the current environment.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// URL for HTTP transport (e.g. "https://mcp.example.com/api").
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Additional HTTP headers for HTTP transport.
+    /// Values support ${VAR} expansion from the current environment.
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+impl McpServerConfig {
+    /// Which transport type this config specifies.
+    pub fn transport_type(&self) -> McpTransportType {
+        if self.url.is_some() {
+            McpTransportType::Http
+        } else {
+            McpTransportType::Stdio
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpTransportType {
+    Stdio,
+    Http,
 }
 
 impl Config {

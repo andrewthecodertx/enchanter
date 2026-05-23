@@ -23,17 +23,22 @@ agent:
   #   summarize_threshold: 40           # Summarize old entries when count exceeds this
 
 # MCP servers — extend Enchanter with external tool servers
-# Tools from MCP servers are names-spaced as server_name:tool_name
+# Tools from MCP servers are namespaced as server_name:tool_name
+# Supports stdio (local process) and http (remote server) transports
 # mcp:
 #   servers:
-#     filesystem:
+#     filesystem:                                         # stdio transport
 #       command: npx
 #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/Projects"]
 #     fetch:
 #       command: uvx
 #       args: ["mcp-server-fetch"]
-#     images:
+#     images:                                             # stdio with env vars
 #       command: npx
 #       args: ["-y", "@fal-serverless/mcp-server"]
 #       env:
 #         FAL_KEY: ${FAL_KEY}
+#     my-remote:                                          # http transport
+#       url: https://mcp.example.com/api
+#       headers:
+#         Authorization: "Bearer ${MY_TOKEN}"

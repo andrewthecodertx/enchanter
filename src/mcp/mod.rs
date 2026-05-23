@@ -1,7 +1,7 @@
-//! MCP (Model Context Protocol) client — stdio transport.
+//! MCP (Model Context Protocol) client — stdio and HTTP transports.
 //!
 //! Manages MCP server processes: spawn, discover tools, dispatch calls, shutdown.
-//! Supports automatic restart of crashed servers with a configurable retry limit.
+//! Supports automatic restart of crashed stdio servers with a configurable retry limit.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,7 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum time to wait for a tools/call response.
 const DISPATCH_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Maximum restart attempts per server before giving up.
+/// Maximum restart attempts per stdio server before giving up.
 const MAX_RESTARTS: u32 = 3;
 
 /// Cooldown after a failed restart before trying again.
@@ -65,107 +65,398 @@ pub struct McpToolDef {
     pub input_schema: Value,
 }
 
-/// A running MCP server with its stdin/stdout handles and restart tracking.
+// ── Transport layer ─────────────────────────────────────────────
+
+/// The underlying transport for an MCP server connection.
+enum McpTransport {
+    Stdio {
+        child: Box<Child>,
+        stdin: Mutex<tokio::process::ChildStdin>,
+        stdout: Mutex<BufReader<tokio::process::ChildStdout>>,
+    },
+    Http {
+        client: reqwest::Client,
+        url: String,
+        session_id: Mutex<Option<String>>,
+        headers: Vec<(String, String)>,
+    },
+}
+
+/// A connected MCP server with its transport and metadata.
 struct McpServer {
     name: String,
-    child: Child,
-    stdin: Mutex<tokio::process::ChildStdin>,
-    stdout: Mutex<BufReader<tokio::process::ChildStdout>>,
+    transport: McpTransport,
     next_id: Mutex<u64>,
     tools: Vec<McpToolDef>,
     config: McpServerConfig,
     restart_count: u32,
 }
 
-/// Manager for all MCP server connections.
-pub struct McpManager {
-    servers: Vec<McpServer>,
+// ── Connection lifecycle ────────────────────────────────────────
+
+/// Connect to an MCP server using the appropriate transport.
+async fn connect_transport(name: &str, config: &McpServerConfig) -> Result<McpTransport> {
+    match config.transport_type() {
+        crate::config::McpTransportType::Stdio => connect_stdio(name, config).await,
+        crate::config::McpTransportType::Http => connect_http(name, config).await,
+    }
 }
 
-impl McpManager {
-    /// Create an empty manager.
-    pub fn new() -> Self {
-        Self {
-            servers: Vec::new(),
-        }
+/// Spawn a stdio process and return handles.
+async fn connect_stdio(name: &str, config: &McpServerConfig) -> Result<McpTransport> {
+    let command = config.command.as_ref()
+        .context(format!("MCP server '{}' requires 'command' for stdio transport", name))?;
+
+    let mut env_vars = HashMap::new();
+    for (key, val) in &config.env {
+        let expanded = if val.starts_with("${") && val.ends_with('}') {
+            let var_name = &val[2..val.len() - 1];
+            std::env::var(var_name).unwrap_or(val.clone())
+        } else {
+            val.clone()
+        };
+        env_vars.insert(key.clone(), expanded);
     }
 
-    /// Spawn all configured MCP servers and discover their tools.
-    /// Servers that fail to start are skipped with a warning.
-    pub async fn start_all(&mut self, configs: &HashMap<String, McpServerConfig>) {
-        for (name, config) in configs {
-            match self.start_server(name, config).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!(
-                        "{} MCP server '{}' failed to start: {}",
-                        "Warning:".yellow(),
-                        name,
-                        e
-                    );
-                }
+    let mut cmd = Command::new(command);
+    cmd.args(&config.args)
+        .envs(&env_vars)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+
+    let mut child = cmd.spawn()
+        .with_context(|| format!("spawning MCP server '{}': {}", name, command))?;
+
+    let stdin = child.stdin.take()
+        .context("MCP server stdin not available")?;
+    let stdout = child.stdout.take()
+        .context("MCP server stdout not available")?;
+
+    Ok(McpTransport::Stdio {
+        child: Box::new(child),
+        stdin: Mutex::new(stdin),
+        stdout: Mutex::new(BufReader::new(stdout)),
+    })
+}
+
+/// Prepare an HTTP transport (no persistent connection, just a reqwest client).
+async fn connect_http(name: &str, config: &McpServerConfig) -> Result<McpTransport> {
+    let url = config.url.as_ref()
+        .context(format!("MCP server '{}' requires 'url' for HTTP transport", name))?;
+
+    let headers = config.headers.iter()
+        .map(|(k, v)| {
+            if v.starts_with("${") && v.ends_with('}') {
+                let var_name = &v[2..v.len() - 1];
+                (k.clone(), std::env::var(var_name).unwrap_or(v.clone()))
+            } else {
+                (k.clone(), v.clone())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(McpTransport::Http {
+        client: reqwest::Client::new(),
+        url: url.clone(),
+        session_id: Mutex::new(None),
+        headers,
+    })
+}
+
+// ── JSON-RPC send ──────────────────────────────────────────────
+
+impl McpTransport {
+    /// Send a JSON-RPC request and wait for the matching response.
+    async fn send_request(&self, server_name: &str, request: &JsonRpcRequest) -> Result<Value> {
+        match self {
+            McpTransport::Stdio { stdin, stdout, .. } => {
+                send_stdio(server_name, stdin, stdout, request).await
+            }
+            McpTransport::Http { client, url, session_id, headers } => {
+                send_http(client, url, session_id, headers, request).await
             }
         }
     }
 
-    /// Start a single MCP server, call initialize + tools/list.
-    async fn start_server(&mut self, name: &str, config: &McpServerConfig) -> Result<()> {
-        let server = self.spawn_and_handshake(name, config).await?;
-        let tool_count = server.tools.len();
-        self.servers.push(server);
+    /// Send a JSON-RPC notification (no id, no response expected).
+    async fn send_notification(&self, server_name: &str, method: &str, params: Option<Value>) -> Result<()> {
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params.unwrap_or(Value::Object(serde_json::Map::new()))
+        });
 
-        eprintln!(
-            "  {} MCP: {} ({} tools)",
-            "⟡".bright_magenta(),
-            name.bright_white(),
-            tool_count.to_string().bright_white()
-        );
+        match self {
+            McpTransport::Stdio { stdin, .. } => {
+                let json = serde_json::to_string(&notification)
+                    .context("serializing JSON-RPC notification")?;
+                let mut stdin = stdin.lock().await;
+                stdin.write_all(json.as_bytes()).await
+                    .context("writing notification to MCP server stdin")?;
+                stdin.write_all(b"\n").await
+                    .context("writing newline to MCP server stdin")?;
+                stdin.flush().await
+                    .context("flushing MCP server stdin")?;
+                Ok(())
+            }
+            McpTransport::Http { client, url, session_id, headers, .. } => {
+                // HTTP notifications are fire-and-forget POSTs
+                let mut req = client.post(url.as_str())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json, text/event-stream");
 
-        Ok(())
+                // Attach session header if we have one
+                let sid = session_id.lock().await;
+                if let Some(ref sid_val) = *sid {
+                    req = req.header("Mcp-Session-Id", sid_val.as_str());
+                }
+
+                for (k, v) in headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+
+                let resp = req.json(&notification).send().await
+                    .with_context(|| format!("sending notification to HTTP MCP server '{}'", server_name))?;
+                // Notifications may return 202 or 200, both are fine
+                let _ = resp;
+                Ok(())
+            }
+        }
     }
 
-    /// Spawn a process, perform initialize handshake, discover tools.
-    /// Returns a fully initialized McpServer ready to accept dispatches.
-    async fn spawn_and_handshake(&self, name: &str, config: &McpServerConfig) -> Result<McpServer> {
-        // Expand env vars in the env map
-        let mut env_vars = HashMap::new();
-        for (key, val) in &config.env {
-            let expanded = if val.starts_with("${") && val.ends_with('}') {
-                let var_name = &val[2..val.len() - 1];
-                std::env::var(var_name).unwrap_or(val.clone())
-            } else {
-                val.clone()
-            };
-            env_vars.insert(key.clone(), expanded);
+    /// Check if this transport's process is still alive (stdio only).
+    /// Returns Some(exit_status) if dead, None if alive or HTTP transport.
+    fn check_liveness(&mut self) -> Option<std::process::ExitStatus> {
+        match self {
+            McpTransport::Stdio { child, .. } => child.try_wait().ok().flatten(),
+            McpTransport::Http { .. } => None,
+        }
+    }
+
+    /// Force-terminate the transport. Kills the process for stdio, no-op for HTTP.
+    async fn terminate(&mut self) {
+        match self {
+            McpTransport::Stdio { child, .. } => {
+                let _ = child.kill().await;
+            }
+            McpTransport::Http { .. } => {}
+        }
+    }
+}
+
+/// Send a JSON-RPC request via stdio and read the matching response.
+async fn send_stdio(
+    server_name: &str,
+    stdin: &Mutex<tokio::process::ChildStdin>,
+    stdout: &Mutex<BufReader<tokio::process::ChildStdout>>,
+    request: &JsonRpcRequest,
+) -> Result<Value> {
+    let request_json = serde_json::to_string(request)
+        .context("serializing JSON-RPC request")?;
+
+    // Write to stdin
+    {
+        let mut stdin = stdin.lock().await;
+        stdin.write_all(request_json.as_bytes()).await
+            .context("writing to MCP server stdin")?;
+        stdin.write_all(b"\n").await
+            .context("writing newline to MCP server stdin")?;
+        stdin.flush().await
+            .context("flushing MCP server stdin")?;
+    }
+
+    // Read lines from stdout until we get a response matching our request ID.
+    let mut stdout = stdout.lock().await;
+    loop {
+        let mut line = String::new();
+        let bytes_read = stdout.read_line(&mut line)
+            .await
+            .context("reading from MCP server stdout")?;
+
+        if bytes_read == 0 {
+            anyhow::bail!(
+                "MCP server '{}' closed connection (process likely exited)",
+                server_name
+            );
         }
 
-        let mut cmd = Command::new(&config.command);
-        cmd.args(&config.args)
-            .envs(&env_vars)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
 
-        let mut child = cmd.spawn()
-            .with_context(|| format!("spawning MCP server '{}': {}", name, config.command))?;
+        let response: JsonRpcResponse = match serde_json::from_str(trimmed) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "{} MCP server '{}' sent non-JSON line, skipping",
+                    "Warning:".yellow(),
+                    server_name
+                );
+                continue;
+            }
+        };
 
-        let stdin = child.stdin.take()
-            .context("MCP server stdin not available")?;
-        let stdout = child.stdout.take()
-            .context("MCP server stdout not available")?;
+        match response.id {
+            Some(resp_id) if resp_id == request.id => {
+                if let Some(error) = response.error {
+                    anyhow::bail!(
+                        "MCP server '{}' error: [{}] {}",
+                        server_name,
+                        error.code,
+                        error.message
+                    );
+                }
+                return Ok(response.result.unwrap_or(Value::Null));
+            }
+            Some(_) => continue,
+            None => continue, // notification — skip
+        }
+    }
+}
 
-        let mut server = McpServer {
+/// Send a JSON-RPC request via HTTP and parse the response.
+/// Handles both direct JSON responses and SSE-streamed responses.
+async fn send_http(
+    client: &reqwest::Client,
+    url: &str,
+    session_id: &Mutex<Option<String>>,
+    headers: &[(String, String)],
+    request: &JsonRpcRequest,
+) -> Result<Value> {
+    let mut req = client.post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream");
+
+    // Attach session header if we have one
+    {
+        let sid = session_id.lock().await;
+        if let Some(ref sid_value) = *sid {
+            req = req.header("Mcp-Session-Id", sid_value.as_str());
+        }
+    }
+
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+
+    let resp = timeout(DISPATCH_TIMEOUT, req.json(request).send())
+        .await
+        .with_context(|| format!("HTTP MCP request timed out ({}s)", DISPATCH_TIMEOUT.as_secs()))?
+        .with_context(|| format!("sending request to HTTP MCP server at {}", url))?;
+
+    let content_type = resp.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Store/update session ID from response
+    if let Some(sid) = resp.headers().get("mcp-session-id")
+        && let Ok(sid_str) = sid.to_str()
+    {
+        let mut sid_guard = session_id.lock().await;
+        *sid_guard = Some(sid_str.to_string());
+    }
+
+    if content_type.contains("text/event-stream") {
+        // SSE response: parse event stream for our response
+        parse_sse_http_response(resp, request.id).await
+    } else {
+        // Direct JSON response
+        let body = resp.text().await
+            .context("reading HTTP MCP response body")?;
+
+        let response: JsonRpcResponse = serde_json::from_str(body.trim())
+            .with_context(|| format!("parsing HTTP MCP response: {}", body.chars().take(200).collect::<String>()))?;
+
+        match response.id {
+            Some(resp_id) if resp_id == request.id => {
+                if let Some(error) = response.error {
+                    anyhow::bail!(
+                        "HTTP MCP server error: [{}] {}",
+                        error.code,
+                        error.message
+                    );
+                }
+                Ok(response.result.unwrap_or(Value::Null))
+            }
+            Some(_) => {
+                anyhow::bail!("HTTP MCP server returned response with unexpected id");
+            }
+            None => {
+                anyhow::bail!("HTTP MCP server returned a notification instead of a response");
+            }
+        }
+    }
+}
+
+/// Parse an SSE response from an HTTP MCP server, looking for the response
+/// matching our request ID.
+async fn parse_sse_http_response(
+    resp: reqwest::Response,
+    expected_id: u64,
+) -> Result<Value> {
+    use futures_util::StreamExt;
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = String::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("reading SSE stream chunk")?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(newline_pos) = buffer.find('\n') {
+            let line = buffer[..newline_pos].trim().to_string();
+            buffer = buffer[newline_pos + 1..].to_string();
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    anyhow::bail!("HTTP MCP SSE stream ended without matching response");
+                }
+
+                if let Ok(response) = serde_json::from_str::<JsonRpcResponse>(data) {
+                    match response.id {
+                        Some(resp_id) if resp_id == expected_id => {
+                            if let Some(error) = response.error {
+                                anyhow::bail!(
+                                    "HTTP MCP server error: [{}] {}",
+                                    error.code,
+                                    error.message
+                                );
+                            }
+                            return Ok(response.result.unwrap_or(Value::Null));
+                        }
+                        Some(_) => continue, // different request id, skip
+                        None => continue,     // notification, skip
+                    }
+                }
+                // Non-JSON data line — skip
+            }
+        }
+    }
+
+    anyhow::bail!("HTTP MCP SSE stream ended without matching response (id={})", expected_id);
+}
+
+// ── McpServer handshake ────────────────────────────────────────
+
+impl McpServer {
+    /// Create a new server by connecting and performing the full handshake.
+    async fn new(name: &str, config: &McpServerConfig) -> Result<Self> {
+        let transport = connect_transport(name, config).await?;
+
+        let mut server = Self {
             name: name.to_string(),
-            child,
-            stdin: Mutex::new(stdin),
-            stdout: Mutex::new(BufReader::new(stdout)),
+            transport,
             next_id: Mutex::new(1),
             tools: Vec::new(),
             config: config.clone(),
             restart_count: 0,
         };
 
-        // Send initialize request (with timeout)
+        // Initialize handshake
         let init_params = json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
@@ -192,10 +483,10 @@ impl McpManager {
             );
         }
 
-        // Send initialized notification (no response expected)
-        server.send_notification("notifications/initialized", None).await?;
+        // Send initialized notification
+        server.transport.send_notification(name, "notifications/initialized", None).await?;
 
-        // Discover tools (with timeout)
+        // Discover tools
         let tools_result = timeout(INIT_TIMEOUT, server.send_request("tools/list", None))
             .await
             .with_context(|| format!("MCP server '{}' timed out during tools/list ({}s)", name, INIT_TIMEOUT.as_secs()))?
@@ -216,6 +507,79 @@ impl McpManager {
 
         server.tools = tools;
         Ok(server)
+    }
+
+    /// Send a JSON-RPC request via this server's transport.
+    async fn send_request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        let id = {
+            let mut next_id = self.next_id.lock().await;
+            let id = *next_id;
+            *next_id += 1;
+            id
+        };
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method: method.to_string(),
+            params,
+        };
+
+        self.transport.send_request(&self.name, &request).await
+    }
+
+    /// Send a JSON-RPC notification via this server's transport.
+    #[allow(dead_code)]
+    async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<()> {
+        self.transport.send_notification(&self.name, method, params).await
+    }
+}
+
+// ── McpManager ─────────────────────────────────────────────────
+
+/// Manager for all MCP server connections.
+pub struct McpManager {
+    servers: Vec<McpServer>,
+}
+
+impl McpManager {
+    /// Create an empty manager.
+    pub fn new() -> Self {
+        Self {
+            servers: Vec::new(),
+        }
+    }
+
+    /// Spawn all configured MCP servers and discover their tools.
+    /// Servers that fail to start are skipped with a warning.
+    pub async fn start_all(&mut self, configs: &HashMap<String, McpServerConfig>) {
+        for (name, config) in configs {
+            match McpServer::new(name, config).await {
+                Ok(server) => {
+                    let tool_count = server.tools.len();
+                    let transport_label = match config.transport_type() {
+                        crate::config::McpTransportType::Stdio => "stdio",
+                        crate::config::McpTransportType::Http => "http",
+                    };
+                    eprintln!(
+                        "  {} MCP: {} ({}, {} tools)",
+                        "⟡".bright_magenta(),
+                        name.bright_white(),
+                        transport_label,
+                        tool_count.to_string().bright_white()
+                    );
+                    self.servers.push(server);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{} MCP server '{}' failed to start: {}",
+                        "Warning:".yellow(),
+                        name,
+                        e
+                    );
+                }
+            }
+        }
     }
 
     /// Get all MCP tool definitions merged with built-in format.
@@ -239,16 +603,14 @@ impl McpManager {
     }
 
     /// Dispatch a tool call to the right MCP server.
+    /// For stdio servers, auto-restarts on crash (up to MAX_RESTARTS).
     /// Returns None if the tool name doesn't match any MCP server.
-    /// If the server has crashed, attempts to restart it (up to MAX_RESTARTS).
     pub async fn dispatch(&mut self, full_name: &str, arguments: &Value) -> Option<Result<String>> {
-        // Parse "server_name:tool_name"
         let (server_name, tool_name) = full_name.split_once(':')?;
-
         let server_idx = self.servers.iter().position(|s| s.name == server_name)?;
 
-        // Check if server process has exited — if so, attempt restart
-        let has_exited = self.servers[server_idx].child.try_wait().ok().flatten().is_some();
+        // Check if stdio server has exited — attempt restart
+        let has_exited = self.servers[server_idx].transport.check_liveness().is_some();
         if has_exited {
             match self.restart_server(server_idx).await {
                 Ok(()) => {
@@ -292,7 +654,6 @@ impl McpManager {
     }
 
     /// Attempt to restart a crashed MCP server.
-    /// Resets the ID counter and re-performs the full handshake.
     async fn restart_server(&mut self, idx: usize) -> Result<()> {
         let server = &mut self.servers[idx];
 
@@ -306,23 +667,20 @@ impl McpManager {
 
         server.restart_count += 1;
 
-        // Kill old process if still lingering
-        let _ = server.child.kill().await;
+        // Terminate old transport
+        server.transport.terminate().await;
 
-        // Brief cooldown before restarting
+        // Brief cooldown before restarting (stdio only makes sense, but harmless for http)
         tokio::time::sleep(RESTART_COOLDOWN).await;
 
         let name = server.name.clone();
         let config = server.config.clone();
 
-        // Re-spawn and handshake
-        let new_server = self.spawn_and_handshake(&name, &config).await?;
+        // Re-connect and handshake
+        let new_server = McpServer::new(&name, &config).await?;
 
-        // Replace the old server entry
         self.servers[idx] = new_server;
-
-        // Reset restart count on successful restart so transient crashes
-        // don't accumulate across the whole session
+        // Reset restart count on successful restart
         self.servers[idx].restart_count = 0;
 
         Ok(())
@@ -331,9 +689,7 @@ impl McpManager {
     /// Gracefully shut down all servers.
     pub async fn shutdown_all(&mut self) {
         for server in &mut self.servers {
-            // Best-effort: kill the process. Per the MCP spec, the client
-            // closes the connection by terminating the process.
-            let _ = server.child.kill().await;
+            server.transport.terminate().await;
         }
     }
 
@@ -353,7 +709,6 @@ impl McpManager {
 fn extract_tool_result_text(result: &Value) -> String {
     // Standard format: { content: [{ type: "text", text: "..." }] }
     if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-        // Check for isError flag on the result
         let is_error = result.get("isError")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -391,127 +746,14 @@ struct ToolsListResponse {
     tools: Vec<McpToolDef>,
 }
 
-impl McpServer {
-    /// Send a JSON-RPC request and wait for the matching response.
-    /// Skips any notifications or out-of-order messages.
-    async fn send_request(&self, method: &str, params: Option<Value>) -> Result<Value> {
-        let id = {
-            let mut next_id = self.next_id.lock().await;
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
-
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id,
-            method: method.to_string(),
-            params,
-        };
-
-        let request_json = serde_json::to_string(&request)
-            .context("serializing JSON-RPC request")?;
-
-        // Write to stdin
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(request_json.as_bytes()).await
-                .context("writing to MCP server stdin")?;
-            stdin.write_all(b"\n").await
-                .context("writing newline to MCP server stdin")?;
-            stdin.flush().await
-                .context("flushing MCP server stdin")?;
-        }
-
-        // Read lines from stdout until we get a response matching our request ID.
-        // MCP servers may emit notifications between requests, which we skip.
-        let mut stdout = self.stdout.lock().await;
-        loop {
-            let mut line = String::new();
-            let bytes_read = stdout.read_line(&mut line)
-                .await
-                .context("reading from MCP server stdout")?;
-
-            if bytes_read == 0 {
-                // EOF — server closed its stdout, likely crashed
-                anyhow::bail!(
-                    "MCP server '{}' closed connection (process likely exited)",
-                    self.name
-                );
-            }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let response: JsonRpcResponse = match serde_json::from_str(trimmed) {
-                Ok(r) => r,
-                Err(_) => {
-                    // Not valid JSON-RPC — skip it (could be a server log line)
-                    eprintln!(
-                        "{} MCP server '{}' sent non-JSON line, skipping",
-                        "Warning:".yellow(),
-                        self.name
-                    );
-                    continue;
-                }
-            };
-
-            // Check if this is a notification (no id) or a response to a different request
-            match response.id {
-                Some(resp_id) if resp_id == id => {
-                    // This is our response
-                    if let Some(error) = response.error {
-                        anyhow::bail!(
-                            "MCP server '{}' error: [{}] {}",
-                            self.name,
-                            error.code,
-                            error.message
-                        );
-                    }
-                    return Ok(response.result.unwrap_or(Value::Null));
-                }
-                Some(_) => {
-                    // Response for a different request — shouldn't happen in
-                    // sequential mode, but skip it
-                    continue;
-                }
-                None => {
-                    // Notification — skip it
-                    continue;
-                }
-            }
-        }
-    }
-
-    /// Send a JSON-RPC notification (no id, no response expected).
-    async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<()> {
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params.unwrap_or(Value::Object(serde_json::Map::new()))
-        });
-
-        let notification_json = serde_json::to_string(&notification)
-            .context("serializing JSON-RPC notification")?;
-
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(notification_json.as_bytes()).await
-            .context("writing notification to MCP server stdin")?;
-        stdin.write_all(b"\n").await
-            .context("writing newline to MCP server stdin")?;
-        stdin.flush().await
-            .context("flushing MCP server stdin")?;
-
-        Ok(())
-    }
-}
-
-impl Drop for McpServer {
+impl Drop for McpTransport {
     fn drop(&mut self) {
-        // Best-effort kill on drop
-        let _ = self.child.start_kill();
+        match self {
+            McpTransport::Stdio { child, .. } => {
+                let _ = child.start_kill();
+            }
+            McpTransport::Http { .. } => {}
+        }
     }
 }
 
@@ -578,5 +820,42 @@ mod tests {
         assert_eq!(mgr.total_tool_count(), 0);
         assert!(mgr.server_names().is_empty());
         assert!(mgr.all_tools_json().is_empty());
+    }
+
+    #[test]
+    fn config_transport_type_stdio() {
+        let config = McpServerConfig {
+            command: Some("npx".to_string()),
+            args: vec![],
+            env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
+        };
+        assert_eq!(config.transport_type(), crate::config::McpTransportType::Stdio);
+    }
+
+    #[test]
+    fn config_transport_type_http() {
+        let config = McpServerConfig {
+            command: None,
+            args: vec![],
+            env: HashMap::new(),
+            url: Some("https://mcp.example.com/api".to_string()),
+            headers: HashMap::new(),
+        };
+        assert_eq!(config.transport_type(), crate::config::McpTransportType::Http);
+    }
+
+    #[test]
+    fn config_transport_type_url_takes_precedence() {
+        // If both are set, url wins
+        let config = McpServerConfig {
+            command: Some("npx".to_string()),
+            args: vec![],
+            env: HashMap::new(),
+            url: Some("https://mcp.example.com/api".to_string()),
+            headers: HashMap::new(),
+        };
+        assert_eq!(config.transport_type(), crate::config::McpTransportType::Http);
     }
 }

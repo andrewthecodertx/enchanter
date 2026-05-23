@@ -116,6 +116,34 @@ Memory uses the same `§`-delimited format as Hermes Agent. Skills use the
 same SKILL.md format (agentskills.io). If you're coming from Hermes, just
 copy or symlink your data — the structure matches.
 
+## MCP servers
+
+Enchanter supports two MCP transport types:
+
+- **stdio** — local processes spawned by Enchanter
+- **HTTP** — remote servers reached via POST requests
+
+Configure them in `~/.enchanter/config.yaml`:
+
+```yaml
+mcp:
+  servers:
+    filesystem:                                   # stdio transport
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user"]
+    fetch:                                        # stdio transport
+      command: uvx
+      args: ["mcp-server-fetch"]
+    my-remote:                                    # http transport
+      url: https://mcp.example.com/api
+      headers:
+        Authorization: "Bearer ${MY_TOKEN}"
+```
+
+Stdio servers are auto-restarted on crash (up to 3 attempts). HTTP servers
+use the Streamable HTTP transport — they handle both direct JSON responses
+and SSE-streamed responses, with `Mcp-Session-Id` tracking.
+
 ## License
 
 MIT — Copyright 2026 Andrew S Erwin
