@@ -27,7 +27,17 @@ pub fn build_system_prompt(
     sections.push(String::from(
         "You have tools available. Use them to take action — do not describe what you \
          would do without actually doing it. Every response should either (a) contain tool \
-         calls that make progress, or (b) deliver a final result to the user."
+         calls that make progress, or (b) deliver a final result to the user. \
+         Prefer tool calls over describing steps.\n\
+         \n\
+         Canonical tools:\n\
+         - exec_command: run a shell command (builds, tests, git, package managers)\n\
+         - read_file: read a file's contents (with line offset/limit)\n\
+         - write_file: write content to a file (creates parents, overwrites)\n\
+         - list_directory: list directory entries (names, types, sizes)\n\
+         \n\
+         MCP tools may also be available for specialty operations (image generation, \
+         GitHub, etc.). Use them when relevant."
     ));
 
     // VOLATILE

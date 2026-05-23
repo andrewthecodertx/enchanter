@@ -3,13 +3,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use serde_json::Value;
 
+use crate::api::{LlmClient, Message};
 use crate::config::Config;
 use crate::memory::MemoryStore;
 use crate::prompt;
 use crate::skills::SkillsIndex;
 use crate::soul::Soul;
-use crate::api::{LlmClient, Message};
+use crate::tools;
 
 #[derive(Parser, Debug)]
 #[command(name = "enchanter", version, about = "A focused AI agent harness")]
@@ -25,6 +27,9 @@ pub struct Args {
 
     #[arg(long)]
     pub no_stream: bool,
+
+    #[arg(long)]
+    pub no_tools: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -144,6 +149,14 @@ fn handle_command(
     Ok(())
 }
 
+/// Build the tools JSON payload (or None if --no-tools).
+fn build_tools(args: &Args) -> Option<Value> {
+    if args.no_tools {
+        return None;
+    }
+    Some(serde_json::Value::Array(tools::tools_json()))
+}
+
 async fn run_single(
     args: &Args,
     config: &Config,
@@ -154,26 +167,52 @@ async fn run_single(
 ) -> Result<()> {
     let model = args.model.clone().unwrap_or_else(|| config.model_id());
     let api_key = config.api_key();
+    let tools_payload = build_tools(args);
 
     let system_content = match &args.system {
         Some(s) => s.clone(),
         None => prompt::build_system_prompt(soul, memory, skills, config),
     };
 
-    let messages = vec![
+    let mut messages = vec![
         Message::system(&system_content),
         Message::user(user_prompt),
     ];
 
     let client = LlmClient::new(&config.base_url(), api_key.as_deref(), &model);
+    let max_turns = config.max_turns();
 
-    if args.no_stream {
-        let response = client.chat(messages).await?;
-        println!("{}", response);
-    } else {
-        client.chat_stream(messages).await?;
+    for _ in 0..max_turns {
+        let result = if args.no_stream {
+            client.chat(messages.clone(), tools_payload.clone()).await?
+        } else {
+            client.chat_stream(messages.clone(), tools_payload.clone()).await?
+        };
+
+        if result.has_tool_calls() {
+            let tool_calls = result.tool_calls.unwrap();
+            // Push assistant message with tool calls
+            messages.push(Message::assistant_with_tools(tool_calls.clone(), result.content));
+
+            // Execute each tool call and push results
+            for tc in &tool_calls {
+                print_tool_call(&tc.function.name, &tc.function.arguments);
+                let args: Value = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(Value::Null);
+                let output = tools::dispatch(&tc.function.name, &args);
+                messages.push(Message::tool_result(&tc.id, output));
+            }
+        } else {
+            if let Some(content) = &result.content
+                && args.no_stream
+            {
+                println!("{}", content);
+            }
+            return Ok(());
+        }
     }
 
+    eprintln!("{}", "Max agent turns reached.".yellow());
     Ok(())
 }
 
@@ -186,6 +225,7 @@ async fn run_repl(
 ) -> Result<()> {
     let model = args.model.clone().unwrap_or_else(|| config.model_id());
     let api_key = config.api_key();
+    let tools_payload = build_tools(args);
 
     let system_prompt = if let Some(ref sys_override) = args.system {
         sys_override.clone()
@@ -195,11 +235,11 @@ async fn run_repl(
 
     let mut messages = vec![Message::system(&system_prompt)];
     let client = LlmClient::new(&config.base_url(), api_key.as_deref(), &model);
+    let max_turns = config.max_turns();
 
-    print_banner(&model, soul, skills);
+    print_banner(&model, soul, skills, &tools_payload);
 
     let mut rl = rustyline::DefaultEditor::new()?;
-    let max_turns = config.max_turns();
 
     loop {
         let readline = rl.readline("⟩ ");
@@ -251,10 +291,8 @@ async fn run_repl(
 
                 messages.push(Message::user(&line));
 
-                match client.chat_stream(messages.clone()).await {
-                    Ok(response) => {
-                        messages.push(Message::assistant(&response));
-                    }
+                match run_agent_loop(&client, &mut messages, &tools_payload, max_turns, args.no_stream).await {
+                    Ok(()) => {}
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
                         messages.pop();
@@ -278,7 +316,65 @@ async fn run_repl(
     Ok(())
 }
 
-fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex) {
+/// Run the agent loop: call model, handle tool_calls, repeat until done or max_turns.
+async fn run_agent_loop(
+    client: &LlmClient,
+    messages: &mut Vec<Message>,
+    tools_payload: &Option<Value>,
+    max_turns: u32,
+    no_stream: bool,
+) -> Result<()> {
+    for _ in 0..max_turns {
+        let result = if no_stream {
+            client.chat(messages.clone(), tools_payload.clone()).await?
+        } else {
+            client.chat_stream(messages.clone(), tools_payload.clone()).await?
+        };
+
+        if result.has_tool_calls() {
+            let tool_calls = result.tool_calls.unwrap();
+            // Push assistant message with tool calls
+            messages.push(Message::assistant_with_tools(tool_calls.clone(), result.content));
+
+            // Execute each tool call and push results
+            for tc in &tool_calls {
+                print_tool_call(&tc.function.name, &tc.function.arguments);
+                let args: Value = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(Value::Null);
+                let output = tools::dispatch(&tc.function.name, &args);
+                messages.push(Message::tool_result(&tc.id, output));
+            }
+        } else {
+            // Model responded with plain text — we're done
+            if let Some(content) = &result.content
+                && no_stream
+            {
+                println!("{}", content);
+            }
+            return Ok(());
+        }
+    }
+
+    eprintln!("{}", "Max agent turns reached.".yellow());
+    Ok(())
+}
+
+/// Print a visual indicator for a tool call.
+fn print_tool_call(name: &str, arguments: &str) {
+    let display_args = if arguments.len() > 80 {
+        format!("{}...", &arguments[..80])
+    } else {
+        arguments.to_string()
+    };
+    println!(
+        "  {} {}{}",
+        "⚙".bright_yellow(),
+        name.bright_white(),
+        format!("({})", display_args).dimmed()
+    );
+}
+
+fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>) {
     let name = soul
         .content
         .lines()
@@ -287,15 +383,22 @@ fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex) {
         .trim_start_matches('#')
         .trim();
 
+    let tool_count = tools_payload
+        .as_ref()
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+
     println!(
         "\n  {} {}",
         "⟡".bright_magenta(),
         name.bright_cyan().bold()
     );
     println!(
-        "  {} model={} | skills={} | /help for commands\n",
+        "  {} model={} | tools={} | skills={} | /help for commands\n",
         "  ↳".dimmed(),
         model.bright_white(),
+        tool_count.to_string().bright_white(),
         skills.skills.len().to_string().bright_white()
     );
 }

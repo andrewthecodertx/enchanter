@@ -19,6 +19,7 @@ colored = "3"
 chrono = "0.4"
 anyhow = "1"
 dirs = "6"
+shellexpand = "3"
 
 [profile.release]
 opt-level = 3

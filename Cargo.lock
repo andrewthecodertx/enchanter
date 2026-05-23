@@ -275,6 +275,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yml",
+ "shellexpand",
  "tokio",
  "walkdir",
 ]
@@ -1360,6 +1361,15 @@ dependencies = [
  "ryu",
  "serde",
  "version_check",
+]
+
+[[package]]
+name = "shellexpand"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]

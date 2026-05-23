@@ -8,6 +8,7 @@ mod memory;
 mod prompt;
 mod skills;
 mod soul;
+mod tools;
 
 use anyhow::Result;
 use clap::Parser;
