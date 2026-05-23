@@ -85,7 +85,7 @@ pub async fn run(args: Args) -> Result<()> {
         return result;
     }
 
-    let result = run_repl(&args, &config, &soul, &mut memory, &skills, &client, &model, &mcp, &tools_payload).await;
+    let result = run_repl(&args, &config, &soul, &mut memory, &skills, client, model, &mcp, &tools_payload).await;
     mcp.shutdown_all().await;
     result
 }
@@ -274,8 +274,8 @@ async fn run_repl(
     soul: &Soul,
     memory: &mut MemoryStore,
     skills: &SkillsIndex,
-    client: &LlmClient,
-    model: &str,
+    mut client: LlmClient,
+    mut model: String,
     mcp: &McpManager,
     tools_payload: &Option<Value>,
 ) -> Result<()> {
@@ -288,7 +288,7 @@ async fn run_repl(
     let mut messages = vec![Message::system(&system_prompt)];
     let max_turns = config.max_turns();
 
-    print_banner(model, soul, skills, tools_payload, mcp);
+    print_banner(&model, soul, skills, tools_payload, mcp);
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -338,7 +338,51 @@ async fn run_repl(
                             print_tools(mcp);
                             continue;
                         }
-                        _ => {}
+                        _ => {
+                            // Handle /model <name>, /retry, /undo
+                            if let Some(new_model) = line.strip_prefix("/model ") {
+                                let new_model = new_model.trim().to_string();
+                                if new_model.is_empty() {
+                                    println!("{} Usage: /model <model-name>", "Error:".red());
+                                } else {
+                                    client = LlmClient::new(&config.base_url(), config.api_key().as_deref(), &new_model);
+                                    model = new_model.clone();
+                                    println!("{} Switched to model {}", "✓".green(), model.bright_white());
+                                }
+                                continue;
+                            }
+                            if line == "/retry" {
+                                let last_user_idx = messages.iter().rposition(|m| m.role == "user");
+                                if let Some(idx) = last_user_idx {
+                                    if idx + 1 < messages.len() {
+                                        messages.truncate(idx + 1);
+                                    }
+                                    println!("{}", "Retrying last message...".dimmed());
+                                    match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp).await {
+                                        Ok(()) => {}
+                                        Err(e) => {
+                                            eprintln!("{} {}", "Error:".red(), e);
+                                            if !messages.is_empty() && messages.last().is_some_and(|m| m.role == "user") {
+                                                messages.pop();
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    println!("{} No message to retry", "Error:".red());
+                                }
+                                continue;
+                            }
+                            if line == "/undo" {
+                                let last_user_idx = messages.iter().rposition(|m| m.role == "user");
+                                if let Some(idx) = last_user_idx {
+                                    messages.truncate(idx);
+                                    println!("{}", "Undid last exchange.".dimmed());
+                                } else {
+                                    println!("{} Nothing to undo", "Error:".red());
+                                }
+                                continue;
+                            }
+                        }
                     }
                 }
 
@@ -346,7 +390,7 @@ async fn run_repl(
 
                 messages.push(Message::user(&line));
 
-                match run_agent_loop(client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp).await {
+                match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp).await {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
@@ -516,6 +560,9 @@ fn print_help() {
         ("/memory", "Show loaded memory"),
         ("/skills", "List discovered skills"),
         ("/tools", "List all available tools (built-in + MCP)"),
+        ("/model <n>", "Switch model mid-session"),
+        ("/retry", "Re-send the last user message"),
+        ("/undo", "Remove last exchange from history"),
         ("/config", "Show resolved configuration"),
         ("/prompt", "Show assembled system prompt"),
         ("/exit", "Exit the REPL"),
