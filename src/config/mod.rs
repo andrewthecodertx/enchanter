@@ -12,6 +12,8 @@ pub struct Config {
     pub model: ModelConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -64,6 +66,23 @@ impl Default for MemoryConfig {
             summarize_threshold: default_summarize_threshold(),
         }
     }
+}
+
+// ── MCP config ──
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub servers: std::collections::HashMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 impl Config {

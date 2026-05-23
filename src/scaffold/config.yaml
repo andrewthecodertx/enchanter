@@ -21,3 +21,19 @@ agent:
   # memory:
   #   max_entries: 50                   # Max memory entries loaded into prompt
   #   summarize_threshold: 40           # Summarize old entries when count exceeds this
+
+# MCP servers — extend Enchanter with external tool servers
+# Tools from MCP servers are names-spaced as server_name:tool_name
+# mcp:
+#   servers:
+#     filesystem:
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/Projects"]
+#     fetch:
+#       command: uvx
+#       args: ["mcp-server-fetch"]
+#     images:
+#       command: npx
+#       args: ["-y", "@fal-serverless/mcp-server"]
+#       env:
+#         FAL_KEY: ${FAL_KEY}

@@ -4,6 +4,7 @@ mod api;
 mod cli;
 mod config;
 mod home;
+mod mcp;
 mod memory;
 mod prompt;
 mod skills;

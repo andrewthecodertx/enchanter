@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::api::{LlmClient, Message};
 use crate::config::Config;
+use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::prompt;
 use crate::skills::SkillsIndex;
@@ -69,11 +70,24 @@ pub async fn run(args: Args) -> Result<()> {
         eprintln!("{} memory management: {}", "Warning:".yellow(), e);
     }
 
-    if let Some(user_prompt) = &args.prompt {
-        return run_single(&args, &config, &soul, &mut memory, &skills, &client, &model, user_prompt).await;
+    // Start MCP servers
+    let mut mcp = McpManager::new();
+    if !args.no_tools && !config.mcp.servers.is_empty() {
+        mcp.start_all(&config.mcp.servers).await;
     }
 
-    run_repl(&args, &config, &soul, &mut memory, &skills, &client, &model).await
+    // Build combined tools payload
+    let tools_payload = build_tools(&args, &mcp);
+
+    if let Some(user_prompt) = &args.prompt {
+        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &model, &mcp, &tools_payload, user_prompt).await;
+        mcp.shutdown_all().await;
+        return result;
+    }
+
+    let result = run_repl(&args, &config, &soul, &mut memory, &skills, &client, &model, &mcp, &tools_payload).await;
+    mcp.shutdown_all().await;
+    result
 }
 
 fn handle_command(
@@ -160,12 +174,40 @@ fn handle_command(
     Ok(())
 }
 
-/// Build the tools JSON payload (or None if --no-tools).
-fn build_tools(args: &Args) -> Option<Value> {
+/// Build the combined tools JSON payload: built-in + MCP tools.
+fn build_tools(args: &Args, mcp: &McpManager) -> Option<Value> {
     if args.no_tools {
         return None;
     }
-    Some(serde_json::Value::Array(tools::tools_json()))
+    let mut all_tools = tools::tools_json();
+    all_tools.extend(mcp.all_tools_json());
+    Some(Value::Array(all_tools))
+}
+
+/// Dispatch a tool call — built-in tools first, then MCP.
+async fn dispatch_tool(
+    name: &str,
+    args: &Value,
+    memory: &mut MemoryStore,
+    mcp: &McpManager,
+) -> String {
+    // Check if it's a built-in tool
+    let built_in_names = ["exec_command", "read_file", "write_file", "edit_file",
+                          "search_files", "list_directory", "memory"];
+    if built_in_names.contains(&name) {
+        return tools::dispatch(name, args, memory);
+    }
+
+    // Try MCP dispatch (tools are prefixed server_name:tool_name)
+    if name.contains(':') {
+        match mcp.dispatch(name, args).await {
+            Some(Ok(result)) => result,
+            Some(Err(e)) => format!("MCP error: {}", e),
+            None => format!("Unknown tool: {}", name),
+        }
+    } else {
+        format!("Unknown tool: {}", name)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -177,10 +219,10 @@ async fn run_single(
     skills: &SkillsIndex,
     client: &LlmClient,
     _model: &str,
+    mcp: &McpManager,
+    tools_payload: &Option<Value>,
     user_prompt: &str,
 ) -> Result<()> {
-    let tools_payload = build_tools(args);
-
     let system_content = match &args.system {
         Some(s) => s.clone(),
         None => prompt::build_system_prompt(soul, memory, skills, config),
@@ -206,9 +248,9 @@ async fn run_single(
 
             for tc in &tool_calls {
                 print_tool_call(&tc.function.name, &tc.function.arguments);
-                let args: Value = serde_json::from_str(&tc.function.arguments)
+                let tc_args: Value = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(Value::Null);
-                let output = tools::dispatch(&tc.function.name, &args, memory);
+                let output = dispatch_tool(&tc.function.name, &tc_args, memory, mcp).await;
                 messages.push(Message::tool_result(&tc.id, output));
             }
         } else {
@@ -225,6 +267,7 @@ async fn run_single(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_repl(
     args: &Args,
     config: &Config,
@@ -233,9 +276,9 @@ async fn run_repl(
     skills: &SkillsIndex,
     client: &LlmClient,
     model: &str,
+    mcp: &McpManager,
+    tools_payload: &Option<Value>,
 ) -> Result<()> {
-    let tools_payload = build_tools(args);
-
     let system_prompt = if let Some(ref sys_override) = args.system {
         sys_override.clone()
     } else {
@@ -245,7 +288,7 @@ async fn run_repl(
     let mut messages = vec![Message::system(&system_prompt)];
     let max_turns = config.max_turns();
 
-    print_banner(model, soul, skills, &tools_payload);
+    print_banner(model, soul, skills, tools_payload, mcp);
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -291,6 +334,10 @@ async fn run_repl(
                             println!("{}", system_prompt);
                             continue;
                         }
+                        "/tools" => {
+                            print_tools(mcp);
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -299,7 +346,7 @@ async fn run_repl(
 
                 messages.push(Message::user(&line));
 
-                match run_agent_loop(client, &mut messages, &tools_payload, max_turns, args.no_stream, memory).await {
+                match run_agent_loop(client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp).await {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
@@ -332,6 +379,7 @@ async fn run_agent_loop(
     max_turns: u32,
     no_stream: bool,
     memory: &mut MemoryStore,
+    mcp: &McpManager,
 ) -> Result<()> {
     for _ in 0..max_turns {
         let result = if no_stream {
@@ -346,9 +394,9 @@ async fn run_agent_loop(
 
             for tc in &tool_calls {
                 print_tool_call(&tc.function.name, &tc.function.arguments);
-                let args: Value = serde_json::from_str(&tc.function.arguments)
+                let tc_args: Value = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(Value::Null);
-                let output = tools::dispatch(&tc.function.name, &args, memory);
+                let output = dispatch_tool(&tc.function.name, &tc_args, memory, mcp).await;
                 messages.push(Message::tool_result(&tc.id, output));
             }
         } else {
@@ -380,7 +428,7 @@ fn print_tool_call(name: &str, arguments: &str) {
     );
 }
 
-fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>) {
+fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>, mcp: &McpManager) {
     let name = soul
         .content
         .lines()
@@ -395,18 +443,69 @@ fn print_banner(model: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &
         .map(|a| a.len())
         .unwrap_or(0);
 
+    let mcp_count = mcp.total_tool_count();
+    let mcp_display = if mcp_count > 0 {
+        format!(" ({} MCP)", mcp_count)
+    } else {
+        String::new()
+    };
+
     println!(
         "\n  {} {}",
         "⟡".bright_magenta(),
         name.bright_cyan().bold()
     );
     println!(
-        "  {} model={} | tools={} | skills={} | /help for commands\n",
+        "  {} model={} | tools={}{} | skills={} | /help for commands\n",
         "  ↳".dimmed(),
         model.bright_white(),
         tool_count.to_string().bright_white(),
+        mcp_display.dimmed(),
         skills.skills.len().to_string().bright_white()
     );
+}
+
+fn print_tools(mcp: &McpManager) {
+    println!("{}", "═══ TOOLS ═══".bright_cyan());
+
+    println!("{}", "── BUILT-IN ──".bright_blue());
+    for tool in tools::tool_definitions() {
+        println!(
+            "  {}{}",
+            tool.name.bright_white(),
+            if tool.description.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", tool.description.lines().next().unwrap_or(""))
+            }
+            .dimmed()
+        );
+    }
+
+    let servers = mcp.server_names();
+    if !servers.is_empty() {
+        println!("{}", "── MCP ──".bright_blue());
+        for server_name in servers {
+            println!("  [{}]", server_name.bright_green());
+            let mcp_tools = mcp.all_tools_json();
+            for tool in &mcp_tools {
+                if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str())
+                    && name.starts_with(&format!("{}:", server_name))
+                {
+                    let short_name = &name[server_name.len() + 1..];
+                    let desc = tool.get("function")
+                        .and_then(|f| f.get("description"))
+                        .and_then(|d| d.as_str())
+                        .map(|d| format!(" — {}", d.lines().next().unwrap_or("")))
+                        .unwrap_or_default();
+                    println!("    {}{}", short_name.bright_white(), desc.dimmed());
+                }
+            }
+        }
+    }
+
+    let total = tools::tool_definitions().len() + mcp.total_tool_count();
+    println!("\n  {} total tools", total);
 }
 
 fn print_help() {
@@ -416,6 +515,7 @@ fn print_help() {
         ("/soul", "Show current SOUL.md content"),
         ("/memory", "Show loaded memory"),
         ("/skills", "List discovered skills"),
+        ("/tools", "List all available tools (built-in + MCP)"),
         ("/config", "Show resolved configuration"),
         ("/prompt", "Show assembled system prompt"),
         ("/exit", "Exit the REPL"),
@@ -436,7 +536,7 @@ fn print_init_guidance() {
     );
     println!("  Created:");
     println!("    {}/SOUL.md       — edit to set your agent's persona", home.display());
-    println!("    {}/config.yaml   — set model, base_url, api_key", home.display());
+    println!("    {}/config.yaml   — set model, base_url, api_key, MCP servers", home.display());
     println!("    {}/memories/     — MEMORY.md & USER.md go here", home.display());
     println!("    {}/skills/       — drop in SKILL.md files", home.display());
     println!();
