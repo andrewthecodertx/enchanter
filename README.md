@@ -20,6 +20,7 @@ It creates `~/.enchanter/` with everything you need:
 - `config.yaml` — model, provider, API key
 - `memories/` — persistent memory files
 - `skills/` — drop in SKILL.md files
+- `sessions/` — conversation history (JSONL)
 
 Then configure a provider in `config.yaml`. A few examples:
 
@@ -121,6 +122,7 @@ enchanter --no-stream -p "Summarize this"
 | `/undo`    | Remove last exchange from history         |
 | `/config`  | Show resolved configuration               |
 | `/prompt`  | Show full system prompt                   |
+| `/sessions`| List session history                      |
 | `/exit`    | Quit (also Ctrl+D for clean exit)        |
 
 ### Info subcommands
@@ -131,6 +133,8 @@ enchanter memory    # Show loaded memory
 enchanter skills    # List discovered skills
 enchanter config    # Show resolved configuration
 enchanter prompt    # Show assembled system prompt
+enchanter sessions  # List session history
+enchanter sessions <id>  # Show a specific session
 ```
 
 ### Session summaries
@@ -144,6 +148,26 @@ When you exit the REPL with `/exit` or Ctrl+D, Enchanter generates a concise sum
 
 > **Ctrl+C is a force-quit.** It bypasses the exit hook, so no session summary is saved. Use `/exit` or Ctrl+D for a clean exit.
 
+### Session history
+
+Every conversation is automatically saved to `~/.enchanter/sessions/` as a JSONL file. Each session gets a unique ID, and every message (user, assistant, tool calls, tool results) is recorded turn-by-turn. The format is crash-safe — if the process dies mid-session, the file contains everything written up to that point.
+
+List recent sessions:
+
+```bash
+enchanter sessions
+```
+
+View a specific session:
+
+```bash
+enchanter sessions <id>
+```
+
+Inside the REPL, use `/sessions` to list session history.
+
+Sessions are also used internally for crash recovery and will power upcoming features like session branching and replay.
+
 ## How it works
 
 The system prompt is built in three layers:
@@ -155,6 +179,9 @@ The system prompt is built in three layers:
 Memory uses the same `§`-delimited format as Hermes Agent. Skills use the
 same SKILL.md format (agentskills.io). If you're coming from Hermes, just
 copy or symlink your data — the structure matches.
+
+Sessions are saved as JSONL files in `~/.enchanter/sessions/`. Each conversation
+turn is appended atomically, so the file is safe against crashes.
 
 ## MCP servers
 
