@@ -21,6 +21,7 @@ mod home;
 mod mcp;
 mod memory;
 mod prompt;
+mod session;
 mod skills;
 mod soul;
 mod summary;

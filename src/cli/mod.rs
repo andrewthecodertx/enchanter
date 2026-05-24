@@ -31,10 +31,22 @@ use crate::config::{Config, ResolvedModel};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::prompt;
+use crate::session::Session;
 use crate::skills::SkillsIndex;
 use crate::soul::Soul;
 use crate::summary;
 use crate::tools;
+
+/// Format bytes in human-readable form.
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{}KB", bytes / 1024)
+    } else {
+        format!("{}MB", bytes / (1024 * 1024))
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "enchanter", version, about = "A focused AI agent harness")]
@@ -65,6 +77,11 @@ pub enum Commands {
     Skills,
     Config,
     Prompt,
+    /// List or show session history
+    Sessions {
+        /// Show a specific session by ID
+        id: Option<String>,
+    },
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -116,7 +133,8 @@ pub async fn run(args: Args) -> Result<()> {
     let tools_payload = build_tools(&args, &mcp);
 
     if let Some(user_prompt) = &args.prompt {
-        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &resolved, &mut mcp, &tools_payload, user_prompt).await;
+        let mut session = Session::new(&resolved.model)?;
+        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &resolved, &mut mcp, &tools_payload, user_prompt, &mut session).await;
         mcp.shutdown_all().await;
         return result;
     }
@@ -219,6 +237,58 @@ fn handle_command(
             println!("{}", "═══ SYSTEM PROMPT ═══".bright_cyan());
             println!("{}", system_prompt);
         }
+        Commands::Sessions { id } => {
+            match id {
+                Some(session_id) => {
+                    // Show a specific session
+                    match Session::load(&session_id) {
+                        Ok(entries) => {
+                            let messages = Session::entries_to_messages(&entries);
+                            if messages.is_empty() {
+                                println!("{} Session {} is empty.", "Note:".dimmed(), session_id);
+                            } else {
+                                println!("{} Session {} ({} messages)", "═══ SESSION ═══".bright_cyan(), session_id, messages.len());
+                                for msg in &messages {
+                                    match msg.role.as_str() {
+                                        "system" => continue,
+                                        "user" => println!("{} {}", "⟩".bright_blue(), msg.content.as_deref().unwrap_or("")),
+                                        "assistant" => {
+                                            if let Some(content) = &msg.content {
+                                                println!("{} {}", "⟨".bright_green(), content.chars().take(200).collect::<String>());
+                                            } else if msg.tool_calls.is_some() {
+                                                println!("{} [used tools]", "⟨".dimmed());
+                                            }
+                                        }
+                                        "tool" => continue,
+                                        _ => continue,
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => println!("{} Session '{}' not found: {}", "Error:".red(), session_id, e),
+                    }
+                }
+                None => {
+                    // List all sessions
+                    let sessions = Session::list_all()?;
+                    if sessions.is_empty() {
+                        println!("No sessions found.");
+                    } else {
+                        println!("{}", "═══ SESSIONS ═══".bright_cyan());
+                        for s in &sessions {
+                            let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                            println!(
+                                "  {}{}  {} msgs, {}",
+                                short_id.bright_white(),
+                                "…".dimmed(),
+                                format!("{}", s.message_count).bright_blue(),
+                                format_bytes(s.file_size).dimmed()
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -271,17 +341,21 @@ async fn run_single(
     mcp: &mut McpManager,
     tools_payload: &Option<Value>,
     user_prompt: &str,
+    session: &mut Session,
 ) -> Result<()> {
     let system_content = match &args.system {
         Some(s) => s.clone(),
         None => prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model),
     };
 
-    let mut messages = vec![
-        Message::system(&system_content),
-        Message::user(user_prompt),
-    ];
+    let system_msg = Message::system(&system_content);
+    let user_msg = Message::user(user_prompt);
 
+    // Persist initial messages
+    session.append(&system_msg)?;
+    session.append(&user_msg)?;
+
+    let mut messages = vec![system_msg, user_msg];
     let max_turns = config.max_turns();
 
     for _ in 0..max_turns {
@@ -293,20 +367,27 @@ async fn run_single(
 
         if result.has_tool_calls() {
             let tool_calls = result.tool_calls.unwrap();
-            messages.push(Message::assistant_with_tools(tool_calls.clone(), result.content));
+            let assistant_msg = Message::assistant_with_tools(tool_calls.clone(), result.content);
+            session.append(&assistant_msg)?;
+            messages.push(assistant_msg);
 
             for tc in &tool_calls {
                 print_tool_call(&tc.function.name, &tc.function.arguments);
                 let tc_args: Value = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(Value::Null);
                 let output = dispatch_tool(&tc.function.name, &tc_args, memory, mcp).await;
-                messages.push(Message::tool_result(&tc.id, output));
+                let tool_msg = Message::tool_result(&tc.id, output);
+                session.append(&tool_msg)?;
+                messages.push(tool_msg);
             }
         } else {
             if let Some(content) = &result.content
                 && args.no_stream
             {
                 println!("{}", content);
+            }
+            if let Some(content) = &result.content {
+                session.append(&Message::assistant(content))?;
             }
             return Ok(());
         }
@@ -336,7 +417,13 @@ async fn run_repl(
     let mut messages = vec![Message::system(&system_prompt)];
     let max_turns = config.max_turns();
 
-    print_banner(&resolved.model, &resolved.base_url, soul, skills, tools_payload, mcp);
+    // Create a session for conversation persistence
+    let mut session = Session::new(&resolved.model)?;
+    if let Err(e) = session.append(&messages[0]) {
+        eprintln!("{} Could not create session file: {}", "Warning:".yellow(), e);
+    }
+
+    print_banner(&resolved.model, &resolved.base_url, soul, skills, tools_payload, mcp, session.id());
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -359,6 +446,16 @@ async fn run_repl(
                                 prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model)
                             };
                             messages = vec![Message::system(&fresh_prompt)];
+                            // Start a fresh session for the cleared conversation
+                            match Session::new(&resolved.model) {
+                                Ok(mut new_session) => {
+                                    if let Err(e) = new_session.append(&messages[0]) {
+                                        eprintln!("{} Could not create session: {}", "Warning:".yellow(), e);
+                                    }
+                                    session = new_session;
+                                }
+                                Err(e) => eprintln!("{} Could not create session: {}", "Warning:".yellow(), e),
+                            }
                             println!("{}", "Conversation cleared.".dimmed());
                             continue;
                         }
@@ -396,6 +493,29 @@ async fn run_repl(
                         }
                         "/tools" => {
                             print_tools(mcp);
+                            continue;
+                        }
+                        "/sessions" => {
+                            match Session::list_all() {
+                                Ok(sessions) => {
+                                    if sessions.is_empty() {
+                                        println!("No sessions found.");
+                                    } else {
+                                        println!("{}", "═══ SESSIONS ═══".bright_cyan());
+                                        for s in &sessions {
+                                            let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                                            println!(
+                                                "  {}{}  {} msgs, {}",
+                                                short_id.bright_white(),
+                                                "…".dimmed(),
+                                                format!("{}", s.message_count).bright_blue(),
+                                                format_bytes(s.file_size).dimmed()
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("{} Could not list sessions: {}", "Error:".red(), e),
+                            }
                             continue;
                         }
                         _ => {
@@ -453,7 +573,7 @@ async fn run_repl(
                                         messages.truncate(idx + 1);
                                     }
                                     println!("{}", "Retrying last message...".dimmed());
-                                    match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp).await {
+                                    match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp, &mut session).await {
                                         Ok(()) => {}
                                         Err(e) => {
                                             eprintln!("{} {}", "Error:".red(), e);
@@ -483,9 +603,11 @@ async fn run_repl(
 
                 rl.add_history_entry(&line).ok();
 
-                messages.push(Message::user(&line));
+                let user_msg = Message::user(&line);
+                session.append(&user_msg)?;
+                messages.push(user_msg);
 
-                match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp).await {
+                match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp, &mut session).await {
                     Ok(()) => {}
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
@@ -561,6 +683,7 @@ async fn run_agent_loop(
     no_stream: bool,
     memory: &mut MemoryStore,
     mcp: &mut McpManager,
+    session: &mut Session,
 ) -> Result<()> {
     for _ in 0..max_turns {
         let result = if no_stream {
@@ -571,20 +694,27 @@ async fn run_agent_loop(
 
         if result.has_tool_calls() {
             let tool_calls = result.tool_calls.unwrap();
-            messages.push(Message::assistant_with_tools(tool_calls.clone(), result.content));
+            let assistant_msg = Message::assistant_with_tools(tool_calls.clone(), result.content);
+            session.append(&assistant_msg)?;
+            messages.push(assistant_msg);
 
             for tc in &tool_calls {
                 print_tool_call(&tc.function.name, &tc.function.arguments);
                 let tc_args: Value = serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(Value::Null);
                 let output = dispatch_tool(&tc.function.name, &tc_args, memory, mcp).await;
-                messages.push(Message::tool_result(&tc.id, output));
+                let tool_msg = Message::tool_result(&tc.id, output);
+                session.append(&tool_msg)?;
+                messages.push(tool_msg);
             }
         } else {
             if let Some(content) = &result.content
                 && no_stream
             {
                 println!("{}", content);
+            }
+            if let Some(content) = &result.content {
+                session.append(&Message::assistant(content))?;
             }
             return Ok(());
         }
@@ -608,7 +738,7 @@ fn print_tool_call(name: &str, arguments: &str) {
     );
 }
 
-fn print_banner(model: &str, base_url: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>, mcp: &McpManager) {
+fn print_banner(model: &str, base_url: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>, mcp: &McpManager, session_id: &str) {
     let name = soul
         .content
         .lines()
@@ -630,10 +760,12 @@ fn print_banner(model: &str, base_url: &str, soul: &Soul, skills: &SkillsIndex, 
         String::new()
     };
 
+    let short_session_id = if session_id.len() > 8 { &session_id[..8] } else { session_id };
     println!(
-        "\n  {} {}",
+        "\n  {} {}  session={}",
         "⟡".bright_magenta(),
-        name.bright_cyan().bold()
+        name.bright_cyan().bold(),
+        short_session_id.dimmed()
     );
     // Shorten common base URLs for display
     let short_url = base_url
@@ -708,6 +840,7 @@ fn print_help(config: &Config) {
         ("/model <name>", "Switch model or provider (see config.yaml providers)"),
         ("/retry", "Re-send the last user message"),
         ("/undo", "Remove last exchange from history"),
+        ("/sessions", "List session history"),
         ("/config", "Show resolved configuration"),
         ("/prompt", "Show assembled system prompt"),
         ("/exit", "Exit the REPL"),
