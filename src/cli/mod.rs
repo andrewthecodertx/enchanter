@@ -731,4 +731,8 @@ fn print_init_guidance() {
     println!("    OpenRouter:  export ENCHANTER_API_KEY=your-key  +  base_url in config.yaml");
     println!("    Ollama:      export ENCHANTER_BASE_URL=http://localhost:11434/v1");
     println!();
+    println!(
+        "  {} https://andrewthecoder.com/projects/enchanter",
+        "Docs:".bright_cyan()
+    );
 }
