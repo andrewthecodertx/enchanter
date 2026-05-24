@@ -1,4 +1,20 @@
 //! Session summary generation on REPL exit.
+//!
+//! The session summary pattern (generating a concise LLM-produced summary of
+//! the conversation on exit, with a fallback that just counts messages) is adapted
+//! from two sources:
+//!
+//! - hermes-agent's background review and conversation compression
+//!   (hermes-agent/agent/background_review.py, agent/conversation_compression.py):
+//!   hermes-agent spawns a background thread after each session to review and
+//!   summarize key facts for memory persistence. enchanter simplifies this to a
+//!   synchronous on-exit summary with timeout and fallback.
+//!
+//! - OpenCode's SessionSummary
+//!   (opencode/packages/opencode/src/session/summary.ts): OpenCode computes
+//!   file diffs and session metadata as a session summary. enchanter's approach
+//!   is closer to hermes-agent (LLM-generated bullet summary) but borrows the
+//!   concept of a structured exit hook from OpenCode.
 
 use anyhow::Result;
 

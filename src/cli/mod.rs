@@ -1,4 +1,25 @@
 //! CLI definition and REPL loop.
+//!
+//! The REPL interaction pattern (persistent loop with slash commands) borrows from
+//! hermes-agent's conversation_loop (hermes-agent/agent/conversation_loop.py) and
+//! Claude Code's REPL UX (claude-code/src/main.tsx). Slash commands /clear, /help,
+//! /model, /retry, /undo follow the convention established by hermes-agent
+//! (hermes-agent/cli.py slash command handling).
+//!
+//! The agent turn loop (call model → check for tool_calls → dispatch tools →
+//! append results → repeat until text-only response or max_turns) follows the
+//! standard agentic loop pattern used by hermes-agent
+//! (hermes-agent/agent/conversation_loop.py), Claude Code
+//! (claude-code/src/agent/agent.ts), and OpenCode
+//! (opencode/packages/opencode/src/session/).
+//!
+//! Session summarization on exit (calling the LLM with a truncated conversation,
+//! timeout with fallback) is adapted from hermes-agent's background_review
+//! pattern (hermes-agent/agent/background_review.py).
+//!
+//! The /model provider-switching pattern (named provider presets with
+//! inheritance from defaults) is informed by hermes-agent's config.yaml
+//! provider resolution (hermes-agent/hermes_cli/config.py).
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

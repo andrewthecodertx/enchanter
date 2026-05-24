@@ -2,6 +2,25 @@
 //!
 //! Manages MCP server processes: spawn, discover tools, dispatch calls, shutdown.
 //! Supports automatic restart of crashed stdio servers with a configurable retry limit.
+//!
+//! The JSON-RPC-over-stdio transport (initialize/initialized handshake,
+//! tools/list discovery, tools/call dispatch) is reimplemented from the
+//! Model Context Protocol specification, with reference to hermes-agent's Python
+//! MCP client (hermes-agent/tools/mcp_tool.py), which uses the Python `mcp`
+//! SDK with anyio transports for the same protocol. Key differences:
+//! - hermes-agent wraps the Python MCP SDK; enchanter writes JSON-RPC frames
+//!   directly over tokio pipes.
+//! - hermes-agent supports SSE transport and per-server timeout/retry config;
+//!   enchanter supports stdio and HTTP Streamable transport.
+//! - The stdio server auto-restart pattern (MAX_RESTARTS + RESTART_COOLDOWN)
+//!   is original to enchanter, not present in hermes-agent's implementation.
+//!
+//! The HTTP transport with Mcp-Session-Id header tracking and SSE response
+//! parsing follows the MCP Streamable HTTP specification (2025-03-26 revision),
+//! consistent with OpenCode's MCP HTTP client
+//! (opencode/packages/opencode/src/mcp/index.ts), which uses
+//! @modelcontextprotocol/sdk's StreamableHTTPClientTransport. enchanter
+//! reimplements the same spec directly with reqwest.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

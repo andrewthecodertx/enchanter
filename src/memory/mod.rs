@@ -1,4 +1,29 @@
-//! Memory store — ~/enchanter/memories/MEMORY.md, USER.md, and SUMMARY.md, §-delimited.
+//! Memory store — ~/.enchanter/memories/MEMORY.md, USER.md, and SUMMARY.md, §-delimited.
+//!
+//! The memory architecture (separate MEMORY.md + USER.md files, §-delimited entries,
+//! threshold-based summarization of old entries) is adapted from hermes-agent's
+//! memory system (hermes-agent/agent/memory_manager.py, agent/memory_provider.py).
+//! hermes-agent uses a pluggable MemoryProvider ABC with sync_turn/prefetch/shutdown
+//! lifecycle hooks and multiple backends (built-in, Honcho, Hindsight, Mem0);
+//! enchanter simplifies to a single file-based store with synchronous load/save
+//! and async LLM summarization.
+//!
+//! The §-delimited entry format (\n§\n between entries) matches hermes-agent's
+//! file-based default memory store convention, enabling file-level compatibility:
+//! a hermes-agent ~/.hermes/MEMORY.md can be symlinked or copied to
+//! ~/.enchanter/memories/MEMORY.md and parsed correctly.
+//!
+//! The summarize_on_exit pattern (call the LLM to compress old memory entries
+//! when they exceed a threshold, falling back to simple truncation) mirrors
+//! hermes-agent's two-tier approach: MemoryManager.sync_all() for per-turn
+//! persistence, and conversation_compression for context window management.
+//!
+//! The memory tool (add/remove/replace/list) follows the operations exposed by
+//! hermes-agent's built-in memory (hermes-agent/tools/memory_tool.py) and
+//! Claude Code's memory system (claude-code/src/memdir/memdir.ts), which
+//! uses MEMORY.md + per-topic files with frontmatter-typed entries.
+//! enchanter's add/remove/replace/list matches the subset of operations
+//! both systems expose for user-facing memory management.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;

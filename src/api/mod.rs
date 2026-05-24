@@ -1,4 +1,19 @@
 //! OpenAI-compatible chat completions client.
+//!
+//! The streaming SSE parser (data: prefix, [DONE] sentinel, delta accumulation)
+//! follows the OpenAI Chat Completions streaming protocol as implemented in
+//! OpenCode's provider layer (opencode/packages/opencode/src/provider/provider.ts)
+//! which wraps SSE responses with timeout handling. enchanter reimplements the
+//! same protocol directly in Rust using reqwest + futures_util::StreamExt.
+//!
+//! The tool_calls streaming accumulation pattern (index-keyed ToolCallAccum
+//! map that merges delta objects into complete tool call structs) mirrors the
+//! approach used by OpenCode's SDK integration and hermes-agent's streaming
+//! response handler (hermes-agent/run_agent.py _process_streaming_response).
+//!
+//! The Message/ToolCall/ChatResult type structure follows the OpenAI API shape
+//! but was also informed by hermes-agent's message dict convention
+//! (hermes-agent/run_agent.py message assembly).
 
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -213,6 +228,10 @@ impl LlmClient {
 
     /// Streaming chat with tool support. Prints content tokens as they arrive.
     /// Returns a ChatResult with content and any tool_calls.
+    ///
+    /// The SSE stream parsing (data: prefix, [DONE] sentinel, line buffering)
+    /// follows the OpenAI streaming protocol as implemented in OpenCode's
+    /// provider layer (opencode/packages/opencode/src/provider/).
     pub async fn chat_stream(&self, messages: Vec<Message>, tools: Option<Value>) -> Result<ChatResult> {
         let url = format!("{}/chat/completions", self.base_url);
 
@@ -275,7 +294,14 @@ impl LlmClient {
                                 std::io::stdout().flush().ok();
                             }
 
-                            // Accumulate tool call deltas
+                            // Accumulate tool call deltas — the incremental index-based accumulation
+                            // pattern (streaming partial function name/arguments by index) follows
+                            // the OpenAI streaming spec as used in OpenCode
+                            // (opencode/packages/opencode/src/provider/) and Claude Code.
+                            // OpenCode uses the Vercel AI SDK which handles this via
+                            // streamText/toolCall streaming; hermes-agent accumulates
+                            // tool_call deltas in _process_streaming_response()
+                            // (hermes-agent/run_agent.py).
                             if let Some(tc_deltas) = &choice.delta.tool_calls {
                                 for tc_delta in tc_deltas {
                                     let idx = tc_delta.index.unwrap_or(0);

@@ -1,4 +1,40 @@
 //! Built-in tool definitions and dispatch — canonical set of 7.
+//!
+//! Tool naming and semantics inspired by three projects:
+//!
+//! - Claude Code (github.com/anthropics/claude-code): The canonical 7-tool set
+//!   mirrors Claude Code's built-in tools — Bash→exec_command, Read→read_file,
+//!   Write→write_file, Edit→edit_file, Grep+Glob→search_files, Memory→memory.
+//!   The parameter schemas (offset/limit for read, old_string/new_string/replace_all
+//!   for edit, command for exec) follow the same shapes defined in
+//!   claude-code/src/tools/ and their prompt.ts descriptions.
+//!
+//! - OpenCode (github.com/nicepkg/opencode): The edit tool's old_string/new_string
+//!   approach is also used by OpenCode's EditTool
+//!   (opencode/packages/opencode/src/tool/edit.ts), which cites Cline's
+//!   diff-edits as a source. The read tool with offset/limit parameters and
+//!   line-numbered output format matches the pattern in
+//!   opencode/packages/opencode/src/tool/read.ts. OpenCode's grep/glob/ls
+//!   tools (opencode/packages/opencode/src/tool/grep.ts, glob.ts, ls.ts) use
+//!   ripgrep under the hood; enchanter uses the regex+walkdir combo for a
+//!   pure-Rust implementation with no runtime dependency.
+//!
+//! - hermes-agent (github.com/NousResearch/hermes-agent): The memory tool's
+//!   add/remove/replace/list operations follow hermes-agent's built-in memory
+//!   tool (hermes-agent/tools/memory_tool.py) which exposes the same four
+//!   actions over a persistent text store. Claude Code's memory system
+//!   (claude-code/src/memdir/memdir.ts) uses MEMORY.md + per-topic files
+//!   with typed frontmatter; enchanter's simpler flat-entry model is closer
+//!   to hermes-agent's.
+//!
+//! The edit_file implementation (old_string/new_string/replace_all with
+//! uniqueness check) directly mirrors Claude Code's FileEditTool behavior
+//! (claude-code/src/tools/FileEditTool/prompt.ts: "The edit will FAIL if
+//! old_string is not unique in the file") and OpenCode's EditTool
+//! (opencode/packages/opencode/src/tool/edit.ts: oldString/newString/replaceAll).
+//!
+//! The 10,000-character truncation limit on tool output mirrors OpenCode's
+//! output truncation approach and Claude Code's similar output limits.
 
 use serde_json::{json, Value};
 use std::path::Path;
@@ -204,6 +240,18 @@ pub fn tools_json() -> Vec<Value> {
 
 /// Dispatch a built-in tool call by name. Returns the result as a string.
 /// The memory tool requires a mutable reference to the MemoryStore.
+///
+/// The dispatch pattern (match on tool name string → route to handler function)
+/// follows the pattern used by all three reference projects:
+/// - Claude Code: claude-code/src/tools/ — each tool is a separate module with
+///   a Tool.define() call that registers name, schema, and handler.
+/// - OpenCode: opencode/packages/opencode/src/tool/registry.ts — tool registry
+///   maps tool names to handler functions.
+/// - hermes-agent: hermes-agent/tools/registry.py — tool dispatch routes by
+///   name to registered tool functions.
+///
+/// enchanter simplifies this to a single dispatch() match statement since
+/// all built-in tools are local functions rather than dynamically registered.
 pub fn dispatch(name: &str, args: &Value, memory: &mut MemoryStore) -> String {
     match name {
         "exec_command" => tool_exec_command(args),
@@ -262,6 +310,11 @@ fn tool_exec_command(args: &Value) -> String {
 }
 
 fn tool_read_file(args: &Value) -> String {
+    // Line-numbered output format adapted from Claude Code's FileReadTool
+    // (claude-code/src/tools/FileReadTool/) — cat -n style with offset/limit.
+    // OpenCode's ReadTool (opencode/packages/opencode/src/tool/read.ts) uses
+    // the same offset/limit/line-number pattern with DEFAULT_READ_LIMIT = 2000
+    // and MAX_BYTES = 50KB.
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'path'".to_string(),
@@ -318,6 +371,9 @@ fn tool_read_file(args: &Value) -> String {
 }
 
 fn tool_write_file(args: &Value) -> String {
+    // Auto-create parent directories — consistent with Claude Code's FileWriteTool
+    // behavior (claude-code/src/tools/FileWriteTool/) and OpenCode's write tool
+    // (opencode/packages/opencode/src/tool/write.ts).
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'path'".to_string(),
@@ -344,6 +400,15 @@ fn tool_write_file(args: &Value) -> String {
 }
 
 fn tool_edit_file(args: &Value) -> String {
+    // old_string/new_string/replace_all semantics adapted from Claude Code's
+    // FileEditTool (claude-code/src/tools/FileEditTool/) and OpenCode's EditTool
+    // (opencode/packages/opencode/src/tool/edit.ts). The uniqueness check
+    // requirement mirrors Claude Code's behavior: "The edit will FAIL if
+    // old_string is not unique in the file." OpenCode's edit.ts also cites
+    // Cline (github.com/cline/cline) as a source for the diff-edit approach.
+    // enchanter's implementation is a simpler string-based approach without
+    // LSP diagnostic feedback or file-watching that both Claude Code and
+    // OpenCode add on top.
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'path'".to_string(),
@@ -402,6 +467,13 @@ fn tool_edit_file(args: &Value) -> String {
 }
 
 fn tool_search_files(args: &Value) -> String {
+    // Dual-mode search (content regex + filename glob) adapted from Claude Code's
+    // GrepTool + GlobTool (claude-code/src/tools/) and OpenCode's combined
+    // codesearch/grep/glob tools (opencode/packages/opencode/src/tool/).
+    // Claude Code splits file search and content search into separate tools
+    // (GlobTool for filename patterns, GrepTool for content patterns).
+    // OpenCode uses ripgrep under the hood; enchanter uses the regex + walkdir
+    // crates for a zero-runtime-dependency pure-Rust implementation.
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'pattern'".to_string(),

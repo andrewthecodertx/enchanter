@@ -1,4 +1,26 @@
 //! Skill discovery — scans ~/.enchanter/skills/ for SKILL.md files.
+//!
+//! The SKILL.md discovery pattern (walking directories for SKILL.md files,
+//! parsing YAML frontmatter for name/description, inferring category from
+//! directory path) is adapted from two sources:
+//!
+//! - hermes-agent's skill system (hermes-agent/agent/skill_utils.py):
+//!   Walks skill directories, parses YAML frontmatter using ConfigMarkdown,
+//!   extracts name/description/version, and builds a skills index for the
+//!   prompt. hermes-agent also has skill conditions, platform filtering,
+//!   and skill bundles; enchanter implements only the discovery and
+//!   frontmatter parsing subset.
+//!
+//! - OpenCode's skill system (opencode/packages/opencode/src/skill/skill.ts):
+//!   Scans .claude/skills/, .agents/skills/, and .opencode/skill/
+//!   directories for SKILL.md files with frontmatter, builds a name→Info
+//!   map, and formats the index for the system prompt. OpenCode uses
+//!   ConfigMarkdown for parsing; enchanter uses a lightweight YAML
+//!   frontmatter parser with serde_yml.
+//!
+//! The category-from-path convention (directory name under skills/
+//! becomes the category tag) follows hermes-agent's convention where
+//! skills/<category>/<name>/SKILL.md determines category membership.
 
 use anyhow::Result;
 use serde::Deserialize;

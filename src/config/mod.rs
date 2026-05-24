@@ -1,4 +1,21 @@
 //! Configuration loading from ~/.enchanter/config.yaml.
+//!
+//! The MCP server config format (command + args + env for stdio, url + headers for
+//! HTTP, ${VAR} environment variable expansion) is adapted from hermes-agent's
+//! mcp_servers config schema (hermes-agent/tools/mcp_tool.py, lines 14-48),
+//! which defines the same transport types with matching field names. hermes-agent
+//! additionally supports SSE transport and per-server timeout/retry settings;
+//! enchanter implements stdio and Streamable HTTP.
+//!
+//! The provider config pattern (named presets with field-level inheritance from
+//! top-level defaults, plus ENV_VAR fallback chain) follows hermes-agent's
+//! multi-provider resolution (hermes-agent/hermes_cli/config.py), which uses
+//! a similar config.yaml structure with named providers that inherit missing
+//! fields from globals and environment variables.
+//!
+//! The ${VAR} expansion in api_key/base_url fields uses shellexpand, matching
+//! hermes-agent's ${VAR} expansion in mcp_server env values
+//! (hermes-agent/tools/mcp_tool.py).
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -101,6 +118,16 @@ pub struct McpConfig {
 /// - http: remote server via `url` + optional `headers`
 ///
 /// Exactly one of `command` or `url` must be set.
+///
+/// Config schema adapted from hermes-agent's mcp_servers format
+/// (hermes-agent/tools/mcp_tool.py, lines 14-48). hermes-agent defines:
+///   - command, args, env for stdio transport
+///   - url, headers for HTTP transport
+///   - Additionally supports SSE transport, per-server timeout/retry,
+///     and parallel tool call settings that enchanter omits.
+/// OpenCode (opencode/packages/opencode/src/mcp/index.ts) uses the
+/// @modelcontextprotocol SDK for transport; enchanter reimplements
+/// the MCP protocol directly.
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerConfig {
     /// Command to run for stdio transport (e.g. "npx", "uvx").
@@ -200,7 +227,8 @@ impl Config {
             .or_else(|| std::env::var("ENCHANTER_API_KEY").ok())
             .or_else(|| std::env::var("OPENAI_API_KEY").ok());
 
-        // Expand ${VAR} in api_key and base_url
+        // Expand ${VAR} in api_key and base_url — pattern from hermes-agent's
+        // mcp_servers config (hermes-agent/tools/mcp_tool.py)
         let api_key = api_key.map(|k| shellexpand::env(&k).unwrap_or_else(|_| k.clone().into()).to_string());
         let base_url_clone = base_url.clone();
         let base_url = shellexpand::env(&base_url).unwrap_or_else(|_| base_url_clone.into()).to_string();

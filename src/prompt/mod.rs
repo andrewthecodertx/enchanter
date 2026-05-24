@@ -1,4 +1,28 @@
 //! System prompt assembly — SOUL, context, and volatile tiers.
+//!
+//! The tiered prompt structure builds the system prompt in layers:
+//!   1. SOUL — persona definition from ~/.enchanter/SOUL.md
+//!   2. CONTEXT — environment block (model, user, cwd, host, platform)
+//!   3. SKILLS — discovered skills index
+//!   4. INSTRUCTIONS — tool usage guidance
+//!   5. VOLATILE — memory entries, user profile, session timestamp
+//!
+//! This layered assembly follows the pattern established by hermes-agent's
+//! prompt_builder.py (hermes-agent/agent/prompt_builder.py), which assembles
+//! system prompts as: identity slot → AGENTS.md/context files → skills index →
+//! memory → environment hints → tool enforcement. enchanter simplifies this
+//! by removing the injection-scanning and .hermes.md discovery, keeping the
+//! core tier structure.
+//!
+//! OpenCode uses a similar pattern (opencode/packages/opencode/src/session/system.ts):
+//! provider-specific base prompt → environment block → skills → tool instructions.
+//! The environment block format ("Model: X, Working directory: Y, Platform: Z")
+//! is adapted from OpenCode's system.ts environment() function.
+//!
+//! The "═══ SECTION ═══" delimiter style for sections and subsections is adapted
+//! from hermes-agent's section formatting convention
+//! (hermes-agent/agent/prompt_builder.py), which uses the same double-line
+//! section markers for memory blocks and context files.
 
 use crate::config::Config;
 use crate::memory::MemoryStore;

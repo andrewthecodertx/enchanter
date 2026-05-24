@@ -1,4 +1,15 @@
 //! SOUL.md loader — persona definition from ~/.enchanter/SOUL.md.
+//!
+//! The SOUL.md convention (user-editable markdown file in the home directory
+//! that defines the agent's persona and behavioral directives) is adapted from
+//! hermes-agent (hermes-agent/agent/prompt_builder.py, load_soul_md()),
+//! which loads SOUL.md from ~/.hermes/ and injects it as the identity slot
+//! in the system prompt. hermes-agent also scans for injection attempts in
+//! SOUL.md content; enchanter loads it verbatim with a fallback persona.
+//!
+//! The fallback pattern (hardcoded identity string when SOUL.md is missing)
+//! mirrors hermes-agent's DEFAULT_AGENT_IDENTITY constant
+//! (hermes-agent/agent/prompt_builder.py:134).
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
