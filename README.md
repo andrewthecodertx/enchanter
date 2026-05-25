@@ -123,7 +123,7 @@ enchanter --no-stream -p "Summarize this"
 | `/config`  | Show resolved configuration               |
 | `/prompt`  | Show full system prompt                   |
 | `/sessions`| List session history                      |
-| `/exit`    | Quit (also Ctrl+D for clean exit)        |
+| `/exit`, `/quit`, `/bye` | Quit (also Ctrl+D for clean exit)  |
 
 ## Daemon mode
 
@@ -176,14 +176,14 @@ enchanter daemon status  # Show daemon status (model, MCP, uptime)
 
 ### Session summaries
 
-When you exit the REPL with `/exit` or Ctrl+D, Enchanter generates a concise summary of your session and saves it to memory. Your next session automatically loads this context, so you can pick up where you left off.
+When you exit the REPL with `/exit`, `/quit`, `/bye`, or Ctrl+D, Enchanter generates a concise summary of your session and saves it to memory. Your next session automatically loads this context, so you can pick up where you left off.
 
 - Summaries are skipped for single-shot mode (`-p` flag)
 - Skipped if the session was too short (no real exchange)
 - Timeout of 10 seconds; falls back to a simple message count on failure
 - Disable with `summarize_on_exit: false` in the `agent` section of config.yaml
 
-> **Ctrl+C is a force-quit.** It bypasses the exit hook, so no session summary is saved. Use `/exit` or Ctrl+D for a clean exit.
+> **Ctrl+C is a force-quit.** It bypasses the exit hook, so no session summary is saved. Use `/exit`, `/quit`, `/bye`, or Ctrl+D for a clean exit.
 
 ### Session history
 

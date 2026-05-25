@@ -489,7 +489,7 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
 
                 if line.starts_with('/') {
                     match line.as_str() {
-                        "/exit" | "/quit" => break,
+                        "/exit" | "/quit" | "/bye" => break,
                         "/clear" => {
                             agent.clear()?;
                             println!("{}", "Conversation cleared.".dimmed());
@@ -735,7 +735,7 @@ fn print_help(config: &Config) {
         ("/sessions", "List session history"),
         ("/config", "Show resolved configuration"),
         ("/prompt", "Show assembled system prompt"),
-        ("/exit", "Exit the REPL"),
+        ("/exit, /quit, /bye", "Exit the REPL"),
     ];
 
     println!("{}", "═══ COMMANDS ═══".bright_cyan());
