@@ -13,6 +13,10 @@
 //! The /model provider-switching pattern (named provider presets with
 //! inheritance from defaults) is informed by hermes-agent's config.yaml
 //! provider resolution (hermes-agent/hermes_cli/config.py).
+//!
+//! Daemon mode support: enchanter can connect to a background daemon process
+//! that keeps MCP servers warm, avoiding cold-start latency. The daemon
+//! listens on a Unix socket and the CLI relays requests to it.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -52,6 +56,14 @@ pub struct Args {
     #[arg(long)]
     pub no_tools: bool,
 
+    /// Run inline without connecting to the daemon (bypass daemon auto-start).
+    #[arg(long)]
+    pub no_daemon: bool,
+
+    /// Idle timeout in minutes for the daemon (default: 10).
+    #[arg(long)]
+    pub idle_timeout: Option<u64>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -68,11 +80,31 @@ pub enum Commands {
         /// Show a specific session by ID
         id: Option<String>,
     },
+    /// Daemon management: start, stop, or check status.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DaemonAction {
+    /// Start the daemon in the background.
+    Start,
+    /// Stop the running daemon.
+    Stop,
+    /// Show daemon status (model, MCP servers, uptime).
+    Status,
 }
 
 pub async fn run(args: Args) -> Result<()> {
     if crate::home::init_home()? {
         print_init_guidance();
+    }
+
+    // Handle daemon management commands first
+    if let Some(Commands::Daemon { action }) = &args.command {
+        return handle_daemon_command(action, &args).await;
     }
 
     let config = Config::load()?;
@@ -83,6 +115,72 @@ pub async fn run(args: Args) -> Result<()> {
     if let Some(cmd) = &args.command {
         return handle_command(cmd, &config, &soul, &memory, &skills);
     }
+
+    // Try daemon mode first (unless --no-daemon)
+    if !args.no_daemon && !args.no_stream {
+        if crate::daemon::is_running().await {
+            // Daemon is running — use it
+            let result = crate::daemon::chat_via_daemon(
+                args.prompt.as_deref().unwrap_or(""),
+                args.model.clone(),
+                args.system.clone(),
+                args.no_stream,
+                args.no_tools,
+            ).await;
+
+            match result {
+                Ok(Some(text)) => {
+                    if args.no_stream {
+                        println!("{}", text);
+                    }
+                    return Ok(());
+                }
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    // Fall back to inline mode
+                    eprintln!("{} Daemon connection failed: {}", "Warning:".yellow(), e);
+                    eprintln!("{} Falling back to inline mode...", "  ↳".dimmed());
+                }
+            }
+        } else if args.prompt.is_some() {
+            // Single prompt mode: try auto-starting daemon
+            eprintln!("{} Daemon not running, starting it...", "⟡".dimmed());
+            let pid = crate::daemon::spawn_daemon()?;
+            eprintln!("{} Daemon started (PID {})", "✓".green(), pid);
+
+            if let Ok(()) = crate::daemon::wait_for_socket(60).await {
+                let result = crate::daemon::chat_via_daemon(
+                    args.prompt.as_deref().unwrap_or(""),
+                    args.model.clone(),
+                    args.system.clone(),
+                    args.no_stream,
+                    args.no_tools,
+                ).await;
+
+                match result {
+                    Ok(Some(text)) => {
+                        if args.no_stream {
+                            println!("{}", text);
+                        }
+                        return Ok(());
+                    }
+                    Ok(None) => return Ok(()),
+                    Err(e) => {
+                        eprintln!("{} Daemon chat failed: {}", "Warning:".yellow(), e);
+                        eprintln!("{} Falling back to inline mode...", "  ↳".dimmed());
+                    }
+                }
+            } else {
+                eprintln!("{} Daemon did not become ready, falling back to inline mode", "Warning:".yellow());
+            }
+        }
+    }
+
+    // Inline mode (current behavior)
+    let config = Config::load()?;
+    let soul = crate::soul::Soul::load_or_fallback()?;
+    let memory = crate::memory::MemoryStore::load()?;
+    let skills = crate::skills::SkillsIndex::discover()?;
 
     // Resolve initial model: -m flag > config
     let resolved = if let Some(model_flag) = &args.model {
@@ -181,6 +279,46 @@ pub async fn run(args: Args) -> Result<()> {
     // so no explicit save is needed here.
 
     result
+}
+
+/// Handle daemon management commands.
+async fn handle_daemon_command(action: &DaemonAction, args: &Args) -> Result<()> {
+    match action {
+        DaemonAction::Start => {
+            eprintln!("{} Starting daemon...", "⟡".bright_cyan());
+            crate::daemon::run_daemon(args.idle_timeout).await?;
+            Ok(())
+        }
+        DaemonAction::Stop => {
+            eprintln!("{} Stopping daemon...", "⟡".bright_cyan());
+            match crate::daemon::stop_daemon().await {
+                Ok(()) => {
+                    eprintln!("{} Daemon stopped.", "✓".green());
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("{} Could not stop daemon: {}", "Error:".red(), e);
+                    // Try to clean up stale files
+                    let sock = crate::daemon::socket_path();
+                    let pid = crate::daemon::pid_path();
+                    if sock.exists() {
+                        std::fs::remove_file(&sock).ok();
+                        eprintln!("{} Removed stale socket", "  ↳".dimmed());
+                    }
+                    if pid.exists() {
+                        std::fs::remove_file(&pid).ok();
+                        eprintln!("{} Removed stale PID file", "  ↳".dimmed());
+                    }
+                    Ok(())
+                }
+            }
+        }
+        DaemonAction::Status => {
+            // Don't treat status failure as an error — just show info
+            let _ = crate::daemon::print_status().await;
+            Ok(())
+        }
+    }
 }
 
 fn handle_command(
@@ -326,6 +464,10 @@ fn handle_command(
                 }
             }
         }
+        Commands::Daemon { .. } => {
+            // Handled in run() before this
+            unreachable!()
+        }
     }
     Ok(())
 }
@@ -420,7 +562,9 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
                                 if new_name.is_empty() {
                                     println!("{} Usage: /model <name> (provider name from config or model ID)", "Error:".red());
                                 } else {
-                                    match agent.switch_model(&new_name) {
+                                    match agent
+                                        .switch_model(&new_name)
+                                    {
                                         Ok(provider_label) => {
                                             let info = agent.info();
                                             println!("{} Switched to {}", "✓".green(), provider_label.bright_white());
@@ -623,18 +767,4 @@ fn print_init_guidance() {
     println!("    {}/SOUL.md       — edit to set your agent's persona", home.display());
     println!("    {}/config.yaml   — set model, base_url, api_key, MCP servers", home.display());
     println!("    {}/memories/     — MEMORY.md & USER.md go here", home.display());
-    println!("    {}/skills/       — drop in SKILL.md files", home.display());
-    println!();
-    println!(
-        "  {} Configure a provider (examples in config.yaml):",
-        "Next:".bright_yellow()
-    );
-    println!("    OpenAI:      export ENCHANTER_API_KEY=your-key");
-    println!("    OpenRouter:  export ENCHANTER_API_KEY=your-key  +  base_url in config.yaml");
-    println!("    Ollama:      export ENCHANTER_BASE_URL=http://localhost:11434/v1");
-    println!();
-    println!(
-        "  {} https://andrewthecoder.com/projects/enchanter",
-        "Docs:".bright_cyan()
-    );
 }

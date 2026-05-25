@@ -6,12 +6,14 @@
 use anyhow::Result;
 use colored::Colorize;
 use serde_json::Value;
+use tokio::sync::mpsc;
 
 use crate::api::{LlmClient, Message};
 use crate::config::{Config, ResolvedModel};
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::prompt;
+use crate::protocol::Event;
 use crate::session::Session;
 use crate::skills::SkillsIndex;
 use crate::soul::Soul;
@@ -144,6 +146,34 @@ impl AgentSession {
 
         let result = self.run_agent_loop().await?;
         Ok(result)
+    }
+
+    /// Run one agent loop, emitting events through a channel.
+    /// Returns the final ChatResult and the receiving end of the event channel.
+    /// The caller should read events from the receiver and handle them (print,
+    /// send over socket, etc.). Event::Done signals the end.
+    pub async fn chat_events(&mut self, user_prompt: &str) -> Result<(ChatResult, mpsc::UnboundedReceiver<Event>)> {
+        let user_msg = Message::user(user_prompt);
+        self.session.append(&user_msg)?;
+        self.messages.push(user_msg);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let result = self.run_agent_loop_events(&tx).await?;
+        Ok((result, rx))
+    }
+
+    /// Retry the last message, emitting events through a channel.
+    #[allow(dead_code)]
+    pub async fn retry_events(&mut self) -> Result<(ChatResult, mpsc::UnboundedReceiver<Event>)> {
+        let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
+        if let Some(idx) = last_user_idx {
+            if idx + 1 < self.messages.len() {
+                self.messages.truncate(idx + 1);
+            }
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let result = self.run_agent_loop_events(&tx).await?;
+        Ok((result, rx))
     }
 
     /// Continue from existing messages (e.g., /retry).
@@ -279,6 +309,99 @@ impl AgentSession {
             }
         }
 
+        anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
+    }
+
+    /// Event-yielding version of the agent loop.
+    /// Sends structured events through the channel instead of printing to stdout.
+    /// Supports both streaming and non-streaming modes.
+    async fn run_agent_loop_events(&mut self, tx: &mpsc::UnboundedSender<Event>) -> Result<ChatResult> {
+        let max_turns = self.config.max_turns();
+        let soft_limit = self.config.soft_limit();
+        let tools_payload = self.tools_payload();
+        let mut total_tool_calls = 0;
+        let mut soft_limit_triggered = false;
+
+        for turn in 0..max_turns {
+            let turns_remaining = max_turns.saturating_sub(turn);
+
+            if !soft_limit_triggered && soft_limit > 0 && turns_remaining <= soft_limit {
+                soft_limit_triggered = true;
+                let nudge = format!(
+                    "[System] You have {} turns remaining before the hard limit. Wrap up now: produce a final text response without any tool calls.",
+                    turns_remaining,
+                );
+                self.messages.push(Message::user(&nudge));
+            }
+
+            let result = if self.no_stream {
+                self.client.chat(self.messages.clone(), tools_payload.clone()).await?
+            } else {
+                // Streaming: send each content token as an event
+                self.client.chat_stream_with(
+                    self.messages.clone(),
+                    tools_payload.clone(),
+                    |token| {
+                        let _ = tx.send(Event::Content { text: token.to_string() });
+                    },
+                ).await?
+            };
+
+            if result.has_tool_calls() {
+                let tool_calls = result.tool_calls.unwrap();
+                // If there was content alongside the tool calls, emit it
+                if let Some(ref content) = result.content {
+                    if !content.is_empty() {
+                        let _ = tx.send(Event::Content { text: content.clone() });
+                    }
+                }
+                for tc in &tool_calls {
+                    let _ = tx.send(Event::ToolCall {
+                        id: tc.id.clone(),
+                        name: tc.function.name.clone(),
+                        arguments: tc.function.arguments.clone(),
+                    });
+                }
+
+                let assistant_msg = Message::assistant_with_tools(tool_calls.clone(), result.content);
+                self.session.append(&assistant_msg)?;
+                self.messages.push(assistant_msg);
+
+                for tc in &tool_calls {
+                    let tc_args: Value = serde_json::from_str(&tc.function.arguments)
+                        .unwrap_or(Value::Null);
+                    let output = dispatch_tool(&tc.function.name, &tc_args, &mut self.memory, &mut self.mcp).await;
+                    let _ = tx.send(Event::ToolResult {
+                        id: tc.id.clone(),
+                        content: output.clone(),
+                    });
+                    let tool_msg = Message::tool_result(&tc.id, output);
+                    self.session.append(&tool_msg)?;
+                    self.messages.push(tool_msg);
+                    total_tool_calls += 1;
+                }
+            } else {
+                let content = result.content;
+                // Non-streaming mode: send the full content at once
+                if self.no_stream {
+                    if let Some(ref text) = content {
+                        let _ = tx.send(Event::Content { text: text.clone() });
+                    }
+                }
+                if let Some(ref text) = content {
+                    self.session.append(&Message::assistant(text))?;
+                }
+                let _ = tx.send(Event::Done);
+                return Ok(ChatResult {
+                    response: content,
+                    tool_calls: total_tool_calls,
+                });
+            }
+        }
+
+        let _ = tx.send(Event::Error {
+            message: format!("Max agent turns reached ({}).", max_turns),
+        });
         anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
     }
 }

@@ -125,7 +125,43 @@ enchanter --no-stream -p "Summarize this"
 | `/sessions`| List session history                      |
 | `/exit`    | Quit (also Ctrl+D for clean exit)        |
 
-### Info subcommands
+## Daemon mode
+
+Enchanter can run as a background daemon that keeps MCP servers warm. This
+eliminates the 3–15 second cold start on every invocation (most of which is
+spawning MCP server processes).
+
+```bash
+# Start the daemon
+enchanter daemon start
+
+# Check status
+enchanter daemon status
+
+# Stop
+enchanter daemon stop
+```
+
+The daemon listens on `~/.enchanter/sock` and writes its PID to
+`~/.enchanter/daemon.pid`. It auto-shuts down after 10 minutes of inactivity
+(configurable with `--idle-timeout`).
+
+**Auto-start:** when you run `enchanter -p "question"` and the daemon isn't
+running, Enchanter will start it automatically, wait for it to become ready,
+then send your request through it. This gets you fast responses with zero
+setup.
+
+**Fallback:** if the daemon can't be reached, Enchanter falls back to inline
+mode (current behavior). Use `--no-daemon` to skip the daemon entirely:
+
+```bash
+enchanter --no-daemon -p "quick question"
+```
+
+The daemon streams responses as JSONL events over the Unix socket, so you
+still see content tokens as they arrive — not just a final blob of text.
+
+## Info subcommands
 
 ```bash
 enchanter soul      # Show current SOUL.md
@@ -135,6 +171,7 @@ enchanter config    # Show resolved configuration
 enchanter prompt    # Show assembled system prompt
 enchanter sessions  # List session history
 enchanter sessions <id>  # Show a specific session
+enchanter daemon status  # Show daemon status (model, MCP, uptime)
 ```
 
 ### Session summaries

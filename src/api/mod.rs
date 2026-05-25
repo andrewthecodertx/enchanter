@@ -226,13 +226,23 @@ impl LlmClient {
         }
     }
 
-    /// Streaming chat with tool support. Prints content tokens as they arrive.
-    /// Returns a ChatResult with content and any tool_calls.
+    /// Streaming chat with tool support. Content tokens are emitted via the
+    /// provided callback instead of printing directly — this allows both the
+    /// CLI (print to stdout) and the daemon (send over socket) to consume
+    /// streaming output.
     ///
     /// The SSE stream parsing (data: prefix, [DONE] sentinel, line buffering)
     /// follows the OpenAI streaming protocol as implemented in OpenCode's
     /// provider layer (opencode/packages/opencode/src/provider/).
-    pub async fn chat_stream(&self, messages: Vec<Message>, tools: Option<Value>) -> Result<ChatResult> {
+    pub async fn chat_stream_with<F>(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Value>,
+        mut on_token: F,
+    ) -> Result<ChatResult>
+    where
+        F: FnMut(&str),
+    {
         let url = format!("{}/chat/completions", self.base_url);
 
         let request = ChatRequest {
@@ -264,7 +274,6 @@ impl LlmClient {
             std::collections::BTreeMap::new();
         let mut stream = response.bytes_stream();
         use futures_util::StreamExt;
-        use std::io::Write;
 
         let mut buffer = String::new();
         let mut done = false;
@@ -290,18 +299,13 @@ impl LlmClient {
                         for choice in &delta.choices {
                             if let Some(content) = &choice.delta.content {
                                 full_content.push_str(content);
-                                print!("{}", content);
-                                std::io::stdout().flush().ok();
+                                on_token(content);
                             }
 
                             // Accumulate tool call deltas — the incremental index-based accumulation
                             // pattern (streaming partial function name/arguments by index) follows
                             // the OpenAI streaming spec as used in OpenCode
                             // (opencode/packages/opencode/src/provider/) and Claude Code.
-                            // OpenCode uses the Vercel AI SDK which handles this via
-                            // streamText/toolCall streaming; hermes-agent accumulates
-                            // tool_call deltas in _process_streaming_response()
-                            // (hermes-agent/run_agent.py).
                             if let Some(tc_deltas) = &choice.delta.tool_calls {
                                 for tc_delta in tc_deltas {
                                     let idx = tc_delta.index.unwrap_or(0);
@@ -347,11 +351,6 @@ impl LlmClient {
             Some(calls)
         };
 
-        // Print newline only if we printed content
-        if !full_content.is_empty() {
-            println!();
-        }
-
         let content = if full_content.is_empty() {
             None
         } else {
@@ -359,6 +358,19 @@ impl LlmClient {
         };
 
         Ok(ChatResult { content, tool_calls })
+    }
+
+    /// Convenience wrapper: streaming chat that prints tokens to stdout.
+    pub async fn chat_stream(&self, messages: Vec<Message>, tools: Option<Value>) -> Result<ChatResult> {
+        use std::io::Write;
+        let result = self.chat_stream_with(messages, tools, |token| {
+            print!("{}", token);
+            std::io::stdout().flush().ok();
+        }).await?;
+        if result.content.is_some() {
+            println!();
+        }
+        Ok(result)
     }
 
     /// Non-streaming chat.
