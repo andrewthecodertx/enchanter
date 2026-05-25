@@ -361,9 +361,9 @@ fn tool_read_file(args: &Value) -> String {
         total_lines
     ));
 
-    // Truncate if needed
+    // Truncate if needed (floor_char_boundary avoids splitting a multi-byte UTF-8 char)
     if result.len() > 10_000 {
-        result.truncate(10_000);
+        result.truncate(result.floor_char_boundary(10_000));
         result.push_str("\n... [truncated]");
     }
 
