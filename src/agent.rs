@@ -48,6 +48,7 @@ pub struct SessionInfo {
     pub base_url: String,
     pub api_key_set: bool,
     pub max_turns: u32,
+    pub soft_limit: u32,
     pub tool_count: usize,
     pub mcp_tool_count: usize,
     pub mcp_servers: Vec<String>,
@@ -125,6 +126,7 @@ impl AgentSession {
             base_url: self.resolved.base_url.clone(),
             api_key_set: self.resolved.api_key.is_some(),
             max_turns: self.config.max_turns(),
+            soft_limit: self.config.soft_limit(),
             tool_count,
             mcp_tool_count: self.mcp.total_tool_count(),
             mcp_servers: self.mcp.server_names().into_iter().map(String::from).collect(),
@@ -222,13 +224,28 @@ impl AgentSession {
         Ok(provider_label)
     }
 
-    /// Run the agent loop: call model, handle tool_calls, repeat until done or max_turns.
+    /// Run the agent loop: call model, handle tool_calls, with soft-limit nudging
+    /// and a hard turn limit as a safety net.
     async fn run_agent_loop(&mut self) -> Result<ChatResult> {
         let max_turns = self.config.max_turns();
+        let soft_limit = self.config.soft_limit();
         let tools_payload = self.tools_payload();
         let mut total_tool_calls = 0;
+        let mut soft_limit_triggered = false;
 
-        for _ in 0..max_turns {
+        for turn in 0..max_turns {
+            let turns_remaining = max_turns.saturating_sub(turn);
+
+            // Soft limit: inject a nudge when we're running low on turns
+            if !soft_limit_triggered && soft_limit > 0 && turns_remaining <= soft_limit {
+                soft_limit_triggered = true;
+                let nudge = format!(
+                    "[System] You have {} turns remaining before the hard limit. Wrap up now: produce a final text response without any tool calls.",
+                    turns_remaining,
+                );
+                self.messages.push(Message::user(&nudge));
+            }
+
             let result = if self.no_stream {
                 self.client.chat(self.messages.clone(), tools_payload.clone()).await?
             } else {

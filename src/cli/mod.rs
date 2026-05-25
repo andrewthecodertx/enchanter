@@ -248,7 +248,7 @@ fn handle_command(
             println!("{}", "═══ CONFIG ═══".bright_cyan());
             println!("  Model:      {}", config.model_id());
             println!("  Base URL:   {}", config.base_url());
-            println!("  Max turns:  {}", config.max_turns());
+            println!("  Max turns:  {} (soft limit: {})", config.max_turns(), config.soft_limit());
             println!(
                 "  API key:    {}",
                 if config.api_key().is_some() {
@@ -379,7 +379,7 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
                             println!("  Model:    {}", info.model.bright_white());
                             println!("  Base URL: {}", info.base_url.bright_white());
                             println!("  API key:  {}", key_status);
-                            println!("  Max:      {}", info.max_turns);
+                            println!("  Max:      {} (soft: {})", info.max_turns, info.soft_limit);
                             continue;
                         }
                         "/prompt" => {

@@ -65,6 +65,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub max_turns: Option<u32>,
     #[serde(default)]
+    pub soft_limit: Option<u32>,
+    #[serde(default)]
     #[allow(dead_code)]
     pub reasoning_effort: Option<String>,
     #[serde(default)]
@@ -248,8 +250,16 @@ impl Config {
         ResolvedModel { model, base_url, api_key }
     }
 
+    /// Hard turn limit (default 150). The agent loop will always stop here.
     pub fn max_turns(&self) -> u32 {
-        self.agent.max_turns.unwrap_or(60)
+        self.agent.max_turns.unwrap_or(150)
+    }
+
+    /// Soft limit: turns remaining before the agent is nudged to wrap up.
+    /// When turns_used >= (max_turns - soft_limit), a system hint is injected.
+    /// Defaults to 10. Set to 0 to disable soft-limit nudges.
+    pub fn soft_limit(&self) -> u32 {
+        self.agent.soft_limit.unwrap_or(10)
     }
 
     pub fn summarize_on_exit(&self) -> bool {
@@ -273,7 +283,7 @@ mod tests {
     fn default_config() {
         let c = Config::default();
         assert_eq!(c.model_id(), "gpt-4.1-mini");
-        assert_eq!(c.max_turns(), 60);
+        assert_eq!(c.max_turns(), 150);
     }
 
     #[test]
