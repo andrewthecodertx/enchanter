@@ -77,9 +77,13 @@ fn sessions_dir() -> PathBuf {
 }
 
 impl Session {
-    /// Start a new session, creating the JSONL file.
+    /// Start a new session in the default sessions directory.
     pub fn new(model: &str) -> Result<Self> {
-        let dir = sessions_dir();
+        Self::new_in_dir(model, &sessions_dir())
+    }
+
+    /// Start a new session, creating the JSONL file in the given directory.
+    pub fn new_in_dir(model: &str, dir: &std::path::Path) -> Result<Self> {
         std::fs::create_dir_all(&dir).context("creating sessions directory")?;
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -156,9 +160,14 @@ impl Session {
         Ok(())
     }
 
-    /// Load a session from a file, returning all entries.
+    /// Load a session from the default sessions directory by ID.
     pub fn load(id: &str) -> Result<Vec<SessionEntry>> {
-        let path = sessions_dir().join(format!("{}.jsonl", id));
+        Self::load_from_dir(id, &sessions_dir())
+    }
+
+    /// Load a session from a specific directory by ID.
+    pub fn load_from_dir(id: &str, dir: &std::path::Path) -> Result<Vec<SessionEntry>> {
+        let path = dir.join(format!("{}.jsonl", id));
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("reading session file {}", path.display()))?;
 
@@ -210,9 +219,13 @@ impl Session {
         messages
     }
 
-    /// List all sessions, sorted by most recent first (based on started_at).
+    /// List all sessions in the default sessions directory.
     pub fn list_all() -> Result<Vec<SessionMeta>> {
-        let dir = sessions_dir();
+        Self::list_all_in_dir(&sessions_dir())
+    }
+
+    /// List all sessions in a specific directory, sorted by most recent first.
+    pub fn list_all_in_dir(dir: &std::path::Path) -> Result<Vec<SessionMeta>> {
         if !dir.exists() {
             return Ok(Vec::new());
         }
@@ -332,23 +345,18 @@ fn message_to_entries(message: &Message) -> Vec<SessionEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::TempDir;
 
-    fn setup_test_home() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempdir().unwrap();
-        let home = dir.path().join(".enchanter");
-        // SAFETY: test-only, single-threaded for this test scope
-        unsafe { std::env::set_var("ENCHANTER_HOME", home.to_string_lossy().to_string()) };
-        (dir, home)
+    fn setup_test_sessions_dir() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        (dir, sessions_dir)
     }
-
-    // Note: these tests must not run in parallel since they share
-    // the ENCHANTER_HOME env var. Use --test-threads=1 if issues arise.
 
     #[test]
     fn session_records_messages() {
-        let _dir = setup_test_home();
-        let mut session = Session::new("test-model").unwrap();
+        let (_dir, sdir) = setup_test_sessions_dir();
+        let mut session = Session::new_in_dir("test-model", &sdir).unwrap();
 
         let system = Message::system("You are helpful.");
         let user = Message::user("hello");
@@ -363,8 +371,8 @@ mod tests {
 
     #[test]
     fn session_roundtrip() {
-        let _dir = setup_test_home();
-        let mut session = Session::new("test-model-rt").unwrap();
+        let (_dir, sdir) = setup_test_sessions_dir();
+        let mut session = Session::new_in_dir("test-model-rt", &sdir).unwrap();
 
         let system = Message::system("You are a test.");
         let user = Message::user("what is 2+2?");
@@ -374,9 +382,8 @@ mod tests {
         session.append(&user).unwrap();
         session.append(&assistant).unwrap();
 
-        let entries = Session::load(session.id()).unwrap();
+        let entries = Session::load_from_dir(session.id(), &sdir).unwrap();
         let messages = Session::entries_to_messages(&entries);
-
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, "system");
         assert_eq!(messages[1].role, "user");
@@ -386,8 +393,8 @@ mod tests {
 
     #[test]
     fn session_records_tool_calls() {
-        let _dir = setup_test_home();
-        let mut session = Session::new("test-model-tc").unwrap();
+        let (_dir, sdir) = setup_test_sessions_dir();
+        let mut session = Session::new_in_dir("test-model-tc", &sdir).unwrap();
 
         let system = Message::system("You are helpful.");
         let user = Message::user("list files");
@@ -407,7 +414,7 @@ mod tests {
         session.append(&assistant_with_tools).unwrap();
         session.append(&tool_result).unwrap();
 
-        let entries = Session::load(session.id()).unwrap();
+        let entries = Session::load_from_dir(session.id(), &sdir).unwrap();
         let tool_call_entry = entries.iter().find(|e| {
             matches!(e, SessionEntry::ToolCall { name, .. } if name == "list_directory")
         });
@@ -421,12 +428,12 @@ mod tests {
 
     #[test]
     fn list_sessions_finds_created_session() {
-        let _dir = setup_test_home();
-        let mut session = Session::new("test-model-list").unwrap();
+        let (_dir, sdir) = setup_test_sessions_dir();
+        let mut session = Session::new_in_dir("test-model-list", &sdir).unwrap();
         let user = Message::user("hello");
         session.append(&user).unwrap();
 
-        let sessions = Session::list_all().unwrap();
+        let sessions = Session::list_all_in_dir(&sdir).unwrap();
         assert!(!sessions.is_empty());
 
         let found = sessions.iter().find(|s| s.id == session.id());

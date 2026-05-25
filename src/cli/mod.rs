@@ -6,13 +6,6 @@
 //! /model, /retry, /undo follow the convention established by hermes-agent
 //! (hermes-agent/cli.py slash command handling).
 //!
-//! The agent turn loop (call model → check for tool_calls → dispatch tools →
-//! append results → repeat until text-only response or max_turns) follows the
-//! standard agentic loop pattern used by hermes-agent
-//! (hermes-agent/agent/conversation_loop.py), Claude Code
-//! (claude-code/src/agent/agent.ts), and OpenCode
-//! (opencode/packages/opencode/src/session/).
-//!
 //! Session summarization on exit (calling the LLM with a truncated conversation,
 //! timeout with fallback) is adapted from hermes-agent's background_review
 //! pattern (hermes-agent/agent/background_review.py).
@@ -24,18 +17,11 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use serde_json::Value;
 
-use crate::api::{LlmClient, Message};
+use crate::agent::{AgentSession, SessionInfo};
 use crate::config::{Config, ResolvedModel};
-use crate::mcp::McpManager;
-use crate::memory::MemoryStore;
-use crate::prompt;
 use crate::session::Session;
-use crate::skills::SkillsIndex;
-use crate::soul::Soul;
 use crate::summary;
-use crate::tools;
 
 /// Format bytes in human-readable form.
 fn format_bytes(bytes: u64) -> String {
@@ -90,9 +76,9 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     let config = Config::load()?;
-    let soul = Soul::load_or_fallback()?;
-    let mut memory = MemoryStore::load()?;
-    let skills = SkillsIndex::discover()?;
+    let soul = crate::soul::Soul::load_or_fallback()?;
+    let memory = crate::memory::MemoryStore::load()?;
+    let skills = crate::skills::SkillsIndex::discover()?;
 
     if let Some(cmd) = &args.command {
         return handle_command(cmd, &config, &soul, &memory, &skills);
@@ -100,10 +86,8 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Resolve initial model: -m flag > config
     let resolved = if let Some(model_flag) = &args.model {
-        // If -m matches a named provider, use that provider's settings
         config.resolve_provider(model_flag)
             .unwrap_or_else(|| {
-                // Otherwise, use the flag as a bare model name with default provider settings
                 let default = config.resolve_default();
                 ResolvedModel {
                     model: model_flag.clone(),
@@ -115,41 +99,96 @@ pub async fn run(args: Args) -> Result<()> {
         config.resolve_default()
     };
 
-    let client = LlmClient::new(&resolved.base_url, resolved.api_key.as_deref(), &resolved.model);
+    // Create agent session
+    let mut agent = AgentSession::new(
+        config,
+        soul,
+        memory,
+        skills,
+        resolved,
+        args.no_stream,
+        args.no_tools,
+        args.system.clone(),
+    )?;
+
+    // Initialize system prompt in session
+    agent.session.append(&agent.messages[0])?;
 
     // Cap + summarize memory if needed
-    let mem_config = config.memory_config().clone();
-    if let Err(e) = memory.manage(&client, &mem_config).await {
+    let mem_config = agent.config.memory_config().clone();
+    if let Err(e) = agent.memory.manage(&agent.client, &mem_config).await {
         eprintln!("{} memory management: {}", "Warning:".yellow(), e);
     }
 
     // Start MCP servers
-    let mut mcp = McpManager::new();
-    if !args.no_tools && !config.mcp.servers.is_empty() {
-        mcp.start_all(&config.mcp.servers).await;
-    }
-
-    // Build combined tools payload
-    let tools_payload = build_tools(&args, &mcp);
+    agent.start_mcp().await;
 
     if let Some(user_prompt) = &args.prompt {
-        let mut session = Session::new(&resolved.model)?;
-        let result = run_single(&args, &config, &soul, &mut memory, &skills, &client, &resolved, &mut mcp, &tools_payload, user_prompt, &mut session).await;
-        mcp.shutdown_all().await;
-        return result;
+        let result = agent.chat(user_prompt).await;
+        if args.no_stream {
+            if let Ok(cr) = &result {
+                if let Some(ref text) = cr.response {
+                    println!("{}", text);
+                }
+            }
+        }
+        agent.shutdown_mcp().await;
+        return result.map(|_| ());
     }
 
-    let result = run_repl(&args, &config, &soul, &mut memory, &skills, client, resolved, &mut mcp, &tools_payload).await;
-    mcp.shutdown_all().await;
+    let result = run_repl(&mut agent, &args).await;
+    agent.shutdown_mcp().await;
+
+    // Exit summary
+    if agent.config.summarize_on_exit() && summary::should_summarize(&agent.messages) {
+        eprintln!("{}", "  Generating session summary...".dimmed());
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            summary::generate_session_summary(&agent.client, &agent.messages),
+        )
+        .await
+        {
+            Ok(Ok(summary_text)) if !summary_text.is_empty() => {
+                if let Err(e) = agent.memory.add_memory(format!("session_summary\n{}", summary_text)) {
+                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
+                } else {
+                    eprintln!("{}", "  Session summary saved to memory.".dimmed());
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                let fallback = summary::fallback_summary(&agent.messages);
+                if let Err(e2) = agent.memory.add_memory(format!("session_summary\n{}", fallback)) {
+                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e2);
+                } else {
+                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
+                }
+                eprintln!("{} Summary generation failed: {}", "Warning:".yellow(), e);
+            }
+            Err(_) => {
+                let fallback = summary::fallback_summary(&agent.messages);
+                if let Err(e) = agent.memory.add_memory(format!("session_summary\n{}", fallback)) {
+                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
+                } else {
+                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
+                }
+                eprintln!("{}", "  Summary timed out, using fallback.".dimmed());
+            }
+        }
+    }
+
+    // Memory is auto-saved on every mutation (add_memory/remove/replace all persist immediately),
+    // so no explicit save is needed here.
+
     result
 }
 
 fn handle_command(
     cmd: &Commands,
     config: &Config,
-    soul: &Soul,
-    memory: &MemoryStore,
-    skills: &SkillsIndex,
+    soul: &crate::soul::Soul,
+    memory: &crate::memory::MemoryStore,
+    skills: &crate::skills::SkillsIndex,
 ) -> Result<()> {
     match cmd {
         Commands::Soul => {
@@ -233,14 +272,13 @@ fn handle_command(
             }
         }
         Commands::Prompt => {
-            let system_prompt = prompt::build_system_prompt(soul, memory, skills, config);
+            let system_prompt = crate::prompt::build_system_prompt(soul, memory, skills, config);
             println!("{}", "═══ SYSTEM PROMPT ═══".bright_cyan());
             println!("{}", system_prompt);
         }
         Commands::Sessions { id } => {
             match id {
                 Some(session_id) => {
-                    // Show a specific session
                     match Session::load(&session_id) {
                         Ok(entries) => {
                             let messages = Session::entries_to_messages(&entries);
@@ -269,7 +307,6 @@ fn handle_command(
                     }
                 }
                 None => {
-                    // List all sessions
                     let sessions = Session::list_all()?;
                     if sessions.is_empty() {
                         println!("No sessions found.");
@@ -293,137 +330,9 @@ fn handle_command(
     Ok(())
 }
 
-/// Build the combined tools JSON payload: built-in + MCP tools.
-fn build_tools(args: &Args, mcp: &McpManager) -> Option<Value> {
-    if args.no_tools {
-        return None;
-    }
-    let mut all_tools = tools::tools_json();
-    all_tools.extend(mcp.all_tools_json());
-    Some(Value::Array(all_tools))
-}
-
-/// Dispatch a tool call — built-in tools first, then MCP.
-async fn dispatch_tool(
-    name: &str,
-    args: &Value,
-    memory: &mut MemoryStore,
-    mcp: &mut McpManager,
-) -> String {
-    // Check if it's a built-in tool
-    let built_in_names = ["exec_command", "read_file", "write_file", "edit_file",
-                          "search_files", "list_directory", "memory"];
-    if built_in_names.contains(&name) {
-        return tools::dispatch(name, args, memory);
-    }
-
-    // Try MCP dispatch (tools are prefixed server_name:tool_name)
-    if name.contains(':') {
-        match mcp.dispatch(name, args).await {
-            Some(Ok(result)) => result,
-            Some(Err(e)) => format!("MCP error: {}", e),
-            None => format!("Unknown tool: {}", name),
-        }
-    } else {
-        format!("Unknown tool: {}", name)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_single(
-    args: &Args,
-    config: &Config,
-    soul: &Soul,
-    memory: &mut MemoryStore,
-    skills: &SkillsIndex,
-    client: &LlmClient,
-    resolved: &ResolvedModel,
-    mcp: &mut McpManager,
-    tools_payload: &Option<Value>,
-    user_prompt: &str,
-    session: &mut Session,
-) -> Result<()> {
-    let system_content = match &args.system {
-        Some(s) => s.clone(),
-        None => prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model),
-    };
-
-    let system_msg = Message::system(&system_content);
-    let user_msg = Message::user(user_prompt);
-
-    // Persist initial messages
-    session.append(&system_msg)?;
-    session.append(&user_msg)?;
-
-    let mut messages = vec![system_msg, user_msg];
-    let max_turns = config.max_turns();
-
-    for _ in 0..max_turns {
-        let result = if args.no_stream {
-            client.chat(messages.clone(), tools_payload.clone()).await?
-        } else {
-            client.chat_stream(messages.clone(), tools_payload.clone()).await?
-        };
-
-        if result.has_tool_calls() {
-            let tool_calls = result.tool_calls.unwrap();
-            let assistant_msg = Message::assistant_with_tools(tool_calls.clone(), result.content);
-            session.append(&assistant_msg)?;
-            messages.push(assistant_msg);
-
-            for tc in &tool_calls {
-                print_tool_call(&tc.function.name, &tc.function.arguments);
-                let tc_args: Value = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(Value::Null);
-                let output = dispatch_tool(&tc.function.name, &tc_args, memory, mcp).await;
-                let tool_msg = Message::tool_result(&tc.id, output);
-                session.append(&tool_msg)?;
-                messages.push(tool_msg);
-            }
-        } else {
-            if let Some(content) = &result.content
-                && args.no_stream
-            {
-                println!("{}", content);
-            }
-            if let Some(content) = &result.content {
-                session.append(&Message::assistant(content))?;
-            }
-            return Ok(());
-        }
-    }
-
-    anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_repl(
-    args: &Args,
-    config: &Config,
-    soul: &Soul,
-    memory: &mut MemoryStore,
-    skills: &SkillsIndex,
-    mut client: LlmClient,
-    mut resolved: ResolvedModel,
-    mcp: &mut McpManager,
-    tools_payload: &Option<Value>,
-) -> Result<()> {
-    let system_prompt = if let Some(ref sys_override) = args.system {
-        sys_override.clone()
-    } else {
-        prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model)
-    };
-
-    let mut messages = vec![Message::system(&system_prompt)];
-    let max_turns = config.max_turns();
-
-    // Create a session for conversation persistence
-    let mut session = Session::new(&resolved.model)?;
-    if let Err(e) = session.append(&messages[0]) {
-        eprintln!("{} Could not create session file: {}", "Warning:".yellow(), e);
-    }
-
-    print_banner(&resolved.model, &resolved.base_url, soul, skills, tools_payload, mcp, session.id());
+async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
+    let info = agent.info();
+    print_banner(&info);
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -440,59 +349,45 @@ async fn run_repl(
                     match line.as_str() {
                         "/exit" | "/quit" => break,
                         "/clear" => {
-                            let fresh_prompt = if let Some(ref sys_override) = args.system {
-                                sys_override.clone()
-                            } else {
-                                prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model)
-                            };
-                            messages = vec![Message::system(&fresh_prompt)];
-                            // Start a fresh session for the cleared conversation
-                            match Session::new(&resolved.model) {
-                                Ok(mut new_session) => {
-                                    if let Err(e) = new_session.append(&messages[0]) {
-                                        eprintln!("{} Could not create session: {}", "Warning:".yellow(), e);
-                                    }
-                                    session = new_session;
-                                }
-                                Err(e) => eprintln!("{} Could not create session: {}", "Warning:".yellow(), e),
-                            }
+                            agent.clear()?;
                             println!("{}", "Conversation cleared.".dimmed());
                             continue;
                         }
                         "/help" => {
-                            print_help(config);
+                            print_help(&agent.config);
                             continue;
                         }
                         "/soul" => {
-                            println!("{}", soul.content);
+                            println!("{}", agent.soul.content);
                             continue;
                         }
                         "/memory" => {
-                            println!("{}", memory.format_for_prompt());
+                            println!("{}", agent.memory.format_for_prompt());
                             continue;
                         }
                         "/skills" => {
-                            println!("{}", skills.format_index_for_prompt());
+                            println!("{}", agent.skills.format_index_for_prompt());
                             continue;
                         }
                         "/config" => {
-                            let key_status = if resolved.api_key.is_some() {
+                            let info = agent.info();
+                            let key_status = if info.api_key_set {
                                 "configured ✓".green()
                             } else {
                                 "not set (not needed for local providers)".dimmed()
                             };
-                            println!("  Model:    {}", resolved.model.bright_white());
-                            println!("  Base URL: {}", resolved.base_url.bright_white());
+                            println!("  Model:    {}", info.model.bright_white());
+                            println!("  Base URL: {}", info.base_url.bright_white());
                             println!("  API key:  {}", key_status);
-                            println!("  Max:      {}", max_turns);
+                            println!("  Max:      {}", info.max_turns);
                             continue;
                         }
                         "/prompt" => {
-                            println!("{}", messages.first().map(|m| m.content.as_deref().unwrap_or("")).unwrap_or(""));
+                            println!("{}", agent.messages.first().map(|m| m.content.as_deref().unwrap_or("")).unwrap_or(""));
                             continue;
                         }
                         "/tools" => {
-                            print_tools(mcp);
+                            print_tools(&agent.mcp);
                             continue;
                         }
                         "/sessions" => {
@@ -525,72 +420,42 @@ async fn run_repl(
                                 if new_name.is_empty() {
                                     println!("{} Usage: /model <name> (provider name from config or model ID)", "Error:".red());
                                 } else {
-                                    // Try named provider first, then fall back to bare model ID
-                                    let new_resolved = config.resolve_provider(&new_name)
-                                        .unwrap_or_else(|| {
-                                            let default = config.resolve_default();
-                                            ResolvedModel {
-                                                model: new_name.clone(),
-                                                base_url: default.base_url,
-                                                api_key: default.api_key,
-                                            }
-                                        });
-
-                                    let provider_label = if config.providers.contains_key(&new_name) {
-                                        format!("{} (provider: {})", new_resolved.model, new_name)
-                                    } else {
-                                        new_resolved.model.clone()
-                                    };
-
-                                    client = LlmClient::new(
-                                        &new_resolved.base_url,
-                                        new_resolved.api_key.as_deref(),
-                                        &new_resolved.model,
-                                    );
-                                    resolved = new_resolved.clone();
-
-                                    // Refresh system prompt to update the Model: line
-                                    if args.system.is_none() {
-                                        let refreshed = prompt::build_system_prompt_with_model(soul, memory, skills, config, &resolved.model);
-                                        if let Some(sys_msg) = messages.first_mut() {
-                                            sys_msg.content = Some(refreshed);
+                                    match agent.switch_model(&new_name) {
+                                        Ok(provider_label) => {
+                                            let info = agent.info();
+                                            println!("{} Switched to {}", "✓".green(), provider_label.bright_white());
+                                            println!("  {} {} | API key: {}",
+                                                "↳".dimmed(),
+                                                info.base_url.bright_white(),
+                                                if info.api_key_set { "set" } else { "none" }.dimmed()
+                                            );
                                         }
+                                        Err(e) => eprintln!("{} {}", "Error:".red(), e),
                                     }
-
-                                    println!("{} Switched to {}", "✓".green(), provider_label.bright_white());
-                                    println!("  {} {} | API key: {}",
-                                        "↳".dimmed(),
-                                        resolved.base_url.bright_white(),
-                                        if resolved.api_key.is_some() { "set" } else { "none" }.dimmed()
-                                    );
                                 }
                                 continue;
                             }
                             if line == "/retry" {
-                                let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-                                if let Some(idx) = last_user_idx {
-                                    if idx + 1 < messages.len() {
-                                        messages.truncate(idx + 1);
-                                    }
-                                    println!("{}", "Retrying last message...".dimmed());
-                                    match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp, &mut session).await {
-                                        Ok(()) => {}
-                                        Err(e) => {
-                                            eprintln!("{} {}", "Error:".red(), e);
-                                            if !messages.is_empty() && messages.last().is_some_and(|m| m.role == "user") {
-                                                messages.pop();
+                                match agent.retry().await {
+                                    Ok(cr) => {
+                                        if agent.no_stream {
+                                            if let Some(ref text) = cr.response {
+                                                println!("{}", text);
                                             }
                                         }
                                     }
-                                } else {
-                                    println!("{} No message to retry", "Error:".red());
+                                    Err(e) => {
+                                        eprintln!("{} {}", "Error:".red(), e);
+                                        // Remove the failed user message if it's still there
+                                        if !agent.messages.is_empty() && agent.messages.last().is_some_and(|m| m.role == "user") {
+                                            agent.messages.pop();
+                                        }
+                                    }
                                 }
                                 continue;
                             }
                             if line == "/undo" {
-                                let last_user_idx = messages.iter().rposition(|m| m.role == "user");
-                                if let Some(idx) = last_user_idx {
-                                    messages.truncate(idx);
+                                if agent.undo() {
                                     println!("{}", "Undid last exchange.".dimmed());
                                 } else {
                                     println!("{} Nothing to undo", "Error:".red());
@@ -603,15 +468,17 @@ async fn run_repl(
 
                 rl.add_history_entry(&line).ok();
 
-                let user_msg = Message::user(&line);
-                session.append(&user_msg)?;
-                messages.push(user_msg);
-
-                match run_agent_loop(&client, &mut messages, tools_payload, max_turns, args.no_stream, memory, mcp, &mut session).await {
-                    Ok(()) => {}
+                match agent.chat(&line).await {
+                    Ok(cr) => {
+                        if agent.no_stream {
+                            if let Some(ref text) = cr.response {
+                                println!("{}", text);
+                            }
+                        }
+                    }
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
-                        messages.pop();
+                        agent.messages.pop();
                     }
                 }
             }
@@ -629,146 +496,26 @@ async fn run_repl(
         }
     }
 
-    // Exit summary hook — only on clean exit, only in REPL mode, only if there was a real conversation
-    if config.summarize_on_exit() && summary::should_summarize(&messages) {
-        eprintln!("{}", "  Generating session summary...".dimmed());
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            summary::generate_session_summary(&client, &messages),
-        )
-        .await
-        {
-            Ok(Ok(summary_text)) if !summary_text.is_empty() => {
-                if let Err(e) = memory.add_memory(format!("session_summary\n{}", summary_text)) {
-                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
-                } else {
-                    eprintln!("{}", "  Session summary saved to memory.".dimmed());
-                }
-            }
-            Ok(Ok(_)) => {
-                // Empty summary (not enough conversation) — skip silently
-            }
-            Ok(Err(e)) => {
-                // LLM call failed — use fallback
-                let fallback = summary::fallback_summary(&messages);
-                if let Err(e2) = memory.add_memory(format!("session_summary\n{}", fallback)) {
-                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e2);
-                } else {
-                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
-                }
-                eprintln!("{} Summary generation failed: {}", "Warning:".yellow(), e);
-            }
-            Err(_) => {
-                // Timeout — use fallback
-                let fallback = summary::fallback_summary(&messages);
-                if let Err(e) = memory.add_memory(format!("session_summary\n{}", fallback)) {
-                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
-                } else {
-                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
-                }
-                eprintln!("{}", "  Summary timed out, using fallback.".dimmed());
-            }
-        }
-    }
-
     Ok(())
 }
 
-/// Run the agent loop: call model, handle tool_calls, repeat until done or max_turns.
-async fn run_agent_loop(
-    client: &LlmClient,
-    messages: &mut Vec<Message>,
-    tools_payload: &Option<Value>,
-    max_turns: u32,
-    no_stream: bool,
-    memory: &mut MemoryStore,
-    mcp: &mut McpManager,
-    session: &mut Session,
-) -> Result<()> {
-    for _ in 0..max_turns {
-        let result = if no_stream {
-            client.chat(messages.clone(), tools_payload.clone()).await?
-        } else {
-            client.chat_stream(messages.clone(), tools_payload.clone()).await?
-        };
+fn print_banner(info: &SessionInfo) {
+    let name = "Enchanter";
 
-        if result.has_tool_calls() {
-            let tool_calls = result.tool_calls.unwrap();
-            let assistant_msg = Message::assistant_with_tools(tool_calls.clone(), result.content);
-            session.append(&assistant_msg)?;
-            messages.push(assistant_msg);
-
-            for tc in &tool_calls {
-                print_tool_call(&tc.function.name, &tc.function.arguments);
-                let tc_args: Value = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(Value::Null);
-                let output = dispatch_tool(&tc.function.name, &tc_args, memory, mcp).await;
-                let tool_msg = Message::tool_result(&tc.id, output);
-                session.append(&tool_msg)?;
-                messages.push(tool_msg);
-            }
-        } else {
-            if let Some(content) = &result.content
-                && no_stream
-            {
-                println!("{}", content);
-            }
-            if let Some(content) = &result.content {
-                session.append(&Message::assistant(content))?;
-            }
-            return Ok(());
-        }
-    }
-
-    anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
-}
-
-/// Print a visual indicator for a tool call.
-fn print_tool_call(name: &str, arguments: &str) {
-    let display_args = if arguments.len() > 80 {
-        format!("{}...", &arguments[..80])
-    } else {
-        arguments.to_string()
-    };
-    println!(
-        "  {} {}{}",
-        "⚙".bright_yellow(),
-        name.bright_white(),
-        format!("({})", display_args).dimmed()
-    );
-}
-
-fn print_banner(model: &str, base_url: &str, soul: &Soul, skills: &SkillsIndex, tools_payload: &Option<Value>, mcp: &McpManager, session_id: &str) {
-    let name = soul
-        .content
-        .lines()
-        .next()
-        .unwrap_or("Enchanter")
-        .trim_start_matches('#')
-        .trim();
-
-    let tool_count = tools_payload
-        .as_ref()
-        .and_then(|v| v.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-
-    let mcp_count = mcp.total_tool_count();
-    let mcp_display = if mcp_count > 0 {
-        format!(" ({} MCP)", mcp_count)
+    let mcp_display = if info.mcp_tool_count > 0 {
+        format!(" ({} MCP)", info.mcp_tool_count)
     } else {
         String::new()
     };
 
-    let short_session_id = if session_id.len() > 8 { &session_id[..8] } else { session_id };
+    let short_session_id = if info.session_id.len() > 8 { &info.session_id[..8] } else { &info.session_id };
     println!(
         "\n  {} {}  session={}",
         "⟡".bright_magenta(),
         name.bright_cyan().bold(),
         short_session_id.dimmed()
     );
-    // Shorten common base URLs for display
-    let short_url = base_url
+    let short_url = info.base_url
         .trim_end_matches('/')
         .replace("https://api.openai.com/v1", "openai")
         .replace("http://localhost:11434/v1", "ollama")
@@ -778,19 +525,20 @@ fn print_banner(model: &str, base_url: &str, soul: &Soul, skills: &SkillsIndex, 
     println!(
         "  {} model={} | provider={} | tools={}{} | skills={} | /help for commands\n",
         "  ↳".dimmed(),
-        model.bright_white(),
+        info.model.bright_white(),
         short_url.bright_white(),
-        tool_count.to_string().bright_white(),
+        info.tool_count.to_string().bright_white(),
         mcp_display.dimmed(),
-        skills.skills.len().to_string().bright_white()
+        info.skill_count.to_string().bright_white()
     );
 }
 
-fn print_tools(mcp: &McpManager) {
+fn print_tools(mcp: &crate::mcp::McpManager) {
+
     println!("{}", "═══ TOOLS ═══".bright_cyan());
 
     println!("{}", "── BUILT-IN ──".bright_blue());
-    for tool in tools::tool_definitions() {
+    for tool in crate::tools::tool_definitions() {
         println!(
             "  {}{}",
             tool.name.bright_white(),
@@ -825,7 +573,7 @@ fn print_tools(mcp: &McpManager) {
         }
     }
 
-    let total = tools::tool_definitions().len() + mcp.total_tool_count();
+    let total = crate::tools::tool_definitions().len() + mcp.total_tool_count();
     println!("\n  {} total tools", total);
 }
 

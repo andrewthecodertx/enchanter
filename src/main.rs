@@ -14,6 +14,7 @@
 //!   replace_all semantics (claude-code/src/tools/FileEditTool/),
 //!   memory add/remove/replace/list operations (claude-code/src/memdir/)
 
+mod agent;
 mod api;
 mod cli;
 mod config;
