@@ -18,7 +18,51 @@ mod agent;
 mod api;
 mod cli;
 mod config;
+#[cfg(unix)]
 mod daemon;
+#[cfg(not(unix))]
+mod daemon {
+    //! Stub — daemon mode requires Unix sockets (not available on Windows).
+    use anyhow::{bail, Result};
+
+    pub fn socket_path() -> std::path::PathBuf {
+        unreachable!()
+    }
+
+    pub fn pid_path() -> std::path::PathBuf {
+        unreachable!()
+    }
+
+    pub async fn is_running() -> bool {
+        false
+    }
+
+    pub fn spawn_daemon() -> Result<u32> {
+        bail!("Daemon mode is not supported on this platform (requires Unix sockets)")
+    }
+
+    pub async fn wait_for_socket(_timeout_secs: u64) -> Result<()> {
+        bail!("Daemon mode is not supported on this platform")
+    }
+
+    pub async fn chat_via_daemon(
+        _prompt: &str,
+        _model: Option<String>,
+        _system: Option<String>,
+        _no_stream: bool,
+        _no_tools: bool,
+    ) -> Result<Option<String>> {
+        bail!("Daemon mode is not supported on this platform")
+    }
+
+    pub async fn print_status() -> Result<()> {
+        bail!("Daemon mode is not supported on this platform")
+    }
+
+    pub async fn stop_daemon() -> Result<()> {
+        bail!("Daemon mode is not supported on this platform")
+    }
+}
 mod home;
 mod mcp;
 mod memory;

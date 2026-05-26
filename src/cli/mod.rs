@@ -57,10 +57,12 @@ pub struct Args {
     pub no_tools: bool,
 
     /// Run inline without connecting to the daemon (bypass daemon auto-start).
+    #[cfg(unix)]
     #[arg(long)]
     pub no_daemon: bool,
 
     /// Idle timeout in minutes for the daemon (default: 10).
+    #[cfg(unix)]
     #[arg(long)]
     pub idle_timeout: Option<u64>,
 
@@ -81,6 +83,7 @@ pub enum Commands {
         id: Option<String>,
     },
     /// Daemon management: start, stop, or check status.
+    #[cfg(unix)]
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
@@ -88,6 +91,7 @@ pub enum Commands {
 }
 
 #[derive(Subcommand, Debug)]
+#[cfg(unix)]
 pub enum DaemonAction {
     /// Start the daemon in the background.
     Start,
@@ -102,7 +106,8 @@ pub async fn run(args: Args) -> Result<()> {
         print_init_guidance();
     }
 
-    // Handle daemon management commands first
+    // Handle daemon management commands first (Unix only)
+    #[cfg(unix)]
     if let Some(Commands::Daemon { action }) = &args.command {
         return handle_daemon_command(action, &args).await;
     }
@@ -116,7 +121,8 @@ pub async fn run(args: Args) -> Result<()> {
         return handle_command(cmd, &config, &soul, &memory, &skills);
     }
 
-    // Try daemon mode first (unless --no-daemon)
+    // Try daemon mode first (unless --no-daemon) — Unix only
+    #[cfg(unix)]
     if !args.no_daemon && !args.no_stream {
         if crate::daemon::is_running().await {
             // Daemon is running — use it
@@ -281,7 +287,8 @@ pub async fn run(args: Args) -> Result<()> {
     result
 }
 
-/// Handle daemon management commands.
+/// Handle daemon management commands (Unix only).
+#[cfg(unix)]
 async fn handle_daemon_command(action: &DaemonAction, args: &Args) -> Result<()> {
     match action {
         DaemonAction::Start => {
@@ -464,6 +471,7 @@ fn handle_command(
                 }
             }
         }
+        #[cfg(unix)]
         Commands::Daemon { .. } => {
             // Handled in run() before this
             unreachable!()

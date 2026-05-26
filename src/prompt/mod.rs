@@ -118,6 +118,8 @@ fn build_environment_block(_config: &Config, model: &str) -> String {
             "Linux"
         } else if cfg!(target_os = "macos") {
             "macOS"
+        } else if cfg!(target_os = "windows") {
+            "Windows"
         } else {
             "unknown"
         }
