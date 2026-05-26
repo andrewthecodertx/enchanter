@@ -76,7 +76,15 @@ pub enum Commands {
     Memory,
     Skills,
     Config,
-    Prompt,
+    /// Show, diff, or budget the assembled system prompt
+    Prompt {
+        /// Show a diff between the previous and current system prompt
+        #[arg(long)]
+        diff: bool,
+        /// Show a token/character budget breakdown of the system prompt
+        #[arg(long)]
+        budget: bool,
+    },
     /// List or show session history
     Sessions {
         /// Show a specific session by ID
@@ -416,10 +424,28 @@ fn handle_command(
                 }
             }
         }
-        Commands::Prompt => {
-            let system_prompt = crate::prompt::build_system_prompt(soul, memory, skills, config);
-            println!("{}", "═══ SYSTEM PROMPT ═══".bright_cyan());
-            println!("{}", system_prompt);
+        Commands::Prompt { diff, budget } => {
+            let layers = crate::prompt::build_prompt_layers(soul, memory, skills, config, &config.model_id());
+            if *diff {
+                // Diff against itself (no previous state for CLI — show current layers)
+                // A meaningful diff requires two turns, so we show the current structure
+                println!("{}", "═══ PROMPT DIFF ═══".bright_cyan());
+                println!("{}", "(No previous prompt to diff against — showing current layer structure.)".dimmed());
+                println!();
+                for layer in &layers.layers {
+                    println!("  {} {}", "●".bright_cyan(), layer.name.bold());
+                }
+                println!();
+                println!("{}", "Use /prompt diff in a REPL session to diff between turns.".dimmed());
+            } else if *budget {
+                let report = layers.budget();
+                println!("{}", report.render(4000));
+            } else {
+                // Default: show the assembled system prompt (existing behavior)
+                let system_prompt = layers.assemble();
+                println!("{}", "═══ SYSTEM PROMPT ═══".bright_cyan());
+                println!("{}", system_prompt);
+            }
         }
         Commands::Sessions { id } => {
             match id {
@@ -534,6 +560,34 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
                         }
                         "/prompt" => {
                             println!("{}", agent.messages.first().map(|m| m.content.as_deref().unwrap_or("")).unwrap_or(""));
+                            continue;
+                        }
+                        cmd if cmd.starts_with("/prompt diff") => {
+                            let layers = crate::prompt::build_prompt_layers(
+                                &agent.soul, &agent.memory, &agent.skills, &agent.config, &agent.resolved.model,
+                            );
+                            if let Some(prev_layers) = &agent.previous_prompt_layers {
+                                let diff_result = layers.diff(prev_layers);
+                                println!("{}", diff_result.render());
+                            } else {
+                                println!("{}", "═══ PROMPT DIFF ═══".bright_cyan());
+                                println!("{}", "(No previous prompt to diff against — this is the first turn.)".dimmed());
+                                println!();
+                                println!("Current layers:");
+                                for layer in &layers.layers {
+                                    println!("  {} {}", "●".bright_cyan(), layer.name.bold());
+                                }
+                            }
+                            // Store current layers for next diff
+                            agent.previous_prompt_layers = Some(layers);
+                            continue;
+                        }
+                        cmd if cmd.starts_with("/prompt budget") => {
+                            let layers = crate::prompt::build_prompt_layers(
+                                &agent.soul, &agent.memory, &agent.skills, &agent.config, &agent.resolved.model,
+                            );
+                            let report = layers.budget();
+                            println!("{}", report.render(4000));
                             continue;
                         }
                         "/tools" => {
@@ -743,6 +797,8 @@ fn print_help(config: &Config) {
         ("/sessions", "List session history"),
         ("/config", "Show resolved configuration"),
         ("/prompt", "Show assembled system prompt"),
+        ("/prompt diff", "Show diff of system prompt from previous turn"),
+        ("/prompt budget", "Show token/character budget per prompt layer"),
         ("/exit, /quit, /bye", "Exit the REPL"),
     ];
 

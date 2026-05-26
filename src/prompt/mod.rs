@@ -24,6 +24,8 @@
 //! (hermes-agent/agent/prompt_builder.py), which uses the same double-line
 //! section markers for memory blocks and context files.
 
+pub mod inspect;
+
 use crate::config::Config;
 use crate::memory::MemoryStore;
 use crate::skills::SkillsIndex;
@@ -31,6 +33,7 @@ use crate::soul::Soul;
 use chrono::Local;
 
 /// Build system prompt using the default model from config.
+#[allow(dead_code)]
 pub fn build_system_prompt(
     soul: &Soul,
     memory: &MemoryStore,
@@ -48,48 +51,85 @@ pub fn build_system_prompt_with_model(
     config: &Config,
     model: &str,
 ) -> String {
-    let mut sections = Vec::new();
+    build_prompt_layers(soul, memory, skills, config, model).assemble()
+}
+
+/// Build structured prompt layers for inspection (diff & budget).
+/// This is the canonical way to produce a PromptLayers — all prompt assembly
+/// flows through here, ensuring the layers are always consistent with what
+/// the model actually receives.
+pub fn build_prompt_layers(
+    soul: &Soul,
+    memory: &MemoryStore,
+    skills: &SkillsIndex,
+    config: &Config,
+    model: &str,
+) -> inspect::PromptLayers {
+    use inspect::PromptLayer;
+
+    let mut layers = Vec::new();
 
     // SOUL
-    sections.push(soul.content.clone());
+    layers.push(PromptLayer {
+        name: "SOUL".to_string(),
+        content: soul.content.clone(),
+    });
 
     // CONTEXT
-    sections.push(build_environment_block(config, model));
+    layers.push(PromptLayer {
+        name: "CONTEXT".to_string(),
+        content: build_environment_block(config, model),
+    });
 
+    // SKILLS
     if !skills.skills.is_empty() {
-        sections.push(skills.format_index_for_prompt());
+        layers.push(PromptLayer {
+            name: "SKILLS".to_string(),
+            content: skills.format_index_for_prompt(),
+        });
     }
 
-    sections.push(String::from(
-        "You have tools available. Use them to take action — do not describe what you \
-         would do without actually doing it. Every response should either (a) contain tool \
-         calls that make progress, or (b) deliver a final result to the user. \
-         Prefer tool calls over describing steps.\n\
-         \n\
-         Canonical tools:\n\
-         - exec_command: run a shell command (builds, tests, git, package managers)\n\
-         - read_file: read a file's contents (with line offset/limit)\n\
-         - write_file: write content to a file (creates parents, overwrites)\n\
-         - list_directory: list directory entries (names, types, sizes)\n\
-         \n\
-         MCP tools may also be available for specialty operations (image generation, \
-         GitHub, etc.). Use them when relevant."
-    ));
+    // INSTRUCTIONS
+    layers.push(PromptLayer {
+        name: "INSTRUCTIONS".to_string(),
+        content: String::from(
+            "You have tools available. Use them to take action — do not describe what you \
+             would do without actually doing it. Every response should either (a) contain tool \
+             calls that make progress, or (b) deliver a final result to the user. \
+             Prefer tool calls over describing steps.\n\
+             \n\
+             Canonical tools:\n\
+             - exec_command: run a shell command (builds, tests, git, package managers)\n\
+             - read_file: read a file's contents (with line offset/limit)\n\
+             - write_file: write content to a file (creates parents, overwrites)\n\
+             - list_directory: list directory entries (names, types, sizes)\n\
+             \n\
+             MCP tools may also be available for specialty operations (image generation, \
+             GitHub, etc.). Use them when relevant."
+        ),
+    });
 
     // VOLATILE
     let memory_block = memory.format_for_prompt();
     if !memory_block.is_empty() {
-        sections.push(memory_block);
+        layers.push(PromptLayer {
+            name: "VOLATILE".to_string(),
+            content: memory_block,
+        });
     }
 
+    // Timestamp
     let now = Local::now();
-    sections.push(format!(
-        "Current date: {} | Session started: {}",
-        now.format("%Y-%m-%d"),
-        now.format("%Y-%m-%d %H:%M %Z")
-    ));
+    layers.push(PromptLayer {
+        name: "SESSION".to_string(),
+        content: format!(
+            "Current date: {} | Session started: {}",
+            now.format("%Y-%m-%d"),
+            now.format("%Y-%m-%d %H:%M %Z")
+        ),
+    });
 
-    sections.join("\n\n")
+    inspect::PromptLayers { layers }
 }
 
 fn build_environment_block(_config: &Config, model: &str) -> String {
@@ -180,5 +220,66 @@ mod tests {
 
         let prompt = build_system_prompt_with_model(&soul, &memory, &skills, &config, "qwen3");
         assert!(prompt.contains("Model: qwen3"));
+    }
+
+    #[test]
+    fn build_prompt_layers_has_expected_structure() {
+        let soul = Soul {
+            content: "Test SOUL.".to_string(),
+            source: PathBuf::from("<test>"),
+        };
+        let memory = MemoryStore::default();
+        let skills = SkillsIndex::default();
+        let config = Config::default();
+
+        let layers = build_prompt_layers(&soul, &memory, &skills, &config, "test-model");
+        let names: Vec<&str> = layers.layers.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains(&"SOUL"));
+        assert!(names.contains(&"CONTEXT"));
+        assert!(names.contains(&"INSTRUCTIONS"));
+        assert!(names.contains(&"SESSION"));
+        // No VOLATILE when memory is empty
+        assert!(!names.contains(&"VOLATILE"));
+    }
+
+    #[test]
+    fn build_prompt_layers_includes_memory() {
+        let soul = Soul {
+            content: "Test SOUL.".to_string(),
+            source: PathBuf::from("<test>"),
+        };
+        let memory = MemoryStore {
+            memory_entries: vec!["some fact".to_string()],
+            user_entries: vec![],
+            summary: None,
+        };
+        let skills = SkillsIndex::default();
+        let config = Config::default();
+
+        let layers = build_prompt_layers(&soul, &memory, &skills, &config, "test-model");
+        let names: Vec<&str> = layers.layers.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains(&"VOLATILE"));
+    }
+
+    #[test]
+    fn assembled_prompt_matches_old_format() {
+        let soul = Soul {
+            content: "I am Bot.".to_string(),
+            source: PathBuf::from("<test>"),
+        };
+        let memory = MemoryStore {
+            memory_entries: vec!["key fact".to_string()],
+            user_entries: vec!["user pref".to_string()],
+            summary: None,
+        };
+        let skills = SkillsIndex::default();
+        let config = Config::default();
+
+        let old_prompt = build_system_prompt(&soul, &memory, &skills, &config);
+        let layers = build_prompt_layers(&soul, &memory, &skills, &config, &config.model_id());
+        let new_prompt = layers.assemble();
+
+        // Both should produce identical output
+        assert_eq!(old_prompt, new_prompt);
     }
 }

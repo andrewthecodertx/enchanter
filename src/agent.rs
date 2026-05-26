@@ -19,6 +19,8 @@ use crate::skills::SkillsIndex;
 use crate::soul::Soul;
 use crate::tools;
 
+use crate::prompt::inspect::PromptLayers;
+
 /// Running agent session — holds all state for one conversation.
 pub struct AgentSession {
     pub config: Config,
@@ -33,6 +35,8 @@ pub struct AgentSession {
     pub no_stream: bool,
     pub no_tools: bool,
     pub system_override: Option<String>,
+    /// Previous prompt layers for diff between turns (REQ-INS-001).
+    pub previous_prompt_layers: Option<PromptLayers>,
 }
 
 /// Result of a single chat turn.
@@ -90,6 +94,7 @@ impl AgentSession {
             no_stream,
             no_tools,
             system_override,
+            previous_prompt_layers: None,
         })
     }
 
