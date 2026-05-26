@@ -81,15 +81,25 @@ Then in the REPL:
 
 ## Install
 
-From source:
+From source (Linux/macOS):
 
 ```bash
-git clone https://github.com/andrewthecoder/enchanter.git
+git clone https://github.com/andrewthecodertx/enchanter.git
 cd enchanter
 make install
 ```
 
 This builds a release binary and installs it to `~/.local/bin/enchanter`.
+
+From source (Windows):
+
+```bash
+git clone https://github.com/andrewthecodertx/enchanter.git
+cd enchanter
+cargo build --release
+```
+
+The binary will be at `target\release\enchanter.exe`. Copy it anywhere on your `PATH`.
 
 ## Running
 
@@ -125,7 +135,19 @@ enchanter --no-stream -p "Summarize this"
 | `/sessions`| List session history                      |
 | `/exit`, `/quit`, `/bye` | Quit (also Ctrl+D for clean exit)  |
 
+## Platform support
+
+| Platform | REPL & inline | Daemon mode |
+|----------|:---:|:---:|
+| Linux    | ✅ | ✅ |
+| macOS    | ✅ | ✅ |
+| Windows  | ✅ | ❌ |
+
+Daemon mode requires Unix domain sockets, which aren't available on Windows. On Windows, Enchanter always runs in inline mode — no `--no-daemon` flag or `daemon` subcommand is needed or available.
+
 ## Daemon mode
+
+> **Unix only** — daemon mode requires Unix domain sockets and is available on Linux and macOS. On Windows, Enchanter always runs in inline mode.
 
 Enchanter can run as a background daemon that keeps MCP servers warm. This
 eliminates the 3–15 second cold start on every invocation (most of which is
