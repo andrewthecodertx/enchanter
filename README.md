@@ -115,25 +115,73 @@ enchanter -m qwen3
 
 # Disable streaming (wait for the full reply)
 enchanter --no-stream -p "Summarize this"
+
+# Record the session to a JSONL file
+enchanter --record session.jsonl
+
+# Record with additional field redaction
+enchanter --record session.jsonl --record-redact
 ```
 
 ### Inside the REPL
 
-| Command    | What it does                            |
-|------------|------------------------------------------|
-| `/help`    | Show available commands                  |
-| `/clear`   | Reset conversation history                |
-| `/soul`    | Show SOUL.md content                     |
-| `/memory`  | Show loaded memory                        |
-| `/skills`  | List discovered skills                    |
-| `/tools`   | List all available tools                  |
-| `/model`   | Switch model or named provider            |
-| `/retry`   | Re-send the last user message             |
-| `/undo`    | Remove last exchange from history         |
-| `/config`  | Show resolved configuration               |
-| `/prompt`  | Show full system prompt                   |
-| `/sessions`| List session history                      |
-| `/exit`, `/quit`, `/bye` | Quit (also Ctrl+D for clean exit)  |
+| Command            | What it does                                       |
+|--------------------|-----------------------------------------------------|
+| `/help`            | Show available commands                             |
+| `/clear`           | Reset conversation history                           |
+| `/soul`            | Show SOUL.md content                                |
+| `/memory`          | Show loaded memory                                   |
+| `/skills`          | List discovered skills                               |
+| `/tools`           | List all available tools                             |
+| `/model <name>`    | Switch model or named provider                       |
+| `/prompt`          | Show full system prompt                              |
+| `/prompt diff`     | Show diff of system prompt from previous turn         |
+| `/prompt budget`   | Show token/character budget per prompt layer           |
+| `/retry`           | Re-send the last user message                         |
+| `/undo`            | Remove last exchange from history                     |
+| `/config`           | Show resolved configuration                           |
+| `/sessions`        | List session history                                  |
+| `/exit`, `/quit`, `/bye` | Quit (also Ctrl+D for clean exit)             |
+
+## Prompt inspection
+
+Enchanter builds the system prompt in layers (SOUL → CONTEXT → SKILLS → INSTRUCTIONS → VOLATILE → SESSION). You can inspect exactly what the model receives:
+
+```bash
+# Show the full assembled system prompt
+enchanter prompt
+
+# Show a token/character budget breakdown per layer
+enchanter prompt --budget
+
+# Show the diff between the previous and current turn's prompt
+# (available in REPL as /prompt diff)
+```
+
+The budget view shows approximate token counts per layer (using a chars÷4 heuristic), visual bar charts, and threshold warnings when a layer exceeds ~4,000 estimated tokens.
+
+## Recording and replay
+
+Record a full session to JSONL for debugging, reproducibility, or model comparison:
+
+```bash
+# Record a session
+enchanter --record session.jsonl -p "Explain Rust ownership"
+
+# Replay a recorded session
+enchanter replay session.jsonl
+
+# Replay with a different model
+enchanter replay session.jsonl --swap-model gpt-4
+
+# Replay in exact mode (error if model doesn't match)
+enchanter replay session.jsonl --exact
+
+# Replay with stubbed tools (deterministic, no live tool calls)
+enchanter replay session.jsonl --tools stubbed
+```
+
+Recordings include schema version, monotonic sequence numbers, timestamps, config snapshots (with API keys redacted), prompt layer hashes, messages, tool calls, and model changes. API keys and auth tokens are never included in recordings by default.
 
 ## Platform support
 
@@ -186,14 +234,17 @@ still see content tokens as they arrive — not just a final blob of text.
 ## Info subcommands
 
 ```bash
-enchanter soul      # Show current SOUL.md
-enchanter memory    # Show loaded memory
-enchanter skills    # List discovered skills
-enchanter config    # Show resolved configuration
-enchanter prompt    # Show assembled system prompt
-enchanter sessions  # List session history
-enchanter sessions <id>  # Show a specific session
-enchanter daemon status  # Show daemon status (model, MCP, uptime)
+enchanter soul          # Show current SOUL.md
+enchanter memory        # Show loaded memory
+enchanter skills        # List discovered skills
+enchanter config        # Show resolved configuration
+enchanter prompt        # Show assembled system prompt
+enchanter prompt --budget  # Show token/character budget per layer
+enchanter prompt --diff     # Show prompt layer structure
+enchanter sessions      # List session history
+enchanter sessions <id> # Show a specific session
+enchanter replay <file.jsonl>  # Replay a recorded session
+enchanter daemon status # Show daemon status (model, MCP, uptime)
 ```
 
 ### Session summaries
@@ -229,11 +280,16 @@ Sessions are also used internally for crash recovery and will power upcoming fea
 
 ## How it works
 
-The system prompt is built in three layers:
+The system prompt is built in layers:
 
 1. **SOUL** — your persona from SOUL.md, stable across turns
-2. **CONTEXT** — environment info, skills index, tool guidance
-3. **VOLATILE** — memory, user profile, timestamp
+2. **CONTEXT** — environment info (model, user, cwd, host, platform)
+3. **SKILLS** — discovered SKILL.md files index
+4. **INSTRUCTIONS** — tool usage guidance
+5. **VOLATILE** — memory entries, user profile
+6. **SESSION** — timestamp
+
+Each layer can be inspected via `/prompt budget` and compared across turns with `/prompt diff`.
 
 Memory uses the same `§`-delimited format as Hermes Agent. Skills use the
 same SKILL.md format (agentskills.io). If you're coming from Hermes, just

@@ -19,7 +19,7 @@
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::home;
 
@@ -183,6 +183,18 @@ impl Config {
             return Ok(Config::default());
         }
         let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading config from {}", path.display()))?;
+        let config: Config = serde_yml::from_str(&contents)
+            .with_context(|| format!("parsing config YAML from {}", path.display()))?;
+        Ok(config)
+    }
+
+    /// Load config from a specific path (used by project overlay).
+    pub fn load_from(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Config::default());
+        }
+        let contents = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
         let config: Config = serde_yml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
