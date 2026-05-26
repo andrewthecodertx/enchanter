@@ -24,6 +24,7 @@ use colored::Colorize;
 
 use crate::agent::{AgentSession, SessionInfo};
 use crate::config::{Config, ResolvedModel};
+use crate::recorder::Recorder;
 use crate::session::Session;
 use crate::summary;
 
@@ -66,6 +67,14 @@ pub struct Args {
     #[arg(long)]
     pub idle_timeout: Option<u64>,
 
+    /// Record the full session to a JSONL file (REQ-REC-001).
+    #[arg(long)]
+    pub record: Option<String>,
+
+    /// Additional field redaction in recordings (REQ-REC-005).
+    #[arg(long)]
+    pub record_redact: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -84,6 +93,20 @@ pub enum Commands {
         /// Show a token/character budget breakdown of the system prompt
         #[arg(long)]
         budget: bool,
+    },
+    /// Replay a recorded session from a JSONL file
+    Replay {
+        /// Path to the JSONL recording file
+        file: String,
+        /// Re-run with a different model while preserving harness inputs
+        #[arg(long)]
+        swap_model: Option<String>,
+        /// Error if the current provider/model doesn't match the recording
+        #[arg(long)]
+        exact: bool,
+        /// Tool execution mode: 'live' (default) or 'stubbed' (use recorded outputs)
+        #[arg(long, default_value = "live")]
+        tools: String,
     },
     /// List or show session history
     Sessions {
@@ -235,8 +258,49 @@ pub async fn run(args: Args) -> Result<()> {
     // Start MCP servers
     agent.start_mcp().await;
 
+    // Initialize recording if --record flag is set (REQ-REC-001)
+    let mut recorder = if let Some(record_path) = &args.record {
+        let rec = Recorder::new(std::path::Path::new(record_path), args.record_redact)?;
+        Some(rec)
+    } else {
+        None
+    };
+
+    // Record config snapshot at start (REQ-REC-003)
+    if let Some(ref mut rec) = recorder {
+        let info = agent.info();
+        let provider_names = info.mcp_servers;
+        rec.record_config_snapshot(
+            &info.model,
+            &info.base_url,
+            info.api_key_set,
+            &provider_names,
+        )?;
+        // Record prompt layer hashes
+        let layers = crate::prompt::build_prompt_layers(
+            &agent.soul, &agent.memory, &agent.skills, &agent.config, &agent.resolved.model,
+        );
+        for layer in &layers.layers {
+            use std::hash::Hasher;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&layer.content, &mut hasher);
+            let hash = format!("{:016x}", hasher.finish());
+            rec.record_prompt_hash(&layer.name, &hash)?;
+        }
+    }
+
     if let Some(user_prompt) = &args.prompt {
+        // Record user message
+        if let Some(ref mut rec) = recorder {
+            rec.record_user_message(user_prompt)?;
+        }
         let result = agent.chat(user_prompt).await;
+        // Record assistant response
+        if let (Some(rec), Ok(cr)) = (&mut recorder, &result) {
+            if let Some(ref text) = cr.response {
+                rec.record_assistant_response(text)?;
+            }
+        }
         if args.no_stream {
             if let Ok(cr) = &result {
                 if let Some(ref text) = cr.response {
@@ -248,7 +312,7 @@ pub async fn run(args: Args) -> Result<()> {
         return result.map(|_| ());
     }
 
-    let result = run_repl(&mut agent, &args).await;
+    let result = run_repl(&mut agent, &args, recorder.as_mut()).await;
     agent.shutdown_mcp().await;
 
     // Exit summary
@@ -261,6 +325,10 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         {
             Ok(Ok(summary_text)) if !summary_text.is_empty() => {
+                // Record session summary
+                if let Some(ref mut rec) = recorder {
+                    let _ = rec.record_session_summary(&summary_text);
+                }
                 if let Err(e) = agent.memory.add_memory(format!("session_summary\n{}", summary_text)) {
                     eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
                 } else {
@@ -447,6 +515,17 @@ fn handle_command(
                 println!("{}", system_prompt);
             }
         }
+        Commands::Replay { file, swap_model, exact, tools } => {
+            let path = std::path::PathBuf::from(file);
+            let tools_mode = crate::replay::parse_tools_mode(tools)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            crate::replay::replay_session(
+                &path,
+                swap_model.as_deref(),
+                *exact,
+                &tools_mode,
+            )?;
+        }
         Commands::Sessions { id } => {
             match id {
                 Some(session_id) => {
@@ -506,9 +585,13 @@ fn handle_command(
     Ok(())
 }
 
-async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
+async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&mut Recorder>) -> Result<()> {
     let info = agent.info();
     print_banner(&info);
+
+    if recorder.is_some() {
+        println!("  {} Session recording is active", "●".red());
+    }
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -620,6 +703,7 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
                         _ => {
                             // Handle /model <name>, /retry, /undo
                             if let Some(new_name) = line.strip_prefix("/model ") {
+                                let old_model = agent.resolved.model.clone();
                                 let new_name = new_name.trim().to_string();
                                 if new_name.is_empty() {
                                     println!("{} Usage: /model <name> (provider name from config or model ID)", "Error:".red());
@@ -628,6 +712,10 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
                                         .switch_model(&new_name)
                                     {
                                         Ok(provider_label) => {
+                                            // Record model change
+                                            if let Some(ref mut rec) = recorder {
+                                                rec.record_model_change(&old_model, &new_name)?;
+                                            }
                                             let info = agent.info();
                                             println!("{} Switched to {}", "✓".green(), provider_label.bright_white());
                                             println!("  {} {} | API key: {}",
@@ -674,8 +762,19 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args) -> Result<()> {
 
                 rl.add_history_entry(&line).ok();
 
+                // Record user message
+                if let Some(ref mut rec) = recorder {
+                    rec.record_user_message(&line)?;
+                }
+
                 match agent.chat(&line).await {
                     Ok(cr) => {
+                        // Record assistant response
+                        if let Some(ref mut rec) = recorder {
+                            if let Some(ref text) = cr.response {
+                                rec.record_assistant_response(text)?;
+                            }
+                        }
                         if agent.no_stream {
                             if let Some(ref text) = cr.response {
                                 println!("{}", text);

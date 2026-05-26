@@ -68,6 +68,8 @@ mod mcp;
 mod memory;
 mod prompt;
 mod protocol;
+mod recorder;
+mod replay;
 mod session;
 mod skills;
 mod soul;
