@@ -15,6 +15,11 @@ pub enum HandleResult {
 }
 
 pub fn handle_key(app: &mut App, event: CrosstermEvent) -> HandleResult {
+    // Handle resize events — ratatui will pick up the new size on next draw
+    if let CrosstermEvent::Resize(_, _) = &event {
+        return HandleResult::Continue;
+    }
+
     let CrosstermEvent::Key(key) = event else {
         return HandleResult::Continue;
     };
@@ -46,6 +51,16 @@ pub fn handle_key(app: &mut App, event: CrosstermEvent) -> HandleResult {
             app.focus = Pane::Input;
             return HandleResult::Continue;
         }
+        // '/' focuses the input pane and starts typing a command
+        (KeyModifiers::NONE, KeyCode::Char('/')) => {
+            if app.focus != Pane::Input {
+                app.focus = Pane::Input;
+                app.input.clear();
+                app.input.insert('/');
+                return HandleResult::Continue;
+            }
+            // If already in input, let it fall through to type '/'
+        }
         _ => {}
     }
 
@@ -70,6 +85,7 @@ fn handle_input_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRe
                     HandleResult::Continue
                 } else {
                     app.input.clear();
+                    app.chat_auto_scroll = true;
                     HandleResult::SendMessage(msg)
                 }
             }
@@ -81,12 +97,24 @@ fn handle_input_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRe
                     HandleResult::Continue
                 } else {
                     app.input.clear();
+                    app.chat_auto_scroll = true;
                     HandleResult::SendMessage(msg)
                 }
             } else {
                 app.input.insert('\n');
                 HandleResult::Continue
             }
+        }
+        // Ctrl+M toggles multiline mode
+        (KeyModifiers::CONTROL, KeyCode::Char('m')) => {
+            app.input.multiline = !app.input.multiline;
+            app.chat_lines.push(ChatLine::System(
+                if app.input.multiline { "Multiline mode: ON (Enter=newline, Ctrl+Enter=send)" }
+                else { "Multiline mode: OFF (Enter=send)" }
+                .into(),
+            ));
+            app.chat_auto_scroll = true;
+            HandleResult::Continue
         }
         (KeyModifiers::NONE, KeyCode::Char(c)) => {
             app.input.insert(c);
@@ -121,6 +149,15 @@ fn handle_input_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRe
             app.input.cursor = 0;
             HandleResult::Continue
         }
+        // Home/End keys
+        (KeyModifiers::NONE, KeyCode::Home) => {
+            app.input.move_home();
+            HandleResult::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::End) => {
+            app.input.move_end();
+            HandleResult::Continue
+        }
         (KeyModifiers::NONE, KeyCode::Esc) => {
             app.input.clear();
             HandleResult::Continue
@@ -145,15 +182,25 @@ fn handle_skills_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleR
             HandleResult::Continue
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
-            // Copy skill info to chat
             if let Some(skill) = app.agent.skills.skills.get(app.skills_selected) {
                 let cat = skill.category.as_deref().unwrap_or("other");
-                let _msg = format!("/skills");
-                // Just show skill details as a chat line
                 app.chat_lines.push(ChatLine::System(
                     format!("[{}] {} — {}", cat, skill.name, skill.description),
                 ));
+                app.chat_auto_scroll = true;
             }
+            HandleResult::Continue
+        }
+        // '?' shows help in the chat pane
+        (KeyModifiers::SHIFT, KeyCode::Char('?')) => {
+            app.chat_lines.push(ChatLine::System(
+                "Keys: Tab=cycle focus | 1-4=jump to pane | Ctrl+Q=quit | Ctrl+M=multiline | /=focus input".into(),
+            ));
+            app.chat_auto_scroll = true;
+            HandleResult::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            app.focus = Pane::Input;
             HandleResult::Continue
         }
         _ => HandleResult::Continue,
@@ -189,7 +236,19 @@ fn handle_memory_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleR
                 app.chat_lines.push(ChatLine::System(
                     format!("Memory entry: {}", display),
                 ));
+                app.chat_auto_scroll = true;
             }
+            HandleResult::Continue
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('?')) => {
+            app.chat_lines.push(ChatLine::System(
+                "Keys: Tab=cycle focus | 1-4=jump to pane | Ctrl+Q=quit | Ctrl+M=multiline | /=focus input".into(),
+            ));
+            app.chat_auto_scroll = true;
+            HandleResult::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            app.focus = Pane::Input;
             HandleResult::Continue
         }
         _ => HandleResult::Continue,
@@ -218,6 +277,17 @@ fn handle_chat_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRes
         }
         (KeyModifiers::NONE, KeyCode::End) => {
             app.chat_auto_scroll = true;
+            HandleResult::Continue
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char('?')) => {
+            app.chat_lines.push(ChatLine::System(
+                "Keys: Tab=cycle focus | 1-4=jump to pane | Ctrl+Q=quit | Ctrl+M=multiline | /=focus input".into(),
+            ));
+            app.chat_auto_scroll = true;
+            HandleResult::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            app.focus = Pane::Input;
             HandleResult::Continue
         }
         _ => HandleResult::Continue,

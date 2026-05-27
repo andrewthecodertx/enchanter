@@ -86,6 +86,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
                                 app.turn += 1;
                                 app.refresh_info();
                                 event_rx = None;
+                                // Run memory management after each turn
+                                manage_memory(&mut app).await;
                                 break;
                             }
                             Event::Error { message } => {
@@ -109,6 +111,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
                         app.finalize_stream();
                         app.streaming = false;
                         event_rx = None;
+                        // Run memory management
+                        manage_memory(&mut app).await;
                         break;
                     }
                 }
@@ -243,5 +247,15 @@ fn handle_streaming_key(event: &CrosstermEvent) -> StreamingAction {
             StreamingAction::CycleFocusBack
         }
         _ => StreamingAction::Nothing,
+    }
+}
+
+/// Run memory management (cap + summarize) after a chat turn completes.
+async fn manage_memory(app: &mut App) {
+    let mem_config = app.agent.config.memory_config().clone();
+    if let Err(e) = app.agent.memory.manage(&app.agent.client, &mem_config).await {
+        app.chat_lines.push(ChatLine::System(
+            format!("Memory management: {}", e),
+        ));
     }
 }
