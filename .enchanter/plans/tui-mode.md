@@ -100,116 +100,98 @@ Esc                 Unfocus / return to previous pane
 
 ## Implementation Tasks
 
-### Task 1: Scaffold the TUI module
+### Task 1: Scaffold the TUI module ✅
 
 - Add `ratatui` and `crossterm` as optional dependencies gated by `tui` feature
-- Create `src/tui/mod.rs` with `TuiApp` struct that holds `AgentSession` and
-  terminal state
+- Create `src/tui/mod.rs` with event loop, terminal setup/teardown
 - Add `Tui` subcommand to `Commands` enum (gated by `#[cfg(feature = "tui")]`)
-- Create the main event loop: terminal setup → render loop → teardown
 - Wire into `cli::run()` so `enchanter tui` launches the TUI
 
-```rust
-// src/tui/mod.rs
-pub struct TuiApp {
-    agent: AgentSession,
-    // Terminal state
-    // Pane states
-    // Input state
-}
+### Task 2: Define pane types and focus management ✅
 
-impl TuiApp {
-    pub async fn run(mut self) -> Result<()> { ... }
-}
-```
+- Pane enum in `src/tui/app.rs` with focus cycling (next/prev)
+- Focus ring: Skills → Memory → Chat → Input, cycling with Tab/Shift+Tab
+- Number keys 1-4 jump to specific panes
 
-### Task 2: Define pane types and focus management
+### Task 3: Implement app state ✅
 
-- Create `src/tui/panes.rs` with enum for pane types and focus cycling
-- Each pane tracks its own scroll position and selection
-- Focus ring: Skills → Memory → Chat → Input, cycling with Tab
+- `App` struct in `src/tui/app.rs` holding AgentSession, focus, chat lines, input, streaming state
+- `ChatLine` enum for different message types
+- `InputState` with cursor, buffer, multiline mode
 
-```rust
-#[derive(Clone, Copy, PartialEq)]
-pub enum Pane {
-    Skills,
-    Memory,
-    Chat,
-    Input,
-}
-```
+### Task 4: Terminal setup and teardown ✅
 
-### Task 3: Implement app state
+- Raw mode via crossterm, alternate screen buffer
+- Panic hook to restore terminal on crash
+- Clean teardown on normal exit
 
-- Create `src/tui/app.rs` with `App` struct holding all runtime state:
-  - `AgentSession` (the core)
-  - Current focus pane
-  - Chat history (messages rendered as lines)
-  - Streaming state (current response being streamed)
-  - Scroll positions per pane
-  - Input buffer
-  - Status info (model, tool count, etc.)
+### Task 5: Render the status bar / header ✅
 
-### Task 4: Terminal setup and teardown
+- Header: app name, model, provider, session ID, turn count
+- Footer: tool count, MCP count, skills count, streaming indicator, keybinding hints
 
-- Raw mode setup via crossterm
-- Alternate screen buffer
-- Proper restore on exit (even on panic)
-- Use `ratatui::Terminal<Backend>` with crossterm backend
+### Task 6: Render the skills pane ✅
 
-### Task 5: Render the status bar / header
+- List skills with category tags
+- Highlight selected skill with ratatui ListState
+- Enter shows skill details in chat pane
+- Focus-dependent border color
 
-- Top bar: app name, model, session ID short, tool count
-- Bottom bar: keybinding hints, turn number, token info
-- These are always visible regardless of focus
+### Task 7: Render the memory pane ✅
 
-### Task 6: Render the skills pane
+- USER and NOTES sections with separate styling
+- Highlighted selected entry
+- Auto-scroll to keep selection visible
+- Enter shows full content in chat pane
 
-- List skills grouped by category
-- Highlight selected skill
-- Show description on selection
-- Mark focus with a border color change
+### Task 8: Render the chat pane ✅
 
-### Task 7: Render the memory pane
+- User messages (⟩ prefix), assistant responses (⟨ prefix)
+- Tool calls (⟩ prefix, yellow), tool results (│ prefix, dimmed, max 5 lines)
+- Streaming text with cursor indicator ▌
+- Auto-scroll during streaming, manual scroll with PgUp/PgDn
+- End key re-enables auto-scroll
 
-- List memory entries (truncated, scrollable)
-- Highlight selected entry
-- Show full content in a popup or chat pane on Enter
+### Task 9: Render the input bar ✅
 
-### Task 8: Render the chat pane
+- Single-line input with cursor
+- Slash command support (mirrors all REPL commands)
+- Ctrl+M toggles multiline mode (Enter=newline, Ctrl+Enter=send)
+- Ctrl+A/E for home/end, Ctrl+U to clear line
+- Home/End key support
 
-- Display conversation history with role indicators
-- Streaming text support (token-by-token updates)
-- Tool call blocks with collapsible results
-- Auto-scroll during streaming, manual scroll otherwise
+### Task 10: Event loop integration ✅
 
-### Task 9: Render the input bar
+- `chat_events()` API streams LLM responses into TUI via UnboundedReceiver<Event>
+- Non-blocking `try_recv()` poll during streaming
+- 16ms sleep between renders during streaming
+- Ctrl+C cancels streaming, Ctrl+Q quits
+- Memory management after each turn completes
 
-- Text input with cursor
-- `/` command support (same commands as REPL)
-- Multi-line mode toggle (Ctrl+Enter vs Enter)
+### Task 11: Slash command handling in TUI ✅
 
-### Task 10: Event loop integration
-
-- Use `chat_events()` API to stream LLM responses into the TUI
-- `tokio::select!` between:
-  - crossterm terminal events (key presses, resize)
-  - LLM streaming events (content, tool calls, done)
-  - MCP events
-- On each event, update state and re-render
-
-### Task 11: Slash command handling in TUI
-
-- Parse `/` commands identically to REPL
-- Some commands update panes (e.g., `/model` refreshes status bar)
+- All REPL slash commands mirrored in `commands.rs`
+- /help, /clear, /soul, /memory, /skills, /tools, /config, /prompt, /prompt diff, /prompt budget
+- /model <name> switches model and refreshes status
+- /sessions lists history
+- /retry and /undo work with streaming
 - Unknown commands show error inline
 
-### Task 12: Feature gate and CI
+### Task 12: Feature gate and CI ✅
 
-- Ensure `cargo build` (without `tui` feature) still compiles
-- Ensure `cargo build --features tui` builds with TUI
+- `cargo build --features tui` compiles with TUI
+- `cargo build --no-default-features` compiles REPL-only
+- All 88 tests pass in both configurations
 - Default features include `tui`
-- Update CI/workflows if needed
+
+### Bonus features implemented:
+
+- Session summary on exit (matching REPL behavior)
+- `/` key focuses input pane and starts a command
+- `?` shows keybinding help in any pane
+- Esc returns focus to input from other panes
+- Window resize event handling
+- Memory management after each streaming turn
 
 ## File Structure
 
