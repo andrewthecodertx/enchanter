@@ -75,6 +75,8 @@ mod skills;
 mod soul;
 mod summary;
 mod tools;
+#[cfg(feature = "tui")]
+mod tui;
 
 use anyhow::Result;
 use clap::Parser;
