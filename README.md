@@ -123,6 +123,27 @@ enchanter --record session.jsonl
 enchanter --record session.jsonl --record-redact
 ```
 
+### TUI mode
+
+```bash
+# Launch the terminal UI (multi-pane, keyboard-driven)
+enchanter tui
+```
+
+The TUI provides a rich interface with panes for skills, memory, chat history, and input. Key bindings:
+
+| Key           | Action                          |
+|---------------|---------------------------------|
+| `Tab`         | Cycle focus between panes       |
+| `1`-`4`       | Jump to specific pane            |
+| `↑/↓` or `j/k`| Navigate items in focused pane   |
+| `Enter`       | Send message / activate item     |
+| `Ctrl+Q`      | Quit the TUI                     |
+| `Ctrl+C`      | Cancel streaming response        |
+| `Esc`         | Clear input                      |
+
+The TUI is an optional feature (enabled by default). Build without it: `cargo build --no-default-features`.
+
 ### Inside the REPL
 
 | Command            | What it does                                       |
