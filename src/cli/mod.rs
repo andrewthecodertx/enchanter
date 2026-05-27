@@ -182,7 +182,7 @@ pub async fn run(args: Args) -> Result<()> {
         } else if args.prompt.is_some() {
             // Single prompt mode: try auto-starting daemon
             eprintln!("{} Daemon not running, starting it...", "⟡".dimmed());
-            let pid = crate::daemon::spawn_daemon()?;
+            let pid = crate::daemon::spawn_daemon(args.idle_timeout)?;
             eprintln!("{} Daemon started (PID {})", "✓".green(), pid);
 
             if let Ok(()) = crate::daemon::wait_for_socket(60).await {
@@ -368,8 +368,33 @@ pub async fn run(args: Args) -> Result<()> {
 async fn handle_daemon_command(action: &DaemonAction, args: &Args) -> Result<()> {
     match action {
         DaemonAction::Start => {
+            // Check if already running
+            if crate::daemon::is_running().await {
+                eprintln!("{} Daemon is already running.", "Error:".red());
+                return Ok(());
+            }
+
+            // If we're the spawned daemon child, run in foreground (block until done).
+            if std::env::var("__ENCHANTER_DAEMON_FOREGROUND").is_ok() {
+                crate::daemon::run_daemon(args.idle_timeout).await?;
+                return Ok(());
+            }
+
+            // Otherwise, spawn a background daemon and wait for it to become ready.
             eprintln!("{} Starting daemon...", "⟡".bright_cyan());
-            crate::daemon::run_daemon(args.idle_timeout).await?;
+            let pid = crate::daemon::spawn_daemon(args.idle_timeout)?;
+            eprintln!("{} Daemon started (PID {})", "✓".green(), pid);
+
+            // Wait for the daemon to become ready
+            eprintln!("{} Waiting for daemon to become ready...", "  ↳".dimmed());
+            match crate::daemon::wait_for_socket(30).await {
+                Ok(()) => {
+                    eprintln!("{} Daemon is ready on {}", "✓".green(), crate::daemon::socket_path().display());
+                }
+                Err(e) => {
+                    eprintln!("{} Daemon did not become ready: {}", "Warning:".yellow(), e);
+                }
+            }
             Ok(())
         }
         DaemonAction::Stop => {

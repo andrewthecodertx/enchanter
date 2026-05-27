@@ -37,7 +37,7 @@ mod daemon {
         false
     }
 
-    pub fn spawn_daemon() -> Result<u32> {
+    pub fn spawn_daemon(_idle_timeout_mins: Option<u64>) -> Result<u32> {
         bail!("Daemon mode is not supported on this platform (requires Unix sockets)")
     }
 

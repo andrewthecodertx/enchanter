@@ -395,7 +395,7 @@ pub async fn is_running() -> bool {
 }
 
 /// Start the daemon as a background process. Returns the child PID.
-pub fn spawn_daemon() -> Result<u32> {
+pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
     let exe = std::env::current_exe()
         .context("finding current executable")?;
 
@@ -409,9 +409,16 @@ pub fn spawn_daemon() -> Result<u32> {
         std::fs::remove_file(&pid).ok();
     }
 
-    let child = std::process::Command::new(exe)
-        .arg("daemon")
-        .arg("start")
+    let mut cmd = std::process::Command::new(exe);
+    if let Some(mins) = idle_timeout_mins {
+        cmd.arg(format!("--idle-timeout={}", mins));
+    }
+    cmd.arg("daemon").arg("start");
+    // Signal to the child process that it should run in the foreground
+    // (i.e., actually become the daemon) rather than spawning another child.
+    cmd.env("__ENCHANTER_DAEMON_FOREGROUND", "1");
+
+    let child = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
