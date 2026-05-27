@@ -278,9 +278,17 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
         .border_style(Style::default().fg(border_color))
         .title(" CHAT ");
 
+    let line_count = lines.len() as u16;
+    let visible_height = area.height.saturating_sub(2); // subtract borders
+    let scroll_offset = if app.chat_auto_scroll {
+        line_count.saturating_sub(visible_height)
+    } else {
+        app.chat_scroll as u16
+    };
+
     let paragraph = Paragraph::new(lines)
         .block(block)
-        .scroll((app.chat_scroll as u16, 0))
+        .scroll((scroll_offset, 0))
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);

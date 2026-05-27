@@ -118,6 +118,8 @@ pub struct App {
     // Status
     pub error_message: Option<String>,
     pub turn: usize,
+    /// When true, chat auto-scrolls to bottom (set on new messages, cleared on manual scroll).
+    pub chat_auto_scroll: bool,
 }
 
 impl App {
@@ -137,6 +139,7 @@ impl App {
             current_stream_text: String::new(),
             error_message: None,
             turn: 0,
+            chat_auto_scroll: true,
         }
     }
 
@@ -144,24 +147,29 @@ impl App {
         match event {
             Event::Content { text } => {
                 self.current_stream_text.push_str(&text);
+                self.chat_auto_scroll = true;
             }
             Event::ToolCall { id, name, arguments: _ } => {
                 // Finalize any streaming text first
                 self.finalize_stream();
                 self.chat_lines.push(ChatLine::ToolCall { name, id });
+                self.chat_auto_scroll = true;
             }
             Event::ToolResult { id, content } => {
                 self.chat_lines.push(ChatLine::ToolResult { id, content });
+                self.chat_auto_scroll = true;
             }
             Event::Done => {
                 self.finalize_stream();
                 self.streaming = false;
                 self.turn += 1;
+                self.chat_auto_scroll = true;
             }
             Event::Error { message } => {
                 self.finalize_stream();
                 self.streaming = false;
                 self.error_message = Some(message);
+                self.chat_auto_scroll = true;
             }
             _ => {}
         }

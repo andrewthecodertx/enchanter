@@ -186,6 +186,7 @@ async fn handle_user_message(app: &mut App, msg: String) -> Option<UnboundedRece
 /// Start a chat with streaming. Returns the event receiver.
 async fn handle_chat(app: &mut App, msg: String) -> Option<UnboundedReceiver<Event>> {
     app.chat_lines.push(ChatLine::User(msg.clone()));
+    app.chat_auto_scroll = true;
     app.streaming = true;
     app.current_stream_text.clear();
 
@@ -202,6 +203,7 @@ async fn handle_chat(app: &mut App, msg: String) -> Option<UnboundedReceiver<Eve
 /// Start a retry with streaming. Returns the event receiver.
 async fn handle_retry(app: &mut App) -> Option<UnboundedReceiver<Event>> {
     app.chat_lines.push(ChatLine::System("Retrying...".into()));
+    app.chat_auto_scroll = true;
     app.streaming = true;
     app.current_stream_text.clear();
 

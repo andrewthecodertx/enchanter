@@ -200,6 +200,7 @@ fn handle_chat_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRes
     match (key.modifiers, key.code) {
         (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
             app.chat_scroll = app.chat_scroll.saturating_sub(1);
+            app.chat_auto_scroll = false;
             HandleResult::Continue
         }
         (KeyModifiers::NONE, KeyCode::Down) | (KeyModifiers::NONE, KeyCode::Char('j')) => {
@@ -208,10 +209,15 @@ fn handle_chat_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRes
         }
         (KeyModifiers::NONE, KeyCode::PageUp) => {
             app.chat_scroll = app.chat_scroll.saturating_sub(10);
+            app.chat_auto_scroll = false;
             HandleResult::Continue
         }
         (KeyModifiers::NONE, KeyCode::PageDown) => {
             app.chat_scroll += 10;
+            HandleResult::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::End) => {
+            app.chat_auto_scroll = true;
             HandleResult::Continue
         }
         _ => HandleResult::Continue,
