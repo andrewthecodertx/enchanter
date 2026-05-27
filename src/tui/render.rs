@@ -123,7 +123,9 @@ fn draw_skills_pane(f: &mut Frame, app: &App, area: Rect) {
         .title(title);
 
     let mut state = ListState::default();
-    state.select(Some(app.skills_selected.min(items.len().saturating_sub(1))));
+    if !items.is_empty() {
+        state.select(Some(app.skills_selected.min(items.len() - 1)));
+    }
 
     let list = List::new(items)
         .block(block)
@@ -143,12 +145,15 @@ fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
 
     if !app.agent.memory.user_entries.is_empty() {
         lines.push(Line::from(Span::styled("── USER ──", Style::default().fg(colors::USER))));
-        for entry in &app.agent.memory.user_entries {
+        for (i, entry) in app.agent.memory.user_entries.iter().enumerate() {
             let truncated: String = entry.chars().take(28).collect();
-            lines.push(Line::from(Span::styled(
-                format!("  {}", truncated),
-                Style::default().fg(Color::White),
-            )));
+            let is_selected = focused && app.memory_selected == i;
+            let style = if is_selected {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(format!("  {}", truncated), style)));
         }
     }
 
@@ -156,16 +161,28 @@ fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(Span::styled("── NOTES ──", Style::default().fg(colors::ACCENT))));
         for (i, entry) in app.agent.memory.memory_entries.iter().enumerate() {
             let truncated: String = entry.chars().take(28).collect();
-            lines.push(Line::from(Span::styled(
-                format!("[{}] {}", i + 1, truncated),
-                Style::default().fg(colors::DIM),
-            )));
+            let global_idx = app.agent.memory.user_entries.len() + i;
+            let is_selected = focused && app.memory_selected == global_idx;
+            let style = if is_selected {
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(colors::DIM)
+            };
+            lines.push(Line::from(Span::styled(format!("[{}] {}", i + 1, truncated), style)));
         }
     }
 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled("(empty)", Style::default().fg(colors::DIM))));
     }
+
+    // Auto-scroll memory to keep selected item visible
+    let visible_lines = area.height.saturating_sub(2) as usize; // subtract borders
+    let scroll_offset = if app.memory_selected >= visible_lines {
+        (app.memory_selected + 1).saturating_sub(visible_lines) as u16
+    } else {
+        app.memory_scroll as u16
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -174,7 +191,7 @@ fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(lines)
         .block(block)
-        .scroll((app.memory_scroll as u16, 0));
+        .scroll((scroll_offset, 0));
 
     f.render_widget(paragraph, area);
 }

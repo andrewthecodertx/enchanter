@@ -60,7 +60,10 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
 
     // Welcome message
     app.chat_lines.push(ChatLine::System(
-        format!("Enchanter TUI — model={} | /help for commands | Ctrl+Q to quit", app.info.model),
+        format!("Enchanter TUI — model={} | /help for commands", app.info.model),
+    ));
+    app.chat_lines.push(ChatLine::System(
+        "Keys: Tab=cycle | 1-4=jump | Ctrl+Q=quit | Ctrl+C=cancel | Ctrl+M=multiline | End=scroll bottom".into(),
     ));
 
     // Start MCP servers
@@ -68,8 +71,9 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
 
     // Streaming event receiver — None when idle, Some when streaming
     let mut event_rx: Option<UnboundedReceiver<Event>> = None;
+    let mut running = true;
 
-    loop {
+    while running {
         // Draw current state
         terminal.draw(|f| render::draw(f, &app))?;
 
@@ -124,8 +128,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
                     let key_event = event::read()?;
                     match handle_streaming_key(&key_event) {
                         StreamingAction::Quit => {
-                            app.agent.shutdown_mcp().await;
-                            return Ok(());
+                            running = false;
                         }
                         StreamingAction::Cancel => {
                             app.finalize_stream();
@@ -152,8 +155,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
                 match input::handle_key(&mut app, event) {
                     HandleResult::Continue => {}
                     HandleResult::Quit => {
-                        app.agent.shutdown_mcp().await;
-                        return Ok(());
+                        running = false;
                     }
                     HandleResult::SendMessage(msg) => {
                         let maybe_rx = handle_user_message(&mut app, msg).await;
@@ -165,6 +167,41 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
             }
         }
     }
+
+    // Shutdown: stop MCP servers
+    app.agent.shutdown_mcp().await;
+
+    // Session summary on exit (like the REPL does)
+    if app.agent.config.summarize_on_exit() && crate::summary::should_summarize(&app.agent.messages) {
+        eprintln!("  Generating session summary...");
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            crate::summary::generate_session_summary(&app.agent.client, &app.agent.messages),
+        )
+        .await
+        {
+            Ok(Ok(summary_text)) if !summary_text.is_empty() => {
+                if let Err(e) = app.agent.memory.add_memory(format!("session_summary\n{}", summary_text)) {
+                    eprintln!("  Failed to save session summary: {}", e);
+                } else {
+                    eprintln!("  Session summary saved to memory.");
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                let fallback = crate::summary::fallback_summary(&app.agent.messages);
+                let _ = app.agent.memory.add_memory(format!("session_summary\n{}", fallback));
+                eprintln!("  Summary generation failed: {}", e);
+            }
+            Err(_) => {
+                let fallback = crate::summary::fallback_summary(&app.agent.messages);
+                let _ = app.agent.memory.add_memory(format!("session_summary\n{}", fallback));
+                eprintln!("  Summary timed out, using fallback.");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Handle a user message (chat or slash command). Returns Some(event_rx) if streaming started.
@@ -221,6 +258,16 @@ async fn handle_retry(app: &mut App) -> Option<UnboundedReceiver<Event>> {
     }
 }
 
+/// Run memory management (cap + summarize) after a chat turn completes.
+async fn manage_memory(app: &mut App) {
+    let mem_config = app.agent.config.memory_config().clone();
+    if let Err(e) = app.agent.memory.manage(&app.agent.client, &mem_config).await {
+        app.chat_lines.push(ChatLine::System(
+            format!("Memory management: {}", e),
+        ));
+    }
+}
+
 /// Action to take during streaming based on a key press.
 enum StreamingAction {
     Nothing,
@@ -247,15 +294,5 @@ fn handle_streaming_key(event: &CrosstermEvent) -> StreamingAction {
             StreamingAction::CycleFocusBack
         }
         _ => StreamingAction::Nothing,
-    }
-}
-
-/// Run memory management (cap + summarize) after a chat turn completes.
-async fn manage_memory(app: &mut App) {
-    let mem_config = app.agent.config.memory_config().clone();
-    if let Err(e) = app.agent.memory.manage(&app.agent.client, &mem_config).await {
-        app.chat_lines.push(ChatLine::System(
-            format!("Memory management: {}", e),
-        ));
     }
 }
