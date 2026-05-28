@@ -134,13 +134,55 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     eprintln!("  Model: {}", model);
     eprintln!("  MCP servers: {:?}", mcp_servers);
 
-    // Set up signal handler for graceful shutdown
+    // Set up signal handlers for graceful shutdown.
+    // In daemon mode we use tokio's async signal handling rather than the ctrlc crate,
+    // because (a) we need SIGTERM in addition to SIGINT, (b) async signal handling
+    // properly wakes up the tokio select! loop, and (c) we want to ignore SIGHUP
+    // since we're a daemon that has already detached from the terminal.
+    //
+    // We use a `Notify` to wake up the main accept loop immediately when a signal
+    // arrives, rather than waiting for the idle-check timeout.
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_flag = shutdown.clone();
-    ctrlc::set_handler(move || {
-        eprintln!("\nReceived SIGINT, shutting down...");
-        shutdown_flag.store(true, Ordering::SeqCst);
-    }).ok();
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+
+    // SIGINT (Ctrl-C) — graceful shutdown
+    let shutdown_int = shutdown.clone();
+    let notify_int = shutdown_notify.clone();
+    let _int_handle = tokio::spawn(async move {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+                eprintln!("\nReceived SIGINT, shutting down...");
+                shutdown_int.store(true, Ordering::SeqCst);
+                notify_int.notify_one();
+            }
+            Err(e) => {
+                eprintln!("Warning: could not install SIGINT handler: {}", e);
+            }
+        }
+    });
+
+    // SIGTERM — standard daemon shutdown (kill, systemctl stop, etc.)
+    let shutdown_term = shutdown.clone();
+    let notify_term = shutdown_notify.clone();
+    let _term_handle = tokio::spawn(async move {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+                eprintln!("\nReceived SIGTERM, shutting down...");
+                shutdown_term.store(true, Ordering::SeqCst);
+                notify_term.notify_one();
+            }
+            Err(e) => {
+                eprintln!("Warning: could not install SIGTERM handler: {}", e);
+            }
+        }
+    });
+
+    // SIGHUP — ignore (we're a daemon, terminal disconnect is expected)
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    }
 
     // Listen on Unix socket
     let listener = UnixListener::bind(&sock_path)
@@ -160,7 +202,7 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     let mut last_activity = Instant::now();
 
     loop {
-        // Check shutdown signal
+        // Check shutdown signal (SIGINT or SIGTERM via tokio signal handlers)
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
@@ -171,13 +213,14 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
             break;
         }
 
-        // Accept with timeout so we can check shutdown/idle periodically
+        // Accept with timeout so we can check shutdown/idle periodically.
+        // The shutdown_notify branch wakes us up immediately on signal receipt.
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok((stream, _addr)) => {
                         last_activity = Instant::now();
-                        handle_connection(stream, &mut agent, &state, &model_name, &base_url).await;
+                        handle_connection(stream, &mut agent, &state, &model_name, &base_url, &shutdown, &shutdown_notify).await;
                     }
                     Err(e) => {
                         eprintln!("Error accepting connection: {}", e);
@@ -186,6 +229,9 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
             }
             _ = tokio::time::sleep(Duration::from_secs(IDLE_CHECK_INTERVAL_SECS)) => {
                 // Just loop around and check shutdown/idle
+            }
+            _ = shutdown_notify.notified() => {
+                // Signal received — loop will check shutdown flag and break
             }
         }
     }
@@ -223,6 +269,8 @@ async fn handle_connection(
     state: &DaemonState,
     _model_name: &str,
     _base_url: &str,
+    shutdown: &AtomicBool,
+    shutdown_notify: &tokio::sync::Notify,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -317,16 +365,15 @@ async fn handle_connection(
             }
         }
         Request::Shutdown => {
-            // Signal handled in main loop
             let event = Event::Done;
             if let Ok(jsonl) = event.to_jsonl() {
                 let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
             }
-            // Set a global shutdown flag — we just send the response and the
-            // client disconnects. The idle timer or signal handler will catch it.
-            // The client can also just kill the process.
+            // Set the shutdown flag and notify the main loop so it exits cleanly
+            // (runs cleanup, MCP shutdown, session summary, etc.)
             eprintln!("Shutdown requested via socket.");
-            std::process::exit(0);
+            shutdown.store(true, Ordering::SeqCst);
+            shutdown_notify.notify_one();
         }
     }
 }
@@ -394,7 +441,13 @@ pub async fn is_running() -> bool {
     }
 }
 
-/// Start the daemon as a background process. Returns the child PID.
+/// Start the daemon as a background process. Returns the daemon PID.
+///
+/// Uses the classic Unix double-fork pattern to properly detach from the
+/// terminal: fork → setsid → fork → exec. This ensures the daemon:
+/// - Is not a process group leader (can't reacquire a controlling terminal)
+/// - Is in its own session (immune to SIGHUP from terminal exit)
+/// - Has no controlling terminal
 pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
     let exe = std::env::current_exe()
         .context("finding current executable")?;
@@ -409,22 +462,129 @@ pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
         std::fs::remove_file(&pid).ok();
     }
 
-    let mut cmd = std::process::Command::new(exe);
+    // ── Prepare everything BEFORE forking (async-signal-safe constraints) ──
+
+    // Build the argument list ahead of time
+    let mut args: Vec<String> = Vec::new();
     if let Some(mins) = idle_timeout_mins {
-        cmd.arg(format!("--idle-timeout={}", mins));
+        args.push(format!("--idle-timeout={}", mins));
     }
-    cmd.arg("daemon").arg("start");
-    // Signal to the child process that it should run in the foreground
-    // (i.e., actually become the daemon) rather than spawning another child.
-    cmd.env("__ENCHANTER_DAEMON_FOREGROUND", "1");
+    args.push("daemon".to_string());
+    args.push("start".to_string());
 
-    let child = cmd
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("spawning daemon process")?;
+    // Convert to C strings before forking (allocation is not async-signal-safe)
+    let exe_cstr = std::ffi::CString::new(exe.to_string_lossy().into_owned())
+        .context("converting exe path to C string")?;
+    let mut c_args: Vec<std::ffi::CString> = vec![exe_cstr.clone()];
+    for arg in &args {
+        c_args.push(std::ffi::CString::new(arg.as_str())
+            .context("converting daemon arg to C string")?);
+    }
+    let mut argv: Vec<*const libc::c_char> = c_args.iter().map(|s| s.as_ptr()).collect();
+    argv.push(std::ptr::null());
 
-    Ok(child.id())
+    // Create a pipe so the grandchild can report its PID back to us
+    let mut pipe_fds: [std::os::fd::RawFd; 2] = [0, 0];
+    unsafe {
+        if libc::pipe(pipe_fds.as_mut_ptr()) != 0 {
+            return Err(anyhow::anyhow!(
+                "failed to create pipe for daemon PID: errno {}",
+                *libc::__errno_location()
+            ));
+        }
+    }
+    let (read_fd, write_fd) = (pipe_fds[0], pipe_fds[1]);
+
+    // ── First fork ──
+    let first_pid = unsafe { libc::fork() };
+    if first_pid < 0 {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err(anyhow::anyhow!("first fork failed"));
+    }
+
+    if first_pid > 0 {
+        // ── Original caller (parent) ──
+        // Wait for the grandchild's PID via pipe, then return.
+        unsafe { libc::close(write_fd); }
+
+        let mut pid_buf = [0u8; 4];
+        let n = unsafe {
+            libc::read(read_fd, pid_buf.as_mut_ptr() as *mut libc::c_void, 4)
+        };
+        unsafe { libc::close(read_fd); }
+
+        let result = if n == 4 {
+            let daemon_pid = u32::from_be_bytes(pid_buf);
+            // Reap the intermediate child (first fork child)
+            unsafe { libc::waitpid(first_pid, std::ptr::null_mut(), 0); }
+            Ok(daemon_pid)
+        } else {
+            unsafe { libc::waitpid(first_pid, std::ptr::null_mut(), 0); }
+            Err(anyhow::anyhow!("daemon failed to start: grandchild did not report PID"))
+        };
+        return result;
+    }
+
+    // ── Intermediate child (first fork) ──
+    // Close the read end — we don't need it.
+    unsafe { libc::close(read_fd); }
+
+    // Start a new session to detach from the controlling terminal.
+    unsafe {
+        if libc::setsid() < 0 {
+            libc::_exit(1);
+        }
+    }
+
+    // ── Second fork ──
+    let second_pid = unsafe { libc::fork() };
+    if second_pid < 0 {
+        unsafe { libc::_exit(2); }
+    }
+
+    if second_pid > 0 {
+        // Intermediate child: exit immediately. The grandchild is now orphaned
+        // (adopted by init/systemd) and fully detached from any terminal.
+        unsafe { libc::_exit(0); }
+    }
+
+    // ── Grandchild (actual daemon process) ──
+    // Redirect stdin/stdout/stderr to /dev/null
+    unsafe {
+        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const i8, libc::O_RDWR);
+        if devnull >= 0 {
+            libc::dup2(devnull, 0); // stdin
+            libc::dup2(devnull, 1); // stdout
+            libc::dup2(devnull, 2); // stderr
+            libc::close(devnull);
+        }
+        // Reset umask so the daemon can create files with any permissions
+        libc::umask(0o022);
+        // Change working directory to home to avoid holding arbitrary mount points
+        // (don't chdir to / — we need to write PID/socket files relative to home)
+    }
+
+    // Write our PID to the pipe so the original caller can read it
+    let my_pid = unsafe { libc::getpid() };
+    let pid_bytes = (my_pid as u32).to_be_bytes();
+    unsafe {
+        libc::write(write_fd, pid_bytes.as_ptr() as *const libc::c_void, 4);
+        libc::close(write_fd);
+    }
+
+    // Set the FOREGROUND flag so the daemon child runs run_daemon() directly
+    // Safety: we're in the grandchild process about to exec; no other threads exist.
+    unsafe { std::env::set_var("__ENCHANTER_DAEMON_FOREGROUND", "1"); }
+
+    // Exec the enchanter binary as the daemon
+    unsafe {
+        libc::execv(exe_cstr.as_ptr(), argv.as_ptr());
+        // If execv returns, it failed — no way to report error, just exit
+        libc::_exit(3);
+    }
 }
 
 /// Wait for the daemon socket to become available.
