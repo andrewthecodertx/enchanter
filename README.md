@@ -16,11 +16,11 @@ enchanter
 
 It creates `~/.enchanter/` with everything you need:
 
-- `SOUL.md` — your agent's personality
-- `config.yaml` — model, provider, API key
-- `memories/` — persistent memory files
-- `skills/` — drop in SKILL.md files
-- `sessions/` — conversation history (JSONL)
+- `SOUL.md` ,  your agent's personality
+- `config.yaml` ,  model, provider, API key
+- `memories/` ,  persistent memory files
+- `skills/` ,  drop in SKILL.md files
+- `sessions/` ,  conversation history (JSONL)
 
 Then configure a provider in `config.yaml`. A few examples:
 
@@ -252,11 +252,11 @@ Recordings include schema version, monotonic sequence numbers, timestamps, confi
 | macOS    | ✅ | ✅ |
 | Windows  | ✅ | ❌ |
 
-Daemon mode requires Unix domain sockets, which aren't available on Windows. On Windows, Enchanter always runs in inline mode — no `--no-daemon` flag or `daemon` subcommand is needed or available.
+Daemon mode requires Unix domain sockets, which aren't available on Windows. On Windows, Enchanter always runs in inline mode ,  no `--no-daemon` flag or `daemon` subcommand is needed or available.
 
 ## Daemon mode
 
-> **Unix only** — daemon mode requires Unix domain sockets and is available on Linux and macOS. On Windows, Enchanter always runs in inline mode.
+> **Unix only** ,  daemon mode requires Unix domain sockets and is available on Linux and macOS. On Windows, Enchanter always runs in inline mode.
 
 Enchanter can run as a background daemon that keeps MCP servers warm. This
 eliminates the 3–15 second cold start on every invocation (most of which is
@@ -290,7 +290,7 @@ enchanter --no-daemon -p "quick question"
 ```
 
 The daemon streams responses as JSONL events over the Unix socket, so you
-still see content tokens as they arrive — not just a final blob of text.
+still see content tokens as they arrive ,  not just a final blob of text.
 
 ## Info subcommands
 
@@ -321,7 +321,7 @@ When you exit the REPL with `/exit`, `/quit`, `/bye`, or Ctrl+D, Enchanter gener
 
 ### Session history
 
-Every conversation is automatically saved to `~/.enchanter/sessions/` as a JSONL file. Each session gets a unique ID, and every message (user, assistant, tool calls, tool results) is recorded turn-by-turn. The format is crash-safe — if the process dies mid-session, the file contains everything written up to that point.
+Every conversation is automatically saved to `~/.enchanter/sessions/` as a JSONL file. Each session gets a unique ID, and every message (user, assistant, tool calls, tool results) is recorded turn-by-turn. The format is crash-safe ,  if the process dies mid-session, the file contains everything written up to that point.
 
 List recent sessions:
 
@@ -343,18 +343,18 @@ Sessions are also used internally for crash recovery and will power upcoming fea
 
 The system prompt is built in layers:
 
-1. **SOUL** — your persona from SOUL.md, stable across turns
-2. **CONTEXT** — environment info (model, user, cwd, host, platform)
-3. **SKILLS** — discovered SKILL.md files index
-4. **INSTRUCTIONS** — tool usage guidance
-5. **VOLATILE** — memory entries, user profile
-6. **SESSION** — timestamp
+1. **SOUL** ,  your persona from SOUL.md, stable across turns
+2. **CONTEXT** ,  environment info (model, user, cwd, host, platform)
+3. **SKILLS** ,  discovered SKILL.md files index
+4. **INSTRUCTIONS** ,  tool usage guidance
+5. **VOLATILE** ,  memory entries, user profile
+6. **SESSION** ,  timestamp
 
 Each layer can be inspected via `/prompt budget` and compared across turns with `/prompt diff`.
 
 Memory uses the same `§`-delimited format as Hermes Agent. Skills use the
 same SKILL.md format (agentskills.io). If you're coming from Hermes, just
-copy or symlink your data — the structure matches.
+copy or symlink your data ,  the structure matches.
 
 Sessions are saved as JSONL files in `~/.enchanter/sessions/`. Each conversation
 turn is appended atomically, so the file is safe against crashes.
@@ -363,8 +363,8 @@ turn is appended atomically, so the file is safe against crashes.
 
 Enchanter supports two MCP transport types:
 
-- **stdio** — local processes spawned by Enchanter
-- **HTTP** — remote servers reached via POST requests
+- **stdio** ,  local processes spawned by Enchanter
+- **HTTP** ,  remote servers reached via POST requests
 
 Configure them in `~/.enchanter/config.yaml`:
 
@@ -384,9 +384,13 @@ mcp:
 ```
 
 Stdio servers are auto-restarted on crash (up to 3 attempts). HTTP servers
-use the Streamable HTTP transport — they handle both direct JSON responses
+use the Streamable HTTP transport ,  they handle both direct JSON responses
 and SSE-streamed responses, with `Mcp-Session-Id` tracking.
 
 ## License
 
-[MIT](LICENSE)
+MIT, see [LICENSE](LICENSE).
+
+## Contributing
+
+PRs welcome. Please open an issue first for major changes.
