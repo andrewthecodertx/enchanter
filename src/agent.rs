@@ -68,8 +68,7 @@ impl AgentSession {
         let client = LlmClient::new(&resolved.base_url, resolved.api_key.as_deref(), &resolved.model);
         let mcp = McpManager::new();
         if !no_tools && !config.mcp.servers.is_empty() {
-            // Note: MCP startup is async, must be called from an async context
-            // This is handled by `start_mcp()` below
+            // MCP startup is async, handled by `start_mcp()` later.
         }
         let session = Session::new(&resolved.model)?;
 
