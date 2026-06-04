@@ -75,11 +75,10 @@ impl PromptLayers {
 
         // Detect content changes in common layers
         for self_layer in &self.layers {
-            if let Some(prev_layer) = previous.layers.iter().find(|l| l.name == self_layer.name) {
-                if self_layer.content != prev_layer.content {
+            if let Some(prev_layer) = previous.layers.iter().find(|l| l.name == self_layer.name)
+                && self_layer.content != prev_layer.content {
                     layer_changes.push(LayerChange::Modified(self_layer.name.clone()));
                 }
-            }
         }
 
         // Full text diff
@@ -94,7 +93,7 @@ impl PromptLayers {
 
 /// Estimate tokens using the chars/4 heuristic (REQ-INS-008: labeled as approximate).
 pub fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64 + 3) / 4
+    (text.len() as u64).div_ceil(4)
 }
 
 /// A single layer's budget info.

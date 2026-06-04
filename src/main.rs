@@ -64,6 +64,7 @@ mod daemon {
     }
 }
 mod home;
+mod overlay;
 mod mcp;
 mod memory;
 mod prompt;

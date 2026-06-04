@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use crate::home;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub model: ModelConfig,
@@ -47,7 +47,7 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct ModelConfig {
     #[serde(default)]
     pub default: Option<String>,
@@ -60,7 +60,7 @@ pub struct ModelConfig {
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
     pub max_turns: Option<u32>,

@@ -52,15 +52,14 @@ pub fn handle_key(app: &mut App, event: CrosstermEvent) -> HandleResult {
             return HandleResult::Continue;
         }
         // '/' focuses the input pane and starts typing a command
-        (KeyModifiers::NONE, KeyCode::Char('/')) => {
-            if app.focus != Pane::Input {
+        (KeyModifiers::NONE, KeyCode::Char('/'))
+            if app.focus != Pane::Input => {
                 app.focus = Pane::Input;
                 app.input.clear();
                 app.input.insert('/');
                 return HandleResult::Continue;
             }
             // If already in input, let it fall through to type '/'
-        }
         _ => {}
     }
 

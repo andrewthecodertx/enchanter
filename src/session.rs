@@ -84,7 +84,7 @@ impl Session {
 
     /// Start a new session, creating the JSONL file in the given directory.
     pub fn new_in_dir(model: &str, dir: &std::path::Path) -> Result<Self> {
-        std::fs::create_dir_all(&dir).context("creating sessions directory")?;
+        std::fs::create_dir_all(dir).context("creating sessions directory")?;
 
         let id = uuid::Uuid::new_v4().to_string();
         let path = dir.join(format!("{}.jsonl", id));
@@ -231,7 +231,7 @@ impl Session {
         }
 
         let mut sessions = Vec::new();
-        for entry in fs::read_dir(&dir)
+        for entry in fs::read_dir(dir)
             .with_context(|| format!("reading sessions directory {}", dir.display()))?
         {
             let entry = entry?;
@@ -317,13 +317,12 @@ fn message_to_entries(message: &Message) -> Vec<SessionEntry> {
             }
 
             // If there's also text content, record it
-            if let Some(content) = &message.content {
-                if !content.is_empty() {
+            if let Some(content) = &message.content
+                && !content.is_empty() {
                     entries.push(SessionEntry::Assistant {
                         content: content.clone(),
                     });
                 }
-            }
 
             // Edge case: assistant message with no tool calls and no content
             if entries.is_empty() {

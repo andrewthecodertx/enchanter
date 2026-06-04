@@ -64,19 +64,16 @@ pub fn replay_session(
         .unwrap_or_else(|| "unknown".to_string());
 
     // Exact mode check
-    if exact {
-        if let Some(orig) = original_model {
-            if let Some(swapped) = swap_model {
-                if orig != swapped {
+    if exact
+        && let Some(orig) = original_model
+            && let Some(swapped) = swap_model
+                && orig != swapped {
                     anyhow::bail!(
                         "Exact mode: recorded model '{}' does not match --swap-model '{}'",
                         orig,
                         swapped
                     );
                 }
-            }
-        }
-    }
 
     println!("  {} Original model: {}", "↳".dimmed(), original_model.unwrap_or("unknown"));
     if swap_model.is_some() {

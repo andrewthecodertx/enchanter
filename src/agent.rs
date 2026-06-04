@@ -170,11 +170,10 @@ impl AgentSession {
     #[allow(dead_code)]
     pub async fn retry_events(&mut self) -> Result<(ChatResult, mpsc::UnboundedReceiver<Event>)> {
         let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
-        if let Some(idx) = last_user_idx {
-            if idx + 1 < self.messages.len() {
+        if let Some(idx) = last_user_idx
+            && idx + 1 < self.messages.len() {
                 self.messages.truncate(idx + 1);
             }
-        }
         let (tx, rx) = mpsc::unbounded_channel();
         let result = self.run_agent_loop_events(&tx).await?;
         Ok((result, rx))
@@ -184,11 +183,10 @@ impl AgentSession {
     pub async fn retry(&mut self) -> Result<ChatResult> {
         // Remove everything after last user message, then re-run
         let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
-        if let Some(idx) = last_user_idx {
-            if idx + 1 < self.messages.len() {
+        if let Some(idx) = last_user_idx
+            && idx + 1 < self.messages.len() {
                 self.messages.truncate(idx + 1);
             }
-        }
         self.run_agent_loop().await
     }
 
@@ -354,11 +352,10 @@ impl AgentSession {
             if result.has_tool_calls() {
                 let tool_calls = result.tool_calls.unwrap();
                 // If there was content alongside the tool calls, emit it
-                if let Some(ref content) = result.content {
-                    if !content.is_empty() {
+                if let Some(ref content) = result.content
+                    && !content.is_empty() {
                         let _ = tx.send(Event::Content { text: content.clone() });
                     }
-                }
                 for tc in &tool_calls {
                     let _ = tx.send(Event::ToolCall {
                         id: tc.id.clone(),
@@ -387,11 +384,10 @@ impl AgentSession {
             } else {
                 let content = result.content;
                 // Non-streaming mode: send the full content at once
-                if self.no_stream {
-                    if let Some(ref text) = content {
+                if self.no_stream
+                    && let Some(ref text) = content {
                         let _ = tx.send(Event::Content { text: text.clone() });
                     }
-                }
                 if let Some(ref text) = content {
                     self.session.append(&Message::assistant(text))?;
                 }

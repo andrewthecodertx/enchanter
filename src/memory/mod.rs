@@ -163,6 +163,29 @@ impl MemoryStore {
         }
     }
 
+    /// Merge project overlay memories from a directory.
+    /// Adds entries from project MEMORY.md and USER.md to this store.
+    /// Does not save to disk — merge is in-memory only for the session.
+    pub fn merge_from_dir(&mut self, dir: &std::path::Path) -> Result<()> {
+        let memory_path = dir.join("MEMORY.md");
+        if memory_path.exists() {
+            let content = std::fs::read_to_string(&memory_path)
+                .with_context(|| format!("reading project {}", memory_path.display()))?;
+            let entries = Self::parse_entries(&content);
+            self.memory_entries.extend(entries);
+        }
+
+        let user_path = dir.join("USER.md");
+        if user_path.exists() {
+            let content = std::fs::read_to_string(&user_path)
+                .with_context(|| format!("reading project {}", user_path.display()))?;
+            let entries = Self::parse_entries(&content);
+            self.user_entries.extend(entries);
+        }
+
+        Ok(())
+    }
+
     /// Manage memory: cap entries and summarize old ones if threshold exceeded.
     /// This is async because summarization calls the LLM.
     /// Should be called after the LlmClient is created.

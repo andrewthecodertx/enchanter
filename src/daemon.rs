@@ -34,12 +34,8 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 
 use crate::agent::AgentSession;
-use crate::config::Config;
 use crate::home;
-use crate::memory::MemoryStore;
 use crate::protocol::{Event, Request};
-use crate::skills::SkillsIndex;
-use crate::soul::Soul;
 
 /// Default idle timeout in minutes before the daemon shuts down.
 const DEFAULT_IDLE_TIMEOUT_MINS: u64 = 10;
@@ -99,10 +95,14 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
 
     // Initialize agent session
     eprintln!("Loading config, soul, memory, skills...");
-    let config = Config::load().context("loading config")?;
-    let soul = Soul::load_or_fallback().context("loading soul")?;
-    let memory = MemoryStore::load().context("loading memory")?;
-    let skills = SkillsIndex::discover().context("discovering skills")?;
+    let overlay = std::env::current_dir().ok()
+        .as_ref()
+        .and_then(|cwd| crate::overlay::discover_overlay(cwd))
+        .map(|path| crate::overlay::analyze_overlay(&path));
+    let config = crate::overlay::load_config(overlay.as_ref()).context("loading config")?;
+    let soul = crate::overlay::load_soul(overlay.as_ref()).context("loading soul")?;
+    let memory = crate::overlay::load_memories(overlay.as_ref()).context("loading memory")?;
+    let skills = crate::overlay::discover_skills(overlay.as_ref()).context("discovering skills")?;
 
     let resolved = config.resolve_default();
     let mut agent = AgentSession::new(
@@ -303,8 +303,8 @@ async fn handle_connection(
     match request {
         Request::Chat { prompt, model, system: _system, no_stream, no_tools } => {
             // Switch model if requested
-            if let Some(new_model) = model {
-                if let Err(e) = agent.switch_model(&new_model) {
+            if let Some(new_model) = model
+                && let Err(e) = agent.switch_model(&new_model) {
                     let err_event = Event::Error {
                         message: format!("Failed to switch model: {}", e),
                     };
@@ -313,7 +313,6 @@ async fn handle_connection(
                     }
                     return;
                 }
-            }
 
             // Apply overrides
             let prev_no_stream = agent.no_stream;
@@ -326,11 +325,10 @@ async fn handle_connection(
                 Ok((_result, mut rx)) => {
                     // Forward events to client
                     while let Some(event) = rx.recv().await {
-                        if let Ok(jsonl) = event.to_jsonl() {
-                            if writer.write_all(format!("{}\n", jsonl).as_bytes()).await.is_err() {
+                        if let Ok(jsonl) = event.to_jsonl()
+                            && writer.write_all(format!("{}\n", jsonl).as_bytes()).await.is_err() {
                                 break; // Client disconnected
                             }
-                        }
                     }
                 }
                 Err(e) => {
@@ -421,20 +419,17 @@ pub async fn is_running() -> bool {
         Ok(mut stream) => {
             // Try to send a ping
             let ping = Request::Ping;
-            if let Ok(jsonl) = ping.to_jsonl() {
-                if stream.write_all(format!("{}\n", jsonl).as_bytes()).await.is_ok() {
-                    if stream.shutdown().await.is_ok() {
+            if let Ok(jsonl) = ping.to_jsonl()
+                && stream.write_all(format!("{}\n", jsonl).as_bytes()).await.is_ok()
+                    && stream.shutdown().await.is_ok() {
                         // Read response
                         let reader = BufReader::new(stream);
                         let mut lines = reader.lines();
-                        if let Ok(Some(line)) = lines.next_line().await {
-                            if let Ok(Event::Pong) = Event::from_jsonl(line.trim()) {
+                        if let Ok(Some(line)) = lines.next_line().await
+                            && let Ok(Event::Pong) = Event::from_jsonl(line.trim()) {
                                 return true;
                             }
-                        }
                     }
-                }
-            }
             false
         }
         Err(_) => false,
@@ -701,9 +696,9 @@ pub async fn chat_via_daemon(prompt: &str, model: Option<String>, system: Option
                         let short_args: String = display_args.to_string().chars().take(80).collect();
                         println!("\n  {} {}({})", "⚙".dimmed(), name.bright_white(), short_args.dimmed());
                     }
-                    Event::ToolResult { content, .. } => {
+                    Event::ToolResult { content, .. }
                         // Optionally show tool output (truncated)
-                        if !content.is_empty() {
+                        if !content.is_empty() => {
                             let preview: String = content.lines().take(3).collect::<Vec<_>>().join("\n");
                             let truncated = if content.lines().count() > 3 {
                                 format!("{}\n  {}({} more lines)", preview.dimmed(), "↳".dimmed(), content.lines().count() - 3)
@@ -712,12 +707,10 @@ pub async fn chat_via_daemon(prompt: &str, model: Option<String>, system: Option
                             };
                             println!("  {}", truncated);
                         }
-                    }
-                    Event::Done => {
-                        if !full_response.is_empty() {
+                    Event::Done
+                        if !full_response.is_empty() => {
                             println!(); // Trailing newline after content
                         }
-                    }
                     Event::Error { message } => {
                         eprintln!("{} {}", "Error:".red(), message);
                     }

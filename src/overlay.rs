@@ -1,42 +1,19 @@
-//! Project overlay — per-repo harness scoping via `.enchanter/` directories.
+//! Project overlay — per-repo additive layering via `.enchanter/` directories.
 //!
-//! Implements REQ-OVR-001 through REQ-OVR-007:
-//! - Discover `.enchanter/` by searching CWD and parents (REQ-OVR-001)
-//! - Precedence: env > project overlay > global config > defaults (REQ-OVR-002)
-//! - Overlay supports: SOUL.md, config.yaml, memories/, skills/, MCP servers (REQ-OVR-003)
-//! - `/scope global|project|both` REPL command (REQ-OVR-004)
-//! - Project takes precedence when `/scope both` (REQ-OVR-005)
-//! - `/config` shows which values came from which source (REQ-OVR-006)
-//! - `enchanter init --project` scaffolds `.enchanter/` (REQ-OVR-007)
+//! Global `~/.enchanter/` is the source of truth. Project `.enchanter/` layers
+//! on top: it never replaces or overrides global settings, only supplements.
+//!
+//! - Config: global is authoritative; project overlays add MCP servers and providers
+//! - SOUL: global SOUL.md always loads; project SOUL.md is appended as context
+//! - Memories: global memories always load; project memories merge in as additional entries
+//! - Skills: global skills always discovered; project skills added to the index
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::home;
 
-/// Active scope determining which configuration sources are used.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Scope {
-    /// Use only global ~/.enchanter/ configuration.
-    Global,
-    /// Use only project .enchanter/ configuration.
-    Project,
-    /// Merge both sources, with project taking precedence on conflicts.
-    Both,
-}
-
-impl std::fmt::Display for Scope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Scope::Global => write!(f, "global"),
-            Scope::Project => write!(f, "project"),
-            Scope::Both => write!(f, "both"),
-        }
-    }
-}
-
-/// The resolved overlay: project-local `.enchanter/` directory path and what it provides.
+/// Discovered project overlay: path to `.enchanter/` and what it provides.
 #[derive(Debug, Clone)]
 pub struct Overlay {
     /// Path to the discovered `.enchanter/` directory.
@@ -52,7 +29,7 @@ pub struct Overlay {
 }
 
 /// Discover a `.enchanter/` directory by searching from `start_dir` upward
-/// to the filesystem root or a VCS root (.git directory). (REQ-OVR-001)
+/// to the filesystem root or a VCS root (.git directory).
 pub fn discover_overlay(start_dir: &Path) -> Option<PathBuf> {
     let mut current = if start_dir.is_absolute() {
         start_dir.to_path_buf()
@@ -66,13 +43,11 @@ pub fn discover_overlay(start_dir: &Path) -> Option<PathBuf> {
             return Some(candidate);
         }
 
-        // Check for VCS root (git directory)
+        // Don't search above a git root
         if current.join(".git").exists() {
-            // Don't go above the git root
             break;
         }
 
-        // Go up one directory
         if !current.pop() {
             break;
         }
@@ -92,191 +67,89 @@ pub fn analyze_overlay(path: &Path) -> Overlay {
     }
 }
 
-/// Resolved configuration result that tracks the source of each value.
-#[derive(Debug, Clone)]
-pub struct ResolvedOverlayConfig {
-    /// The merged configuration.
-    pub config: Config,
-    /// Source annotations for display.
-    pub sources: Vec<ConfigSource>,
-}
-
-/// A config value source annotation.
-#[derive(Debug, Clone)]
-pub struct ConfigSource {
-    pub key: String,
-    pub value: String,
-    pub source: String,
-}
-
-/// Resolve the effective configuration by merging global and project overlay configs.
-/// Precedence: env vars > project overlay > global config > compiled defaults (REQ-OVR-002)
-/// When scope is Global, only global config is used.
-/// When scope is Project, only project overlay is used.
-/// When scope is Both, project overlay takes precedence over global (REQ-OVR-005).
-pub fn resolve_config(scope: &Scope, overlay: Option<&Overlay>) -> Result<ResolvedOverlayConfig> {
-    // Always start with global config as the base
-    let global_config = Config::load()?;
-
-    match scope {
-        Scope::Global => {
-            let mut sources = vec![
-                ConfigSource {
-                    key: "scope".to_string(),
-                    value: "global".to_string(),
-                    source: "cli".to_string(),
-                },
-            ];
-            sources.push(ConfigSource {
-                key: "config".to_string(),
-                value: home::enchanter_home().display().to_string(),
-                source: "global".to_string(),
-            });
-
-            Ok(ResolvedOverlayConfig {
-                config: global_config,
-                sources,
-            })
-        }
-        Scope::Project => {
-            let overlay = overlay.context("No project overlay found in current directory or its parents")?;
-
-            // Load project config (or use defaults if no config.yaml)
-            let project_config = if overlay.has_config {
-                let path = overlay.path.join("config.yaml");
-                Config::load_from(&path)?
-            } else {
-                Config::default()
-            };
-
-            let mut sources = vec![
-                ConfigSource {
-                    key: "scope".to_string(),
-                    value: "project".to_string(),
-                    source: "cli".to_string(),
-                },
-                ConfigSource {
-                    key: "config".to_string(),
-                    value: overlay.path.display().to_string(),
-                    source: "project".to_string(),
-                },
-            ];
-
-            Ok(ResolvedOverlayConfig {
-                config: project_config,
-                sources,
-            })
-        }
-        Scope::Both => {
-            let overlay = overlay.context("No project overlay found in current directory or its parents")?;
-
-            // Load project config
-            let project_config = if overlay.has_config {
-                let path = overlay.path.join("config.yaml");
-                Config::load_from(&path)?
-            } else {
-                Config::default()
-            };
-
-            // Merge: project takes precedence over global
-            // - Model default: project > global (env vars still override both)
-            // - Providers: merge both sets, project overrides keys that exist in both
-            // - MCP servers: merge both sets, project overrides keys that exist in both
-            let merged = merge_configs(&global_config, &project_config);
-
-            let mut sources = vec![
-                ConfigSource {
-                    key: "scope".to_string(),
-                    value: "both".to_string(),
-                    source: "cli".to_string(),
-                },
-                ConfigSource {
-                    key: "global_config".to_string(),
-                    value: home::enchanter_home().display().to_string(),
-                    source: "global".to_string(),
-                },
-                ConfigSource {
-                    key: "project_config".to_string(),
-                    value: overlay.path.display().to_string(),
-                    source: "project".to_string(),
-                },
-            ];
-
-            Ok(ResolvedOverlayConfig {
-                config: merged,
-                sources,
-            })
-        }
-    }
-}
-
-/// Merge two configs, with `project` taking precedence over `global`.
-fn merge_configs(global: &Config, project: &Config) -> Config {
+/// Merge project overlay config into global config.
+/// Global values always win; project only adds (MCP servers, providers) that don't exist in global.
+pub fn merge_configs(global: &Config, project: &Config) -> Config {
     let mut merged = global.clone();
 
-    // Model default: project overrides global
-    if project.model.default.is_some() {
-        merged.model.default = project.model.default.clone();
-    }
-    if project.model.base_url.is_some() {
-        merged.model.base_url = project.model.base_url.clone();
-    }
-    if project.model.api_key.is_some() {
-        merged.model.api_key = project.model.api_key.clone();
-    }
-
-    // Agent config: project overrides global
-    if project.agent.max_turns.is_some() {
-        merged.agent.max_turns = project.agent.max_turns;
-    }
-    if project.agent.soft_limit.is_some() {
-        merged.agent.soft_limit = project.agent.soft_limit;
-    }
-    if project.agent.summarize_on_exit.is_some() {
-        merged.agent.summarize_on_exit = project.agent.summarize_on_exit;
-    }
-
-    // Providers: merge, project takes precedence for same keys
+    // Providers: add any project providers that global doesn't have
     for (key, value) in &project.providers {
-        merged.providers.insert(key.clone(), value.clone());
+        if !merged.providers.contains_key(key) {
+            merged.providers.insert(key.clone(), value.clone());
+        }
     }
 
-    // MCP servers: merge, project takes precedence for same keys
+    // MCP servers: add any project servers that global doesn't have
     for (key, value) in &project.mcp.servers {
-        merged.mcp.servers.insert(key.clone(), value.clone());
+        if !merged.mcp.servers.contains_key(key) {
+            merged.mcp.servers.insert(key.clone(), value.clone());
+        }
     }
 
     merged
 }
 
-/// Get the project overlay's SOUL.md path, if it exists.
-pub fn overlay_soul_path(overlay: &Overlay) -> Option<PathBuf> {
-    if overlay.has_soul {
-        Some(overlay.path.join("SOUL.md"))
-    } else {
-        None
+/// Load config: global first, then layer project overlay on top (additive only).
+pub fn load_config(overlay: Option<&Overlay>) -> Result<Config> {
+    let global_config = Config::load()?;
+
+    if let Some(ov) = overlay {
+        if ov.has_config {
+            let path = ov.path.join("config.yaml");
+            let project_config = Config::load_from(&path)?;
+            return Ok(merge_configs(&global_config, &project_config));
+        }
     }
+
+    Ok(global_config)
 }
 
-/// Get the project overlay's memories directory, if it exists.
-pub fn overlay_memories_dir(overlay: &Overlay) -> Option<PathBuf> {
-    if overlay.has_memories {
-        Some(overlay.path.join("memories"))
-    } else {
-        None
+/// Load SOUL: global always, project appended as additional context.
+pub fn load_soul(overlay: Option<&Overlay>) -> Result<crate::soul::Soul> {
+    let mut soul = crate::soul::Soul::load_or_fallback()?;
+
+    if let Some(ov) = overlay {
+        if ov.has_soul {
+            let project_soul_path = ov.path.join("SOUL.md");
+            if let Ok(content) = std::fs::read_to_string(&project_soul_path) {
+                soul.content.push_str("\n\n");
+                soul.content.push_str(&content);
+            }
+        }
     }
+
+    Ok(soul)
 }
 
-/// Get the project overlay's skills directory, if it exists.
-pub fn overlay_skills_dir(overlay: &Overlay) -> Option<PathBuf> {
-    if overlay.has_skills {
-        Some(overlay.path.join("skills"))
-    } else {
-        None
+/// Load memories: global always, project merged in as additional entries.
+pub fn load_memories(overlay: Option<&Overlay>) -> Result<crate::memory::MemoryStore> {
+    let mut memory = crate::memory::MemoryStore::load()?;
+
+    if let Some(ov) = overlay {
+        if ov.has_memories {
+            let project_mem_dir = ov.path.join("memories");
+            memory.merge_from_dir(&project_mem_dir)?;
+        }
     }
+
+    Ok(memory)
 }
 
-/// Scaffold a new `.enchanter/` directory in the given path (REQ-OVR-007).
+/// Discover skills: global always, project added to the index.
+pub fn discover_skills(overlay: Option<&Overlay>) -> Result<crate::skills::SkillsIndex> {
+    let mut skills = crate::skills::SkillsIndex::discover()?;
+
+    if let Some(ov) = overlay {
+        if ov.has_skills {
+            let project_skills_dir = ov.path.join("skills");
+            skills.merge_from_dir(&project_skills_dir)?;
+        }
+    }
+
+    Ok(skills)
+}
+
+/// Scaffold a new `.enchanter/` directory in the given project root.
 pub fn init_project_overlay(dir: &Path) -> Result<PathBuf> {
     let enchanter_dir = dir.join(".enchanter");
 
@@ -294,20 +167,22 @@ pub fn init_project_overlay(dir: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(enchanter_dir.join("skills"))
         .with_context(|| "creating skills/ directory")?;
 
-    // Write a minimal config.yaml
     let config_content = "# Enchanter project overlay configuration\n\
-        # Values here override global ~/.enchanter/config.yaml\n\
-        # model:\n\
-        #   default: gpt-4.1-mini\n\
-        # agent:\n\
-        #   max_turns: 30\n";
+        # Project config is additive: it only adds new providers/MCP servers\n\
+        # that global config doesn't already define. Global always wins.\n\
+        # providers:\n\
+        #   my-project-provider:\n\
+        #     model: gpt-4.1-mini\n\
+        # mcp:\n\
+        #   servers:\n\
+        #     my-project-server:\n\
+        #       command: npx\n\
+        #       args: [\"-y\", \"some-mcp-server\"]\n";
     std::fs::write(enchanter_dir.join("config.yaml"), config_content)?;
 
-    // Write a minimal SOUL.md template
     let soul_content = "# Project SOUL.md\n\
-        # This persona supplements or overrides the global SOUL.md.\n\
-        # When scope is 'both', this content is appended to the global SOUL.md.\n\
-        # When scope is 'project', this replaces the global SOUL.md entirely.\n";
+        # This content is appended to your global SOUL.md as additional context.\n\
+        # Global SOUL.md always takes precedence.\n";
     std::fs::write(enchanter_dir.join("SOUL.md"), soul_content)?;
 
     Ok(enchanter_dir)
@@ -319,10 +194,7 @@ mod tests {
 
     #[test]
     fn test_discover_overlay_from_tmp() {
-        // Should not find .enchanter/ in /tmp (usually)
         let result = discover_overlay(Path::new("/tmp"));
-        // We don't assert None because someone might have .enchanter/ in /tmp
-        // Just verify it doesn't panic
         let _ = result;
     }
 
@@ -340,23 +212,14 @@ mod tests {
     #[test]
     fn test_discover_overlay_stops_at_git_root() {
         let dir = tempfile::tempdir().unwrap();
-        // Create .git directory (simulating a git repo root)
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
-        // Create .enchanter in the git root
         std::fs::create_dir_all(dir.path().join(".enchanter")).unwrap();
 
-        // Create a subdirectory
         let subdir = dir.path().join("src").join("module");
         std::fs::create_dir_all(&subdir).unwrap();
 
-        // Should find the overlay at the git root
         let found = discover_overlay(&subdir);
         assert!(found.is_some());
-
-        // Create .enchanter ABOVE the git root (should NOT be found)
-        let parent = dir.path().parent().unwrap();
-        // Don't create it — could interfere with other tests
-        let _ = parent;
     }
 
     #[test]
@@ -375,13 +238,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scope_display() {
-        assert_eq!(Scope::Global.to_string(), "global");
-        assert_eq!(Scope::Project.to_string(), "project");
-        assert_eq!(Scope::Both.to_string(), "both");
-    }
-
-    #[test]
     fn test_init_project_overlay() {
         let dir = tempfile::tempdir().unwrap();
         let result = init_project_overlay(dir.path()).unwrap();
@@ -391,32 +247,67 @@ mod tests {
         assert!(result.join("memories").is_dir());
         assert!(result.join("skills").is_dir());
 
-        // Should fail if already exists
         let err = init_project_overlay(dir.path());
         assert!(err.is_err());
     }
 
     #[test]
-    fn test_merge_configs_project_overrides() {
+    fn test_merge_configs_additive_only() {
         let mut global = Config::default();
         global.model.default = Some("gpt-4".to_string());
+        global.providers.insert(
+            "global-provider".to_string(),
+            crate::config::ProviderConfig {
+                model: Some("gpt-4".to_string()),
+                base_url: None,
+                api_key: None,
+            },
+        );
 
         let mut project = Config::default();
-        project.model.default = Some("qwen3".to_string());
+        project.providers.insert(
+            "project-provider".to_string(),
+            crate::config::ProviderConfig {
+                model: Some("claude-sonnet-4".to_string()),
+                base_url: None,
+                api_key: None,
+            },
+        );
 
         let merged = merge_configs(&global, &project);
-        assert_eq!(merged.model.default, Some("qwen3".to_string()));
+        // Global model wins (not overridden)
+        assert_eq!(merged.model.default, Some("gpt-4".to_string()));
+        // Global provider preserved
+        assert!(merged.providers.contains_key("global-provider"));
+        // Project provider added
+        assert!(merged.providers.contains_key("project-provider"));
     }
 
     #[test]
-    fn test_merge_configs_global_fallback() {
+    fn test_merge_configs_global_wins_on_conflict() {
         let mut global = Config::default();
-        global.model.default = Some("gpt-4".to_string());
+        global.providers.insert(
+            "shared-provider".to_string(),
+            crate::config::ProviderConfig {
+                model: Some("gpt-4".to_string()),
+                base_url: None,
+                api_key: None,
+            },
+        );
 
-        let project = Config::default();
-        // project doesn't override model
+        let mut project = Config::default();
+        project.providers.insert(
+            "shared-provider".to_string(),
+            crate::config::ProviderConfig {
+                model: Some("claude-sonnet-4".to_string()),
+                base_url: None,
+                api_key: None,
+            },
+        );
 
         let merged = merge_configs(&global, &project);
-        assert_eq!(merged.model.default, Some("gpt-4".to_string()));
+        // Global value wins — project does NOT override
+        let provider = merged.providers.get("shared-provider").unwrap();
+        assert_eq!(provider.model, Some("gpt-4".to_string()));
     }
 }

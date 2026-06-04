@@ -81,6 +81,34 @@ impl SkillsIndex {
         Ok(Self { skills })
     }
 
+    /// Merge project overlay skills from a directory.
+    /// Adds skills that don't already exist in the index (additive only).
+    pub fn merge_from_dir(&mut self, dir: &Path) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let existing_names: std::collections::HashSet<String> =
+            self.skills.iter().map(|s| s.name.clone()).collect();
+
+        for entry in WalkDir::new(dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_name() == "SKILL.md"
+                && let Some(skill) = parse_skill_file(entry.path(), dir)
+            {
+                if !existing_names.contains(&skill.name) {
+                    self.skills.push(skill);
+                }
+            }
+        }
+
+        self.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub fn find(&self, name: &str) -> Option<&Skill> {
         self.skills

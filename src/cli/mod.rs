@@ -146,10 +146,16 @@ pub async fn run(args: Args) -> Result<()> {
         return handle_daemon_command(action, &args).await;
     }
 
-    let config = Config::load()?;
-    let soul = crate::soul::Soul::load_or_fallback()?;
-    let memory = crate::memory::MemoryStore::load()?;
-    let skills = crate::skills::SkillsIndex::discover()?;
+    // Discover project overlay (.enchanter/ in CWD or parents)
+    let overlay = std::env::current_dir().ok()
+        .as_ref()
+        .and_then(|cwd| crate::overlay::discover_overlay(cwd))
+        .map(|path| crate::overlay::analyze_overlay(&path));
+
+    let config = crate::overlay::load_config(overlay.as_ref())?;
+    let soul = crate::overlay::load_soul(overlay.as_ref())?;
+    let memory = crate::overlay::load_memories(overlay.as_ref())?;
+    let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     if let Some(cmd) = &args.command {
         #[cfg(feature = "tui")]
@@ -221,10 +227,11 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     // Inline mode (current behavior)
-    let config = Config::load()?;
-    let soul = crate::soul::Soul::load_or_fallback()?;
-    let memory = crate::memory::MemoryStore::load()?;
-    let skills = crate::skills::SkillsIndex::discover()?;
+    // Overlay already discovered above — just reload with overlay
+    let config = crate::overlay::load_config(overlay.as_ref())?;
+    let soul = crate::overlay::load_soul(overlay.as_ref())?;
+    let memory = crate::overlay::load_memories(overlay.as_ref())?;
+    let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     // Resolve initial model: -m flag > config
     let resolved = if let Some(model_flag) = &args.model {
@@ -303,18 +310,15 @@ pub async fn run(args: Args) -> Result<()> {
         }
         let result = agent.chat(user_prompt).await;
         // Record assistant response
-        if let (Some(rec), Ok(cr)) = (&mut recorder, &result) {
-            if let Some(ref text) = cr.response {
+        if let (Some(rec), Ok(cr)) = (&mut recorder, &result)
+            && let Some(ref text) = cr.response {
                 rec.record_assistant_response(text)?;
             }
-        }
-        if args.no_stream {
-            if let Ok(cr) = &result {
-                if let Some(ref text) = cr.response {
+        if args.no_stream
+            && let Ok(cr) = &result
+                && let Some(ref text) = cr.response {
                     println!("{}", text);
                 }
-            }
-        }
         agent.shutdown_mcp().await;
         return result.map(|_| ());
     }
@@ -606,7 +610,7 @@ fn handle_command(
         Commands::Sessions { id } => {
             match id {
                 Some(session_id) => {
-                    match Session::load(&session_id) {
+                    match Session::load(session_id) {
                         Ok(entries) => {
                             let messages = Session::entries_to_messages(&entries);
                             if messages.is_empty() {
@@ -814,11 +818,10 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                             if line == "/retry" {
                                 match agent.retry().await {
                                     Ok(cr) => {
-                                        if agent.no_stream {
-                                            if let Some(ref text) = cr.response {
+                                        if agent.no_stream
+                                            && let Some(ref text) = cr.response {
                                                 println!("{}", text);
                                             }
-                                        }
                                     }
                                     Err(e) => {
                                         eprintln!("{} {}", "Error:".red(), e);
@@ -852,16 +855,14 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                 match agent.chat(&line).await {
                     Ok(cr) => {
                         // Record assistant response
-                        if let Some(ref mut rec) = recorder {
-                            if let Some(ref text) = cr.response {
+                        if let Some(ref mut rec) = recorder
+                            && let Some(ref text) = cr.response {
                                 rec.record_assistant_response(text)?;
                             }
-                        }
-                        if agent.no_stream {
-                            if let Some(ref text) = cr.response {
+                        if agent.no_stream
+                            && let Some(ref text) = cr.response {
                                 println!("{}", text);
                             }
-                        }
                     }
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
