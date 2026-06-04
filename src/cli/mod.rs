@@ -81,6 +81,8 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Initialize a project overlay (.enchanter/) in the current directory
+    Init,
     Soul,
     Memory,
     Skills,
@@ -493,6 +495,23 @@ fn handle_command(
     skills: &crate::skills::SkillsIndex,
 ) -> Result<()> {
     match cmd {
+        Commands::Init => {
+            let cwd = std::env::current_dir()?;
+            match crate::overlay::init_project_overlay(&cwd) {
+                Ok(path) => {
+                    println!("{} Created project overlay at {}", "✓".green(), path.display());
+                }
+                Err(e) => {
+                    // Check if it's the "already exists" case
+                    let msg = e.to_string();
+                    if msg.contains("already exists") {
+                        println!("{} {}", "✗".red(), msg);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
         Commands::Soul => {
             println!("{}", "═══ SOUL.MD ═══".bright_cyan());
             println!("{}", soul.content);
