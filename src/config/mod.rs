@@ -33,6 +33,8 @@ pub struct Config {
     pub agent: AgentConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 /// A named provider preset: model + base_url + api_key.
@@ -127,6 +129,7 @@ pub struct McpConfig {
 ///   - url, headers for HTTP transport
 ///   - Additionally supports SSE transport, per-server timeout/retry,
 ///     and parallel tool call settings that enchanter omits.
+///
 /// OpenCode (opencode/packages/opencode/src/mcp/index.ts) uses the
 /// @modelcontextprotocol SDK for transport; enchanter reimplements
 /// the MCP protocol directly.
@@ -168,6 +171,48 @@ pub enum McpTransportType {
     Http,
 }
 
+/// Security sandbox: paths the agent is allowed to read/write/execute within.
+/// Defaults to the user's home directory. Projects can add their own paths
+/// via project overlay config.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct SecurityConfig {
+    /// Directories the agent can access. Defaults to the user's home directory.
+    /// Paths are canonicalized at resolution time.
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+
+    /// Allow `exec_command` to run without a filesystem sandbox when the kernel
+    /// can't provide one (old kernel, non-Linux). Default: false (fail closed —
+    /// refuse to run an unsandboxed shell). Set true as an escape hatch on
+    /// platforms where Landlock is unavailable.
+    #[serde(default)]
+    pub allow_unsandboxed_exec: bool,
+}
+
+impl SecurityConfig {
+    /// Resolve allowed_paths: if empty, defaults to the user's home directory.
+    /// Expands ~ and environment variables, canonicalizes all paths.
+    pub fn resolve(&self) -> Vec<PathBuf> {
+        if self.allowed_paths.is_empty() {
+            // Default: user's home directory
+            if let Some(home) = dirs::home_dir() {
+                vec![home]
+            } else {
+                vec![PathBuf::from("/")]
+            }
+        } else {
+            self.allowed_paths
+                .iter()
+                .filter_map(|p| {
+                    let expanded = shellexpand::tilde(p).to_string();
+                    let path = PathBuf::from(&*expanded);
+                    path.canonicalize().ok().or_else(|| Some(path.clone()))
+                })
+                .collect()
+        }
+    }
+}
+
 /// Resolved connection settings for a specific model+provider.
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
@@ -203,14 +248,18 @@ impl Config {
 
     /// Model ID: config > ENCHANTER_MODEL > "gpt-4.1-mini".
     pub fn model_id(&self) -> String {
-        self.model.default.clone()
+        self.model
+            .default
+            .clone()
             .or_else(|| std::env::var("ENCHANTER_MODEL").ok())
             .unwrap_or_else(|| "gpt-4.1-mini".to_string())
     }
 
     /// Base URL: config > ENCHANTER_BASE_URL > OPENAI_BASE_URL > OpenAI default.
     pub fn base_url(&self) -> String {
-        self.model.base_url.clone()
+        self.model
+            .base_url
+            .clone()
             .or_else(|| std::env::var("ENCHANTER_BASE_URL").ok())
             .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
@@ -218,7 +267,9 @@ impl Config {
 
     /// API key: config > ENCHANTER_API_KEY > OPENAI_API_KEY. None for local providers.
     pub fn api_key(&self) -> Option<String> {
-        self.model.api_key.clone()
+        self.model
+            .api_key
+            .clone()
             .or_else(|| std::env::var("ENCHANTER_API_KEY").ok())
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
     }
@@ -227,27 +278,43 @@ impl Config {
     /// Returns None if no provider exists with that name.
     pub fn resolve_provider(&self, name: &str) -> Option<ResolvedModel> {
         let provider = self.providers.get(name)?;
-        let model = provider.model.clone()
+        let model = provider
+            .model
+            .clone()
             .or_else(|| self.model.default.clone())
             .or_else(|| std::env::var("ENCHANTER_MODEL").ok())
             .unwrap_or_else(|| "gpt-4.1-mini".to_string());
-        let base_url = provider.base_url.clone()
+        let base_url = provider
+            .base_url
+            .clone()
             .or_else(|| self.model.base_url.clone())
             .or_else(|| std::env::var("ENCHANTER_BASE_URL").ok())
             .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
             .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        let api_key = provider.api_key.clone()
+        let api_key = provider
+            .api_key
+            .clone()
             .or_else(|| self.model.api_key.clone())
             .or_else(|| std::env::var("ENCHANTER_API_KEY").ok())
             .or_else(|| std::env::var("OPENAI_API_KEY").ok());
 
         // Expand ${VAR} in api_key and base_url — pattern from hermes-agent's
         // mcp_servers config (hermes-agent/tools/mcp_tool.py)
-        let api_key = api_key.map(|k| shellexpand::env(&k).unwrap_or_else(|_| k.clone().into()).to_string());
+        let api_key = api_key.map(|k| {
+            shellexpand::env(&k)
+                .unwrap_or_else(|_| k.clone().into())
+                .to_string()
+        });
         let base_url_clone = base_url.clone();
-        let base_url = shellexpand::env(&base_url).unwrap_or_else(|_| base_url_clone.into()).to_string();
+        let base_url = shellexpand::env(&base_url)
+            .unwrap_or_else(|_| base_url_clone.into())
+            .to_string();
 
-        Some(ResolvedModel { model, base_url, api_key })
+        Some(ResolvedModel {
+            model,
+            base_url,
+            api_key,
+        })
     }
 
     /// Resolve the default connection settings (top-level model config + env).
@@ -257,9 +324,15 @@ impl Config {
             .unwrap_or_else(|_| self.base_url().into())
             .to_string();
         let api_key = self.api_key().map(|k| {
-            shellexpand::env(&k).unwrap_or_else(|_| k.clone().into()).to_string()
+            shellexpand::env(&k)
+                .unwrap_or_else(|_| k.clone().into())
+                .to_string()
         });
-        ResolvedModel { model, base_url, api_key }
+        ResolvedModel {
+            model,
+            base_url,
+            api_key,
+        }
     }
 
     /// Hard turn limit (default 150). The agent loop will always stop here.
@@ -280,6 +353,16 @@ impl Config {
 
     pub fn memory_config(&self) -> &MemoryConfig {
         &self.agent.memory
+    }
+
+    /// Resolve allowed paths for the security sandbox.
+    pub fn allowed_paths(&self) -> Vec<PathBuf> {
+        self.security.resolve()
+    }
+
+    /// Whether unsandboxed shell execution is permitted when no sandbox is available.
+    pub fn allow_unsandboxed_exec(&self) -> bool {
+        self.security.allow_unsandboxed_exec
     }
 }
 
@@ -307,11 +390,14 @@ mod tests {
     #[test]
     fn resolve_provider_fills_defaults() {
         let mut c = Config::default();
-        c.providers.insert("ollama".to_string(), ProviderConfig {
-            model: Some("qwen3".to_string()),
-            base_url: Some("http://localhost:11434/v1".to_string()),
-            api_key: None,
-        });
+        c.providers.insert(
+            "ollama".to_string(),
+            ProviderConfig {
+                model: Some("qwen3".to_string()),
+                base_url: Some("http://localhost:11434/v1".to_string()),
+                api_key: None,
+            },
+        );
         let resolved = c.resolve_provider("ollama").unwrap();
         assert_eq!(resolved.model, "qwen3");
         assert_eq!(resolved.base_url, "http://localhost:11434/v1");

@@ -24,7 +24,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
@@ -123,8 +123,10 @@ async fn connect_transport(name: &str, config: &McpServerConfig) -> Result<McpTr
 
 /// Spawn a stdio process and return handles.
 async fn connect_stdio(name: &str, config: &McpServerConfig) -> Result<McpTransport> {
-    let command = config.command.as_ref()
-        .context(format!("MCP server '{}' requires 'command' for stdio transport", name))?;
+    let command = config.command.as_ref().context(format!(
+        "MCP server '{}' requires 'command' for stdio transport",
+        name
+    ))?;
 
     let mut env_vars = HashMap::new();
     for (key, val) in &config.env {
@@ -144,12 +146,17 @@ async fn connect_stdio(name: &str, config: &McpServerConfig) -> Result<McpTransp
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .with_context(|| format!("spawning MCP server '{}': {}", name, command))?;
 
-    let stdin = child.stdin.take()
+    let stdin = child
+        .stdin
+        .take()
         .context("MCP server stdin not available")?;
-    let stdout = child.stdout.take()
+    let stdout = child
+        .stdout
+        .take()
         .context("MCP server stdout not available")?;
 
     Ok(McpTransport::Stdio {
@@ -161,10 +168,14 @@ async fn connect_stdio(name: &str, config: &McpServerConfig) -> Result<McpTransp
 
 /// Prepare an HTTP transport (no persistent connection, just a reqwest client).
 async fn connect_http(name: &str, config: &McpServerConfig) -> Result<McpTransport> {
-    let url = config.url.as_ref()
-        .context(format!("MCP server '{}' requires 'url' for HTTP transport", name))?;
+    let url = config.url.as_ref().context(format!(
+        "MCP server '{}' requires 'url' for HTTP transport",
+        name
+    ))?;
 
-    let headers = config.headers.iter()
+    let headers = config
+        .headers
+        .iter()
         .map(|(k, v)| {
             if v.starts_with("${") && v.ends_with('}') {
                 let var_name = &v[2..v.len() - 1];
@@ -192,14 +203,22 @@ impl McpTransport {
             McpTransport::Stdio { stdin, stdout, .. } => {
                 send_stdio(server_name, stdin, stdout, request).await
             }
-            McpTransport::Http { client, url, session_id, headers } => {
-                send_http(client, url, session_id, headers, request).await
-            }
+            McpTransport::Http {
+                client,
+                url,
+                session_id,
+                headers,
+            } => send_http(client, url, session_id, headers, request).await,
         }
     }
 
     /// Send a JSON-RPC notification (no id, no response expected).
-    async fn send_notification(&self, server_name: &str, method: &str, params: Option<Value>) -> Result<()> {
+    async fn send_notification(
+        &self,
+        server_name: &str,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<()> {
         let notification = json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -211,17 +230,27 @@ impl McpTransport {
                 let json = serde_json::to_string(&notification)
                     .context("serializing JSON-RPC notification")?;
                 let mut stdin = stdin.lock().await;
-                stdin.write_all(json.as_bytes()).await
+                stdin
+                    .write_all(json.as_bytes())
+                    .await
                     .context("writing notification to MCP server stdin")?;
-                stdin.write_all(b"\n").await
+                stdin
+                    .write_all(b"\n")
+                    .await
                     .context("writing newline to MCP server stdin")?;
-                stdin.flush().await
-                    .context("flushing MCP server stdin")?;
+                stdin.flush().await.context("flushing MCP server stdin")?;
                 Ok(())
             }
-            McpTransport::Http { client, url, session_id, headers, .. } => {
+            McpTransport::Http {
+                client,
+                url,
+                session_id,
+                headers,
+                ..
+            } => {
                 // HTTP notifications are fire-and-forget POSTs
-                let mut req = client.post(url.as_str())
+                let mut req = client
+                    .post(url.as_str())
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json, text/event-stream");
 
@@ -235,8 +264,9 @@ impl McpTransport {
                     req = req.header(k.as_str(), v.as_str());
                 }
 
-                let resp = req.json(&notification).send().await
-                    .with_context(|| format!("sending notification to HTTP MCP server '{}'", server_name))?;
+                let resp = req.json(&notification).send().await.with_context(|| {
+                    format!("sending notification to HTTP MCP server '{}'", server_name)
+                })?;
                 // Notifications may return 202 or 200, both are fine
                 let _ = resp;
                 Ok(())
@@ -271,25 +301,28 @@ async fn send_stdio(
     stdout: &Mutex<BufReader<tokio::process::ChildStdout>>,
     request: &JsonRpcRequest,
 ) -> Result<Value> {
-    let request_json = serde_json::to_string(request)
-        .context("serializing JSON-RPC request")?;
+    let request_json = serde_json::to_string(request).context("serializing JSON-RPC request")?;
 
     // Write to stdin
     {
         let mut stdin = stdin.lock().await;
-        stdin.write_all(request_json.as_bytes()).await
+        stdin
+            .write_all(request_json.as_bytes())
+            .await
             .context("writing to MCP server stdin")?;
-        stdin.write_all(b"\n").await
+        stdin
+            .write_all(b"\n")
+            .await
             .context("writing newline to MCP server stdin")?;
-        stdin.flush().await
-            .context("flushing MCP server stdin")?;
+        stdin.flush().await.context("flushing MCP server stdin")?;
     }
 
     // Read lines from stdout until we get a response matching our request ID.
     let mut stdout = stdout.lock().await;
     loop {
         let mut line = String::new();
-        let bytes_read = stdout.read_line(&mut line)
+        let bytes_read = stdout
+            .read_line(&mut line)
             .await
             .context("reading from MCP server stdout")?;
 
@@ -344,7 +377,8 @@ async fn send_http(
     headers: &[(String, String)],
     request: &JsonRpcRequest,
 ) -> Result<Value> {
-    let mut req = client.post(url)
+    let mut req = client
+        .post(url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream");
 
@@ -362,10 +396,16 @@ async fn send_http(
 
     let resp = timeout(DISPATCH_TIMEOUT, req.json(request).send())
         .await
-        .with_context(|| format!("HTTP MCP request timed out ({}s)", DISPATCH_TIMEOUT.as_secs()))?
+        .with_context(|| {
+            format!(
+                "HTTP MCP request timed out ({}s)",
+                DISPATCH_TIMEOUT.as_secs()
+            )
+        })?
         .with_context(|| format!("sending request to HTTP MCP server at {}", url))?;
 
-    let content_type = resp.headers()
+    let content_type = resp
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
@@ -384,20 +424,22 @@ async fn send_http(
         parse_sse_http_response(resp, request.id).await
     } else {
         // Direct JSON response
-        let body = resp.text().await
+        let body = resp
+            .text()
+            .await
             .context("reading HTTP MCP response body")?;
 
-        let response: JsonRpcResponse = serde_json::from_str(body.trim())
-            .with_context(|| format!("parsing HTTP MCP response: {}", body.chars().take(200).collect::<String>()))?;
+        let response: JsonRpcResponse = serde_json::from_str(body.trim()).with_context(|| {
+            format!(
+                "parsing HTTP MCP response: {}",
+                body.chars().take(200).collect::<String>()
+            )
+        })?;
 
         match response.id {
             Some(resp_id) if resp_id == request.id => {
                 if let Some(error) = response.error {
-                    anyhow::bail!(
-                        "HTTP MCP server error: [{}] {}",
-                        error.code,
-                        error.message
-                    );
+                    anyhow::bail!("HTTP MCP server error: [{}] {}", error.code, error.message);
                 }
                 Ok(response.result.unwrap_or(Value::Null))
             }
@@ -413,10 +455,7 @@ async fn send_http(
 
 /// Parse an SSE response from an HTTP MCP server, looking for the response
 /// matching our request ID.
-async fn parse_sse_http_response(
-    resp: reqwest::Response,
-    expected_id: u64,
-) -> Result<Value> {
+async fn parse_sse_http_response(resp: reqwest::Response, expected_id: u64) -> Result<Value> {
     use futures_util::StreamExt;
 
     let mut stream = resp.bytes_stream();
@@ -448,7 +487,7 @@ async fn parse_sse_http_response(
                             return Ok(response.result.unwrap_or(Value::Null));
                         }
                         Some(_) => continue, // different request id, skip
-                        None => continue,     // notification, skip
+                        None => continue,    // notification, skip
                     }
                 }
                 // Non-JSON data line — skip
@@ -456,7 +495,10 @@ async fn parse_sse_http_response(
         }
     }
 
-    anyhow::bail!("HTTP MCP SSE stream ended without matching response (id={})", expected_id);
+    anyhow::bail!(
+        "HTTP MCP SSE stream ended without matching response (id={})",
+        expected_id
+    );
 }
 
 // ── McpServer handshake ────────────────────────────────────────
@@ -485,10 +527,19 @@ impl McpServer {
             }
         });
 
-        let init_result = timeout(INIT_TIMEOUT, server.send_request("initialize", Some(init_params)))
-            .await
-            .with_context(|| format!("MCP server '{}' timed out during initialization ({}s)", name, INIT_TIMEOUT.as_secs()))?
-            .with_context(|| format!("MCP server '{}' error during initialization", name))?;
+        let init_result = timeout(
+            INIT_TIMEOUT,
+            server.send_request("initialize", Some(init_params)),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "MCP server '{}' timed out during initialization ({}s)",
+                name,
+                INIT_TIMEOUT.as_secs()
+            )
+        })?
+        .with_context(|| format!("MCP server '{}' error during initialization", name))?;
 
         // Check protocol version compatibility
         if let Some(proto_ver) = init_result.get("protocolVersion").and_then(|v| v.as_str())
@@ -503,12 +554,21 @@ impl McpServer {
         }
 
         // Send initialized notification
-        server.transport.send_notification(name, "notifications/initialized", None).await?;
+        server
+            .transport
+            .send_notification(name, "notifications/initialized", None)
+            .await?;
 
         // Discover tools
         let tools_result = timeout(INIT_TIMEOUT, server.send_request("tools/list", None))
             .await
-            .with_context(|| format!("MCP server '{}' timed out during tools/list ({}s)", name, INIT_TIMEOUT.as_secs()))?
+            .with_context(|| {
+                format!(
+                    "MCP server '{}' timed out during tools/list ({}s)",
+                    name,
+                    INIT_TIMEOUT.as_secs()
+                )
+            })?
             .with_context(|| format!("MCP server '{}' error during tools/list", name))?;
 
         let tools = match serde_json::from_value::<ToolsListResponse>(tools_result) {
@@ -550,7 +610,9 @@ impl McpServer {
     /// Send a JSON-RPC notification via this server's transport.
     #[allow(dead_code)]
     async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<()> {
-        self.transport.send_notification(&self.name, method, params).await
+        self.transport
+            .send_notification(&self.name, method, params)
+            .await
     }
 }
 
@@ -629,7 +691,10 @@ impl McpManager {
         let server_idx = self.servers.iter().position(|s| s.name == server_name)?;
 
         // Check if stdio server has exited — attempt restart
-        let has_exited = self.servers[server_idx].transport.check_liveness().is_some();
+        let has_exited = self.servers[server_idx]
+            .transport
+            .check_liveness()
+            .is_some();
         if has_exited {
             match self.restart_server(server_idx).await {
                 Ok(()) => {
@@ -657,7 +722,12 @@ impl McpManager {
             "arguments": arguments
         });
 
-        match timeout(DISPATCH_TIMEOUT, server.send_request("tools/call", Some(params))).await {
+        match timeout(
+            DISPATCH_TIMEOUT,
+            server.send_request("tools/call", Some(params)),
+        )
+        .await
+        {
             Ok(Ok(result)) => {
                 let text = extract_tool_result_text(&result);
                 Some(Ok(text))
@@ -728,7 +798,8 @@ impl McpManager {
 fn extract_tool_result_text(result: &Value) -> String {
     // Standard format: { content: [{ type: "text", text: "..." }] }
     if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-        let is_error = result.get("isError")
+        let is_error = result
+            .get("isError")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
@@ -736,7 +807,9 @@ fn extract_tool_result_text(result: &Value) -> String {
             .iter()
             .filter_map(|item| {
                 if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
+                    item.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -812,7 +885,10 @@ mod tests {
                 { "type": "text", "text": "file not found" }
             ]
         });
-        assert_eq!(extract_tool_result_text(&result), "MCP tool error: file not found");
+        assert_eq!(
+            extract_tool_result_text(&result),
+            "MCP tool error: file not found"
+        );
     }
 
     #[test]
@@ -850,7 +926,10 @@ mod tests {
             url: None,
             headers: HashMap::new(),
         };
-        assert_eq!(config.transport_type(), crate::config::McpTransportType::Stdio);
+        assert_eq!(
+            config.transport_type(),
+            crate::config::McpTransportType::Stdio
+        );
     }
 
     #[test]
@@ -862,7 +941,10 @@ mod tests {
             url: Some("https://mcp.example.com/api".to_string()),
             headers: HashMap::new(),
         };
-        assert_eq!(config.transport_type(), crate::config::McpTransportType::Http);
+        assert_eq!(
+            config.transport_type(),
+            crate::config::McpTransportType::Http
+        );
     }
 
     #[test]
@@ -875,6 +957,9 @@ mod tests {
             url: Some("https://mcp.example.com/api".to_string()),
             headers: HashMap::new(),
         };
-        assert_eq!(config.transport_type(), crate::config::McpTransportType::Http);
+        assert_eq!(
+            config.transport_type(),
+            crate::config::McpTransportType::Http
+        );
     }
 }

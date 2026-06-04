@@ -105,7 +105,7 @@ pub fn build_prompt_layers(
              - list_directory: list directory entries (names, types, sizes)\n\
              \n\
              MCP tools may also be available for specialty operations (image generation, \
-             GitHub, etc.). Use them when relevant."
+             GitHub, etc.). Use them when relevant.",
         ),
     });
 

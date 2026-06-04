@@ -47,16 +47,16 @@ impl MemoryStore {
         let mem_dir = memory_dir();
 
         let memory_entries = if mem_dir.join("MEMORY.md").exists() {
-            let content = std::fs::read_to_string(mem_dir.join("MEMORY.md"))
-                .context("reading MEMORY.md")?;
+            let content =
+                std::fs::read_to_string(mem_dir.join("MEMORY.md")).context("reading MEMORY.md")?;
             Self::parse_entries(&content)
         } else {
             Vec::new()
         };
 
         let user_entries = if mem_dir.join("USER.md").exists() {
-            let content = std::fs::read_to_string(mem_dir.join("USER.md"))
-                .context("reading USER.md")?;
+            let content =
+                std::fs::read_to_string(mem_dir.join("USER.md")).context("reading USER.md")?;
             Self::parse_entries(&content)
         } else {
             Vec::new()
@@ -75,7 +75,11 @@ impl MemoryStore {
             None
         };
 
-        Ok(Self { memory_entries, user_entries, summary })
+        Ok(Self {
+            memory_entries,
+            user_entries,
+            summary,
+        })
     }
 
     fn parse_entries(content: &str) -> Vec<String> {
@@ -134,8 +138,7 @@ impl MemoryStore {
         let mem_dir = memory_dir();
         std::fs::create_dir_all(&mem_dir).context("creating memories directory")?;
         let content = Self::serialize_entries(&self.memory_entries);
-        std::fs::write(mem_dir.join("MEMORY.md"), content)
-            .context("writing MEMORY.md")
+        std::fs::write(mem_dir.join("MEMORY.md"), content).context("writing MEMORY.md")
     }
 
     #[allow(dead_code)]
@@ -143,16 +146,14 @@ impl MemoryStore {
         let mem_dir = memory_dir();
         std::fs::create_dir_all(&mem_dir).context("creating memories directory")?;
         let content = Self::serialize_entries(&self.user_entries);
-        std::fs::write(mem_dir.join("USER.md"), content)
-            .context("writing USER.md")
+        std::fs::write(mem_dir.join("USER.md"), content).context("writing USER.md")
     }
 
     fn save_summary(&self) -> Result<()> {
         let mem_dir = memory_dir();
         std::fs::create_dir_all(&mem_dir).context("creating memories directory")?;
         if let Some(summary) = &self.summary {
-            std::fs::write(mem_dir.join("SUMMARY.md"), summary)
-                .context("writing SUMMARY.md")
+            std::fs::write(mem_dir.join("SUMMARY.md"), summary).context("writing SUMMARY.md")
         } else {
             // Remove SUMMARY.md if summary is None
             let path = mem_dir.join("SUMMARY.md");
@@ -237,11 +238,7 @@ impl MemoryStore {
     }
 
     /// Summarize a list of memory entries using the LLM.
-    async fn summarize_entries(
-        &self,
-        client: &LlmClient,
-        entries: &[String],
-    ) -> Result<String> {
+    async fn summarize_entries(&self, client: &LlmClient, entries: &[String]) -> Result<String> {
         let entries_text = entries.join("\n---\n");
 
         // Truncate if very long to avoid token limits
@@ -263,10 +260,7 @@ impl MemoryStore {
             truncated
         );
 
-        let messages = vec![
-            Message::system(system_prompt),
-            Message::user(&user_prompt),
-        ];
+        let messages = vec![Message::system(system_prompt), Message::user(&user_prompt)];
 
         // Use non-streaming for summarization — we don't need to display it
         let result = client.chat(messages, None).await?;
@@ -285,10 +279,7 @@ impl MemoryStore {
         }
 
         if let Some(summary) = &self.summary {
-            parts.push(format!(
-                "═══ MEMORY SUMMARY ═══\n{}",
-                summary
-            ));
+            parts.push(format!("═══ MEMORY SUMMARY ═══\n{}", summary));
         }
 
         if !self.memory_entries.is_empty() {

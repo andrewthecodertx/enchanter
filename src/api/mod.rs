@@ -83,9 +83,7 @@ impl Message {
     /// Whether this assistant message contains tool calls.
     #[allow(dead_code)]
     pub fn has_tool_calls(&self) -> bool {
-        self.tool_calls
-            .as_ref()
-            .is_some_and(|tc| !tc.is_empty())
+        self.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
     }
 }
 
@@ -124,9 +122,7 @@ pub struct ChatResult {
 
 impl ChatResult {
     pub fn has_tool_calls(&self) -> bool {
-        self.tool_calls
-            .as_ref()
-            .is_some_and(|tc| !tc.is_empty())
+        self.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
     }
 }
 
@@ -258,7 +254,8 @@ impl LlmClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&request);
-        let response = self.apply_auth(response)
+        let response = self
+            .apply_auth(response)
             .send()
             .await
             .with_context(|| format!("connecting to {}", url))?;
@@ -357,16 +354,25 @@ impl LlmClient {
             Some(full_content)
         };
 
-        Ok(ChatResult { content, tool_calls })
+        Ok(ChatResult {
+            content,
+            tool_calls,
+        })
     }
 
     /// Convenience wrapper: streaming chat that prints tokens to stdout.
-    pub async fn chat_stream(&self, messages: Vec<Message>, tools: Option<Value>) -> Result<ChatResult> {
+    pub async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Value>,
+    ) -> Result<ChatResult> {
         use std::io::Write;
-        let result = self.chat_stream_with(messages, tools, |token| {
-            print!("{}", token);
-            std::io::stdout().flush().ok();
-        }).await?;
+        let result = self
+            .chat_stream_with(messages, tools, |token| {
+                print!("{}", token);
+                std::io::stdout().flush().ok();
+            })
+            .await?;
         if result.content.is_some() {
             println!();
         }
@@ -390,7 +396,8 @@ impl LlmClient {
             .post(&url)
             .header("Content-Type", "application/json")
             .json(&request);
-        let response = self.apply_auth(response)
+        let response = self
+            .apply_auth(response)
             .send()
             .await
             .with_context(|| format!("connecting to {}", url))?;
@@ -401,16 +408,16 @@ impl LlmClient {
             anyhow::bail!("API error {}: {}", status, body);
         }
 
-        let chat_response: ChatResponse = response
-            .json()
-            .await
-            .context("parsing API response")?;
+        let chat_response: ChatResponse = response.json().await.context("parsing API response")?;
 
         let choice = chat_response.choices.first();
         let content = choice.and_then(|c| c.message.content.clone());
         let tool_calls = choice.and_then(|c| c.message.tool_calls.clone());
 
-        Ok(ChatResult { content, tool_calls })
+        Ok(ChatResult {
+            content,
+            tool_calls,
+        })
     }
 }
 

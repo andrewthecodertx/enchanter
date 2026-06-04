@@ -112,9 +112,11 @@ impl Recorder {
     }
 
     /// Record an assistant response event (REQ-REC-003).
+    /// Content is redacted: assistant output can echo secrets from the
+    /// conversation (REQ-REC-004).
     pub fn record_assistant_response(&mut self, content: &str) -> Result<()> {
         let payload = serde_json::json!({
-            "content": content.to_string(),
+            "content": self.redact(content),
         });
         self.write_event("assistant_response", payload)
     }
@@ -174,10 +176,12 @@ impl Recorder {
     }
 
     /// Record a session summary event (REQ-REC-003).
+    /// Content is redacted: a summary can restate secrets from the
+    /// conversation (REQ-REC-004).
     #[allow(dead_code)]
     pub fn record_session_summary(&mut self, summary: &str) -> Result<()> {
         let payload = serde_json::json!({
-            "content": summary,
+            "content": self.redact(summary),
         });
         self.write_event("session_summary", payload)
     }
@@ -193,9 +197,10 @@ impl Recorder {
         };
         let line = serde_json::to_string(&event)
             .with_context(|| format!("serializing record event: {}", event_type))?;
-        writeln!(self.writer, "{}", line)
-            .with_context(|| "writing to recording file")?;
-        self.writer.flush().with_context(|| "flushing recording file")?;
+        writeln!(self.writer, "{}", line).with_context(|| "writing to recording file")?;
+        self.writer
+            .flush()
+            .with_context(|| "flushing recording file")?;
         Ok(())
     }
 }
@@ -219,7 +224,6 @@ pub fn read_recording(path: &Path) -> Result<Vec<RecordEvent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
 
     #[test]
     fn test_recorder_creates_file() {
@@ -227,7 +231,9 @@ mod tests {
         let path = dir.path().join("test.jsonl");
         let mut recorder = Recorder::new(&path, false).unwrap();
 
-        recorder.record_config_snapshot("test-model", "https://api.test.com", true, &[]).unwrap();
+        recorder
+            .record_config_snapshot("test-model", "https://api.test.com", true, &[])
+            .unwrap();
         recorder.record_user_message("hello").unwrap();
 
         // Read back and verify
@@ -274,10 +280,31 @@ mod tests {
         let path = dir.path().join("test_redact.jsonl");
         let mut recorder = Recorder::new(&path, false).unwrap();
 
-        recorder.record_user_message("my api key is sk-1234567890abcdef1234567890").unwrap();
+        recorder
+            .record_user_message("my api key is sk-1234567890abcdef1234567890")
+            .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.contains("sk-1234567890abcdef1234567890"));
+    }
+
+    #[test]
+    fn test_assistant_and_summary_are_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_redact_assistant.jsonl");
+        let mut recorder = Recorder::new(&path, false).unwrap();
+
+        recorder
+            .record_assistant_response("here it is: sk-abcdef1234567890abcdef1234")
+            .unwrap();
+        recorder
+            .record_session_summary("we used the key sk-abcdef1234567890abcdef1234")
+            .unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("sk-abcdef1234567890abcdef1234"));
+        assert!(content.contains("assistant_response"));
+        assert!(content.contains("session_summary"));
     }
 
     #[test]
@@ -286,12 +313,14 @@ mod tests {
         let path = dir.path().join("test_tool.jsonl");
         let mut recorder = Recorder::new(&path, false).unwrap();
 
-        recorder.record_tool_call(
-            "exec_command",
-            "call_123",
-            &serde_json::json!({"command": "ls -la"}),
-            false,
-        ).unwrap();
+        recorder
+            .record_tool_call(
+                "exec_command",
+                "call_123",
+                &serde_json::json!({"command": "ls -la"}),
+                false,
+            )
+            .unwrap();
 
         let events = read_recording(&path).unwrap();
         assert_eq!(events[0].event_type, "tool_call");
@@ -338,7 +367,10 @@ mod tests {
 
         // Add empty lines manually
         drop(recorder);
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(file).unwrap();
         writeln!(file).unwrap();
         drop(file);

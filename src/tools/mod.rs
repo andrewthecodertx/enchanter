@@ -36,10 +36,64 @@
 //! The 10,000-character truncation limit on tool output mirrors OpenCode's
 //! output truncation approach and Claude Code's similar output limits.
 
-use serde_json::{json, Value};
-use std::path::Path;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
 use crate::memory::MemoryStore;
+
+/// Emit the "running unsandboxed" warning at most once per process.
+fn warn_unsandboxed_once() {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "Warning: no filesystem sandbox available; running exec_command \
+             unsandboxed (security.allow_unsandboxed_exec is set)."
+        );
+    });
+}
+
+/// Check if a resolved path falls within any of the allowed directories.
+fn path_is_allowed(resolved_path: &Path, allowed: &[PathBuf]) -> bool {
+    allowed.iter().any(|dir| resolved_path.starts_with(dir))
+}
+
+/// Resolve and validate a path: expand tilde, canonicalize if it exists,
+/// and check that it falls within allowed directories.
+/// Returns Ok(resolved) if allowed, Err(message) if blocked.
+fn resolve_and_validate(path_str: &str, allowed: &[PathBuf]) -> Result<PathBuf, String> {
+    let expanded = shellexpand::tilde(path_str).to_string();
+    let path = PathBuf::from(&expanded);
+
+    // Canonicalize if it exists; for new files, canonicalize the parent
+    let resolved = if path.exists() {
+        path.canonicalize().unwrap_or(path)
+    } else if let Some(parent) = path.parent()
+        && parent.exists()
+    {
+        let canonical_parent = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        canonical_parent.join(path.file_name().unwrap_or_default())
+    } else {
+        // Path doesn't exist and neither does its parent — just use as-is
+        // but resolve relative paths against CWD
+        if path.is_relative() {
+            std::env::current_dir().unwrap_or_default().join(&path)
+        } else {
+            path
+        }
+    };
+
+    if path_is_allowed(&resolved, allowed) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "Access denied: path '{}' is outside allowed directories",
+            path_str
+        ))
+    }
+}
 
 /// A tool definition in OpenAI function-calling format.
 #[derive(Debug, Clone)]
@@ -252,29 +306,70 @@ pub fn tools_json() -> Vec<Value> {
 ///
 /// enchanter simplifies this to a single dispatch() match statement since
 /// all built-in tools are local functions rather than dynamically registered.
-pub fn dispatch(name: &str, args: &Value, memory: &mut MemoryStore) -> String {
+pub fn dispatch(
+    name: &str,
+    args: &Value,
+    memory: &mut MemoryStore,
+    allowed_paths: &[PathBuf],
+    allow_unsandboxed_exec: bool,
+) -> String {
     match name {
-        "exec_command" => tool_exec_command(args),
-        "read_file" => tool_read_file(args),
-        "write_file" => tool_write_file(args),
-        "edit_file" => tool_edit_file(args),
-        "search_files" => tool_search_files(args),
-        "list_directory" => tool_list_directory(args),
+        "exec_command" => tool_exec_command(args, allowed_paths, allow_unsandboxed_exec),
+        "read_file" => tool_read_file(args, allowed_paths),
+        "write_file" => tool_write_file(args, allowed_paths),
+        "edit_file" => tool_edit_file(args, allowed_paths),
+        "search_files" => tool_search_files(args, allowed_paths),
+        "list_directory" => tool_list_directory(args, allowed_paths),
         "memory" => tool_memory(args, memory),
         _ => format!("Unknown tool: {}", name),
     }
 }
 
-fn tool_exec_command(args: &Value) -> String {
+fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsandboxed: bool) -> String {
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => return "Error: missing required parameter 'command'".to_string(),
     };
 
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output();
+    // Verify CWD is within allowed paths (the sandbox also denies access to it,
+    // but this gives a clearer error than a cryptic shell failure).
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if !path_is_allowed(&cwd, allowed_paths) {
+        return format!(
+            "Error: working directory '{}' is outside allowed directories",
+            cwd.display()
+        );
+    }
+
+    let output = if crate::sandbox::is_supported() {
+        // Re-exec ourselves as the sandbox helper, which applies Landlock and
+        // then execs the shell. The shell is confined to `allowed_paths`.
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => return format!("Error: cannot locate enchanter binary for sandbox: {}", e),
+        };
+        std::process::Command::new(exe)
+            .arg(crate::sandbox::SANDBOX_ARG)
+            .arg(command)
+            .env(
+                crate::sandbox::SANDBOX_PATHS_ENV,
+                crate::sandbox::encode_paths(allowed_paths),
+            )
+            .current_dir(&cwd)
+            .output()
+    } else if allow_unsandboxed {
+        warn_unsandboxed_once();
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&cwd)
+            .output()
+    } else {
+        return "Error: no filesystem sandbox available on this system (Landlock \
+            unsupported), refusing to run an unsandboxed shell. Set \
+            'security.allow_unsandboxed_exec: true' in config.yaml to override."
+            .to_string();
+    };
 
     match output {
         Ok(out) => {
@@ -294,7 +389,10 @@ fn tool_exec_command(args: &Value) -> String {
             }
 
             if !out.status.success() {
-                result.push_str(&format!("\n[exit code: {}]", out.status.code().unwrap_or(-1)));
+                result.push_str(&format!(
+                    "\n[exit code: {}]",
+                    out.status.code().unwrap_or(-1)
+                ));
             }
 
             // Truncate to 10,000 characters
@@ -309,31 +407,25 @@ fn tool_exec_command(args: &Value) -> String {
     }
 }
 
-fn tool_read_file(args: &Value) -> String {
-    // Line-numbered output format adapted from Claude Code's FileReadTool
-    // (claude-code/src/tools/FileReadTool/) — cat -n style with offset/limit.
-    // OpenCode's ReadTool (opencode/packages/opencode/src/tool/read.ts) uses
-    // the same offset/limit/line-number pattern with DEFAULT_READ_LIMIT = 2000
-    // and MAX_BYTES = 50KB.
+fn tool_read_file(args: &Value, allowed_paths: &[PathBuf]) -> String {
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'path'".to_string(),
     };
 
-    let offset = args
-        .get("offset")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1) as usize;
+    let resolved = match resolve_and_validate(path, allowed_paths) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(500)
         .min(2000) as usize;
 
-    // Expand tilde
-    let expanded_path = shellexpand::tilde(path).to_string();
-
-    let content = match std::fs::read_to_string(&expanded_path) {
+    let content = match std::fs::read_to_string(&resolved) {
         Ok(c) => c,
         Err(e) => return format!("Error reading file {}: {}", path, e),
     };
@@ -343,7 +435,10 @@ fn tool_read_file(args: &Value) -> String {
 
     let start = offset.saturating_sub(1);
     if start >= lines.len() {
-        return format!("File has {} lines, offset {} is past the end", total_lines, offset);
+        return format!(
+            "File has {} lines, offset {} is past the end",
+            total_lines, offset
+        );
     }
 
     let end = (start + limit).min(lines.len());
@@ -370,10 +465,7 @@ fn tool_read_file(args: &Value) -> String {
     result
 }
 
-fn tool_write_file(args: &Value) -> String {
-    // Auto-create parent directories — consistent with Claude Code's FileWriteTool
-    // behavior (claude-code/src/tools/FileWriteTool/) and OpenCode's write tool
-    // (opencode/packages/opencode/src/tool/write.ts).
+fn tool_write_file(args: &Value, allowed_paths: &[PathBuf]) -> String {
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'path'".to_string(),
@@ -383,32 +475,26 @@ fn tool_write_file(args: &Value) -> String {
         None => return "Error: missing required parameter 'content'".to_string(),
     };
 
-    let expanded_path = shellexpand::tilde(path).to_string();
+    let resolved = match resolve_and_validate(path, allowed_paths) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
     // Create parent directories
-    if let Some(parent) = Path::new(&expanded_path).parent()
+    if let Some(parent) = resolved.parent()
         && !parent.as_os_str().is_empty()
         && let Err(e) = std::fs::create_dir_all(parent)
     {
         return format!("Error creating directory {}: {}", parent.display(), e);
     }
 
-    match std::fs::write(&expanded_path, content) {
+    match std::fs::write(&resolved, content) {
         Ok(()) => format!("Wrote {}", path),
         Err(e) => format!("Error writing file {}: {}", path, e),
     }
 }
 
-fn tool_edit_file(args: &Value) -> String {
-    // old_string/new_string/replace_all semantics adapted from Claude Code's
-    // FileEditTool (claude-code/src/tools/FileEditTool/) and OpenCode's EditTool
-    // (opencode/packages/opencode/src/tool/edit.ts). The uniqueness check
-    // requirement mirrors Claude Code's behavior: "The edit will FAIL if
-    // old_string is not unique in the file." OpenCode's edit.ts also cites
-    // Cline (github.com/cline/cline) as a source for the diff-edit approach.
-    // enchanter's implementation is a simpler string-based approach without
-    // LSP diagnostic feedback or file-watching that both Claude Code and
-    // OpenCode add on top.
+fn tool_edit_file(args: &Value, allowed_paths: &[PathBuf]) -> String {
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'path'".to_string(),
@@ -426,15 +512,21 @@ fn tool_edit_file(args: &Value) -> String {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let expanded_path = shellexpand::tilde(path).to_string();
+    let resolved = match resolve_and_validate(path, allowed_paths) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    let content = match std::fs::read_to_string(&expanded_path) {
+    let content = match std::fs::read_to_string(&resolved) {
         Ok(c) => c,
         Err(e) => return format!("Error reading file {}: {}", path, e),
     };
 
     if !content.contains(old_string) {
-        return format!("Error: old_string not found in {}. Make sure the text matches exactly, including whitespace and indentation.", path);
+        return format!(
+            "Error: old_string not found in {}. Make sure the text matches exactly, including whitespace and indentation.",
+            path
+        );
     }
 
     if !replace_all {
@@ -450,7 +542,7 @@ fn tool_edit_file(args: &Value) -> String {
 
     if replace_all {
         let new_content = content.replace(old_string, new_string);
-        match std::fs::write(&expanded_path, &new_content) {
+        match std::fs::write(&resolved, &new_content) {
             Ok(()) => {
                 let count = content.matches(old_string).count();
                 format!("Replaced {} occurrence(s) in {}", count, path)
@@ -459,45 +551,35 @@ fn tool_edit_file(args: &Value) -> String {
         }
     } else {
         let new_content = content.replacen(old_string, new_string, 1);
-        match std::fs::write(&expanded_path, &new_content) {
+        match std::fs::write(&resolved, &new_content) {
             Ok(()) => format!("Edited {}", path),
             Err(e) => format!("Error writing file {}: {}", path, e),
         }
     }
 }
 
-fn tool_search_files(args: &Value) -> String {
-    // Dual-mode search (content regex + filename glob) adapted from Claude Code's
-    // GrepTool + GlobTool (claude-code/src/tools/) and OpenCode's combined
-    // codesearch/grep/glob tools (opencode/packages/opencode/src/tool/).
-    // Claude Code splits file search and content search into separate tools
-    // (GlobTool for filename patterns, GrepTool for content patterns).
-    // OpenCode uses ripgrep under the hood; enchanter uses the regex + walkdir
-    // crates for a zero-runtime-dependency pure-Rust implementation.
+fn tool_search_files(args: &Value, allowed_paths: &[PathBuf]) -> String {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return "Error: missing required parameter 'pattern'".to_string(),
     };
 
-    let search_path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let search_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let target = args
         .get("target")
         .and_then(|v| v.as_str())
         .unwrap_or("content");
     let file_glob = args.get("file_glob").and_then(|v| v.as_str());
-    let context_lines = args
-        .get("context")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(2) as usize;
+    let context_lines = args.get("context").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
 
-    let expanded_path = shellexpand::tilde(search_path).to_string();
+    let resolved = match resolve_and_validate(search_path, allowed_paths) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
     if target == "files" {
         // File name search using glob pattern
-        let walk_result = walk_files(&expanded_path, pattern);
+        let walk_result = walk_files(&resolved.to_string_lossy(), pattern);
         match walk_result {
             Ok(files) => {
                 if files.is_empty() {
@@ -521,7 +603,7 @@ fn tool_search_files(args: &Value) -> String {
             Err(e) => return format!("Error: invalid regex pattern '{}': {}", pattern, e),
         };
 
-        let files = match walk_files(&expanded_path, file_glob.unwrap_or("*")) {
+        let files = match walk_files(&resolved.to_string_lossy(), file_glob.unwrap_or("*")) {
             Ok(f) => f,
             Err(e) => return format!("Error walking directory: {}", e),
         };
@@ -548,11 +630,7 @@ fn tool_search_files(args: &Value) -> String {
                         let start = line_num.saturating_sub(context_lines);
                         let end = (line_num + context_lines + 1).min(lines.len());
 
-                        results.push(format!(
-                            "\n{}:{}",
-                            file_path,
-                            line_num + 1
-                        ));
+                        results.push(format!("\n{}:{}", file_path, line_num + 1));
 
                         for (i, ctx_line) in lines[start..end].iter().enumerate() {
                             let actual_line = start + i + 1;
@@ -561,10 +639,7 @@ fn tool_search_files(args: &Value) -> String {
                             } else {
                                 " "
                             };
-                            results.push(format!(
-                                "{}{:>5}|{}",
-                                prefix, actual_line, ctx_line
-                            ));
+                            results.push(format!("{}{:>5}|{}", prefix, actual_line, ctx_line));
                         }
                     }
                 }
@@ -626,15 +701,15 @@ fn walk_files(dir: &str, pattern: &str) -> Result<Vec<String>, String> {
     Ok(files.into_iter().map(|(p, _)| p).collect())
 }
 
-fn tool_list_directory(args: &Value) -> String {
-    let path = args
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+fn tool_list_directory(args: &Value, allowed_paths: &[PathBuf]) -> String {
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
-    let expanded_path = shellexpand::tilde(path).to_string();
+    let resolved = match resolve_and_validate(path, allowed_paths) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    let entries = match std::fs::read_dir(&expanded_path) {
+    let entries = match std::fs::read_dir(&resolved) {
         Ok(entries) => entries,
         Err(e) => return format!("Error listing directory {}: {}", path, e),
     };
@@ -691,7 +766,10 @@ fn tool_memory(args: &Value, memory: &mut MemoryStore) -> String {
         "remove" => {
             let substring = match args.get("content").and_then(|v| v.as_str()) {
                 Some(s) => s,
-                None => return "Error: 'remove' requires 'content' parameter (substring to match)".to_string(),
+                None => {
+                    return "Error: 'remove' requires 'content' parameter (substring to match)"
+                        .to_string();
+                }
             };
             match memory.remove_memory(substring) {
                 Ok(true) => "Memory entry removed.".to_string(),
@@ -702,7 +780,10 @@ fn tool_memory(args: &Value, memory: &mut MemoryStore) -> String {
         "replace" => {
             let old_text = match args.get("content").and_then(|v| v.as_str()) {
                 Some(s) => s,
-                None => return "Error: 'replace' requires 'content' parameter (old text to find)".to_string(),
+                None => {
+                    return "Error: 'replace' requires 'content' parameter (old text to find)"
+                        .to_string();
+                }
             };
             let new_text = match args.get("new_content").and_then(|v| v.as_str()) {
                 Some(s) => s,
@@ -733,7 +814,10 @@ fn tool_memory(args: &Value, memory: &mut MemoryStore) -> String {
             }
             result
         }
-        _ => format!("Unknown memory action: '{}'. Use add, remove, replace, or list.", action),
+        _ => format!(
+            "Unknown memory action: '{}'. Use add, remove, replace, or list.",
+            action
+        ),
     }
 }
 
@@ -741,6 +825,11 @@ fn tool_memory(args: &Value, memory: &mut MemoryStore) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Broad allow-list for tests: permits any path so file/exec tools run.
+    fn allowed() -> Vec<PathBuf> {
+        vec![PathBuf::from("/")]
+    }
 
     #[test]
     fn tool_definitions_count() {
@@ -761,14 +850,14 @@ mod tests {
     #[test]
     fn dispatch_unknown_tool() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("nonexistent", &json!({}), &mut mem);
+        let result = dispatch("nonexistent", &json!({}), &mut mem, &allowed(), true);
         assert!(result.contains("Unknown tool"));
     }
 
     #[test]
     fn dispatch_missing_required_param() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("exec_command", &json!({}), &mut mem);
+        let result = dispatch("exec_command", &json!({}), &mut mem, &allowed(), true);
         assert!(result.contains("missing required"));
     }
 
@@ -778,10 +867,22 @@ mod tests {
         let tmp = std::env::temp_dir().join("enchanter_test_write_read.txt");
         let path = tmp.to_string_lossy().to_string();
 
-        let write_result = dispatch("write_file", &json!({"path": path, "content": "hello world"}), &mut mem);
+        let write_result = dispatch(
+            "write_file",
+            &json!({"path": path, "content": "hello world"}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(write_result.contains("Wrote"));
 
-        let read_result = dispatch("read_file", &json!({"path": path}), &mut mem);
+        let read_result = dispatch(
+            "read_file",
+            &json!({"path": path}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(read_result.contains("hello world"));
 
         let _ = std::fs::remove_file(&tmp);
@@ -790,16 +891,20 @@ mod tests {
     #[test]
     fn list_directory_works() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("list_directory", &json!({"path": "/tmp"}), &mut mem);
+        let result = dispatch(
+            "list_directory",
+            &json!({"path": "/tmp"}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(!result.contains("Error"));
     }
 
-    #[test]
-    fn exec_command_works() {
-        let mut mem = MemoryStore::default();
-        let result = dispatch("exec_command", &json!({"command": "echo hello"}), &mut mem);
-        assert!(result.contains("hello"));
-    }
+    // exec_command's happy path re-execs the real enchanter binary as the
+    // sandbox helper (see sandbox.rs), which a libtest binary can't stand in
+    // for. End-to-end sandbox behavior (allow inside $HOME, deny outside) is
+    // covered by tests/sandbox.rs against the compiled binary.
 
     #[test]
     fn edit_file_basic() {
@@ -808,18 +913,36 @@ mod tests {
         let path = tmp.to_string_lossy().to_string();
 
         // Write initial content
-        let _ = dispatch("write_file", &json!({"path": &path, "content": "fn main() {\n    println!(\"hello\");\n}\n"}), &mut mem);
+        let _ = dispatch(
+            "write_file",
+            &json!({"path": &path, "content": "fn main() {\n    println!(\"hello\");\n}\n"}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
 
         // Edit it
-        let edit_result = dispatch("edit_file", &json!({
-            "path": &path,
-            "old_string": "println!(\"hello\")",
-            "new_string": "println!(\"world\")"
-        }), &mut mem);
+        let edit_result = dispatch(
+            "edit_file",
+            &json!({
+                "path": &path,
+                "old_string": "println!(\"hello\")",
+                "new_string": "println!(\"world\")"
+            }),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(edit_result.contains("Edited"));
 
         // Verify
-        let read_result = dispatch("read_file", &json!({"path": &path}), &mut mem);
+        let read_result = dispatch(
+            "read_file",
+            &json!({"path": &path}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(read_result.contains("world"));
         assert!(!read_result.contains("hello"));
 
@@ -833,13 +956,25 @@ mod tests {
         let path = tmp.to_string_lossy().to_string();
 
         // Write content with duplicates
-        let _ = dispatch("write_file", &json!({"path": &path, "content": "foo\nbar\nfoo\n"}), &mut mem);
+        let _ = dispatch(
+            "write_file",
+            &json!({"path": &path, "content": "foo\nbar\nfoo\n"}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
 
-        let edit_result = dispatch("edit_file", &json!({
-            "path": &path,
-            "old_string": "foo",
-            "new_string": "baz"
-        }), &mut mem);
+        let edit_result = dispatch(
+            "edit_file",
+            &json!({
+                "path": &path,
+                "old_string": "foo",
+                "new_string": "baz"
+            }),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(edit_result.contains("2 times") || edit_result.contains("unique"));
 
         let _ = std::fs::remove_file(&tmp);
@@ -851,14 +986,26 @@ mod tests {
         let tmp = std::env::temp_dir().join("enchanter_test_edit_all.txt");
         let path = tmp.to_string_lossy().to_string();
 
-        let _ = dispatch("write_file", &json!({"path": &path, "content": "foo\nbar\nfoo\n"}), &mut mem);
+        let _ = dispatch(
+            "write_file",
+            &json!({"path": &path, "content": "foo\nbar\nfoo\n"}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
 
-        let edit_result = dispatch("edit_file", &json!({
-            "path": &path,
-            "old_string": "foo",
-            "new_string": "baz",
-            "replace_all": true
-        }), &mut mem);
+        let edit_result = dispatch(
+            "edit_file",
+            &json!({
+                "path": &path,
+                "old_string": "foo",
+                "new_string": "baz",
+                "replace_all": true
+            }),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(edit_result.contains("2 occurrence"));
 
         let _ = std::fs::remove_file(&tmp);
@@ -867,24 +1014,42 @@ mod tests {
     #[test]
     fn search_files_by_name() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("search_files", &json!({
-            "pattern": "*.toml",
-            "path": ".",
-            "target": "files"
-        }), &mut mem);
+        let result = dispatch(
+            "search_files",
+            &json!({
+                "pattern": "*.toml",
+                "path": ".",
+                "target": "files"
+            }),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(result.contains("Cargo.toml"));
     }
 
     #[test]
     fn memory_add_and_list() {
         let mut mem = MemoryStore::default();
-        let add_result = dispatch("memory", &json!({
-            "action": "add",
-            "content": "project uses rust 1.85"
-        }), &mut mem);
+        let add_result = dispatch(
+            "memory",
+            &json!({
+                "action": "add",
+                "content": "project uses rust 1.85"
+            }),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(add_result.contains("saved"));
 
-        let list_result = dispatch("memory", &json!({"action": "list"}), &mut mem);
+        let list_result = dispatch(
+            "memory",
+            &json!({"action": "list"}),
+            &mut mem,
+            &allowed(),
+            true,
+        );
         assert!(list_result.contains("rust 1.85"));
     }
 }

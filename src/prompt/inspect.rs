@@ -76,9 +76,10 @@ impl PromptLayers {
         // Detect content changes in common layers
         for self_layer in &self.layers {
             if let Some(prev_layer) = previous.layers.iter().find(|l| l.name == self_layer.name)
-                && self_layer.content != prev_layer.content {
-                    layer_changes.push(LayerChange::Modified(self_layer.name.clone()));
-                }
+                && self_layer.content != prev_layer.content
+            {
+                layer_changes.push(LayerChange::Modified(self_layer.name.clone()));
+            }
         }
 
         // Full text diff
@@ -157,11 +158,10 @@ impl BudgetReport {
         let bar_width = 30u64;
 
         for layer in &self.layers {
-            let bar_len = if max_tokens > 0 {
-                ((layer.estimated_tokens * bar_width) / max_tokens).min(bar_width)
-            } else {
-                0
-            };
+            let bar_len = (layer.estimated_tokens * bar_width)
+                .checked_div(max_tokens)
+                .unwrap_or(0)
+                .min(bar_width);
             let bar: String = "█".repeat(bar_len as usize);
 
             let warning = if layer.estimated_tokens > warning_threshold {
@@ -190,8 +190,9 @@ impl BudgetReport {
             width = max_name_len
         ));
         let total_bar_len = if max_tokens > 0 && self.total_estimated_tokens > 0 {
-            ((self.total_estimated_tokens * bar_width) / max_tokens.max(self.total_estimated_tokens))
-                .min(bar_width)
+            ((self.total_estimated_tokens * bar_width)
+                / max_tokens.max(self.total_estimated_tokens))
+            .min(bar_width)
         } else {
             0
         };
@@ -417,10 +418,12 @@ mod tests {
             ],
         };
         let result = curr.diff(&prev);
-        assert!(result
-            .layer_changes
-            .iter()
-            .any(|c| matches!(c, LayerChange::Added(name) if name == "memory")));
+        assert!(
+            result
+                .layer_changes
+                .iter()
+                .any(|c| matches!(c, LayerChange::Added(name) if name == "memory"))
+        );
     }
 
     #[test]
@@ -438,10 +441,12 @@ mod tests {
             }],
         };
         let result = curr.diff(&prev);
-        assert!(result
-            .layer_changes
-            .iter()
-            .any(|c| matches!(c, LayerChange::Modified(name) if name == "soul")));
+        assert!(
+            result
+                .layer_changes
+                .iter()
+                .any(|c| matches!(c, LayerChange::Modified(name) if name == "soul"))
+        );
     }
 
     #[test]
@@ -465,10 +470,12 @@ mod tests {
             }],
         };
         let result = curr.diff(&prev);
-        assert!(result
-            .layer_changes
-            .iter()
-            .any(|c| matches!(c, LayerChange::Removed(name) if name == "volatile")));
+        assert!(
+            result
+                .layer_changes
+                .iter()
+                .any(|c| matches!(c, LayerChange::Removed(name) if name == "volatile"))
+        );
     }
 
     #[test]

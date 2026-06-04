@@ -52,14 +52,13 @@ pub fn handle_key(app: &mut App, event: CrosstermEvent) -> HandleResult {
             return HandleResult::Continue;
         }
         // '/' focuses the input pane and starts typing a command
-        (KeyModifiers::NONE, KeyCode::Char('/'))
-            if app.focus != Pane::Input => {
-                app.focus = Pane::Input;
-                app.input.clear();
-                app.input.insert('/');
-                return HandleResult::Continue;
-            }
-            // If already in input, let it fall through to type '/'
+        (KeyModifiers::NONE, KeyCode::Char('/')) if app.focus != Pane::Input => {
+            app.focus = Pane::Input;
+            app.input.clear();
+            app.input.insert('/');
+            return HandleResult::Continue;
+        }
+        // If already in input, let it fall through to type '/'
         _ => {}
     }
 
@@ -108,8 +107,11 @@ fn handle_input_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRe
         (KeyModifiers::CONTROL, KeyCode::Char('m')) => {
             app.input.multiline = !app.input.multiline;
             app.chat_lines.push(ChatLine::System(
-                if app.input.multiline { "Multiline mode: ON (Enter=newline, Ctrl+Enter=send)" }
-                else { "Multiline mode: OFF (Enter=send)" }
+                if app.input.multiline {
+                    "Multiline mode: ON (Enter=newline, Ctrl+Enter=send)"
+                } else {
+                    "Multiline mode: OFF (Enter=send)"
+                }
                 .into(),
             ));
             app.chat_auto_scroll = true;
@@ -183,9 +185,10 @@ fn handle_skills_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleR
         (KeyModifiers::NONE, KeyCode::Enter) => {
             if let Some(skill) = app.agent.skills.skills.get(app.skills_selected) {
                 let cat = skill.category.as_deref().unwrap_or("other");
-                app.chat_lines.push(ChatLine::System(
-                    format!("[{}] {} — {}", cat, skill.name, skill.description),
-                ));
+                app.chat_lines.push(ChatLine::System(format!(
+                    "[{}] {} — {}",
+                    cat, skill.name, skill.description
+                )));
                 app.chat_auto_scroll = true;
             }
             HandleResult::Continue
@@ -224,17 +227,22 @@ fn handle_memory_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleR
         (KeyModifiers::NONE, KeyCode::Enter) => {
             let user_count = app.agent.memory.user_entries.len();
             let entry = if app.memory_selected < user_count {
-                app.agent.memory.user_entries.get(app.memory_selected)
+                app.agent
+                    .memory
+                    .user_entries
+                    .get(app.memory_selected)
                     .map(|s| s.as_str())
             } else {
-                app.agent.memory.memory_entries.get(app.memory_selected - user_count)
+                app.agent
+                    .memory
+                    .memory_entries
+                    .get(app.memory_selected - user_count)
                     .map(|s| s.as_str())
             };
             if let Some(text) = entry {
                 let display: String = text.chars().take(200).collect();
-                app.chat_lines.push(ChatLine::System(
-                    format!("Memory entry: {}", display),
-                ));
+                app.chat_lines
+                    .push(ChatLine::System(format!("Memory entry: {}", display)));
                 app.chat_auto_scroll = true;
             }
             HandleResult::Continue

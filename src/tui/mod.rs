@@ -55,13 +55,17 @@ pub async fn run(agent: AgentSession) -> Result<()> {
     result
 }
 
-async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: AgentSession) -> Result<()> {
+async fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    agent: AgentSession,
+) -> Result<()> {
     let mut app = App::new(agent);
 
     // Welcome message
-    app.chat_lines.push(ChatLine::System(
-        format!("Enchanter TUI — model={} | /help for commands", app.info.model),
-    ));
+    app.chat_lines.push(ChatLine::System(format!(
+        "Enchanter TUI — model={} | /help for commands",
+        app.info.model
+    )));
     app.chat_lines.push(ChatLine::System(
         "Keys: Tab=cycle | 1-4=jump | Ctrl+Q=quit | Ctrl+C=cancel | Ctrl+M=multiline | End=scroll bottom".into(),
     ));
@@ -172,7 +176,8 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
     app.agent.shutdown_mcp().await;
 
     // Session summary on exit (like the REPL does)
-    if app.agent.config.summarize_on_exit() && crate::summary::should_summarize(&app.agent.messages) {
+    if app.agent.config.summarize_on_exit() && crate::summary::should_summarize(&app.agent.messages)
+    {
         eprintln!("  Generating session summary...");
         match tokio::time::timeout(
             Duration::from_secs(10),
@@ -181,7 +186,11 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
         .await
         {
             Ok(Ok(summary_text)) if !summary_text.is_empty() => {
-                if let Err(e) = app.agent.memory.add_memory(format!("session_summary\n{}", summary_text)) {
+                if let Err(e) = app
+                    .agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", summary_text))
+                {
                     eprintln!("  Failed to save session summary: {}", e);
                 } else {
                     eprintln!("  Session summary saved to memory.");
@@ -190,12 +199,18 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, agent: A
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
                 let fallback = crate::summary::fallback_summary(&app.agent.messages);
-                let _ = app.agent.memory.add_memory(format!("session_summary\n{}", fallback));
+                let _ = app
+                    .agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", fallback));
                 eprintln!("  Summary generation failed: {}", e);
             }
             Err(_) => {
                 let fallback = crate::summary::fallback_summary(&app.agent.messages);
-                let _ = app.agent.memory.add_memory(format!("session_summary\n{}", fallback));
+                let _ = app
+                    .agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", fallback));
                 eprintln!("  Summary timed out, using fallback.");
             }
         }
@@ -234,7 +249,8 @@ async fn handle_chat(app: &mut App, msg: String) -> Option<UnboundedReceiver<Eve
     match app.agent.chat_events(&msg).await {
         Ok((_chat_result, event_rx)) => Some(event_rx),
         Err(e) => {
-            app.chat_lines.push(ChatLine::Error(format!("Error: {}", e)));
+            app.chat_lines
+                .push(ChatLine::Error(format!("Error: {}", e)));
             app.streaming = false;
             None
         }
@@ -251,7 +267,8 @@ async fn handle_retry(app: &mut App) -> Option<UnboundedReceiver<Event>> {
     match app.agent.retry_events().await {
         Ok((_chat_result, event_rx)) => Some(event_rx),
         Err(e) => {
-            app.chat_lines.push(ChatLine::Error(format!("Retry error: {}", e)));
+            app.chat_lines
+                .push(ChatLine::Error(format!("Retry error: {}", e)));
             app.streaming = false;
             None
         }
@@ -261,10 +278,14 @@ async fn handle_retry(app: &mut App) -> Option<UnboundedReceiver<Event>> {
 /// Run memory management (cap + summarize) after a chat turn completes.
 async fn manage_memory(app: &mut App) {
     let mem_config = app.agent.config.memory_config().clone();
-    if let Err(e) = app.agent.memory.manage(&app.agent.client, &mem_config).await {
-        app.chat_lines.push(ChatLine::System(
-            format!("Memory management: {}", e),
-        ));
+    if let Err(e) = app
+        .agent
+        .memory
+        .manage(&app.agent.client, &mem_config)
+        .await
+    {
+        app.chat_lines
+            .push(ChatLine::System(format!("Memory management: {}", e)));
     }
 }
 
@@ -279,7 +300,9 @@ enum StreamingAction {
 
 /// Handle key events during streaming (limited set).
 fn handle_streaming_key(event: &CrosstermEvent) -> StreamingAction {
-    let CrosstermEvent::Key(key) = event else { return StreamingAction::Nothing };
+    let CrosstermEvent::Key(key) = event else {
+        return StreamingAction::Nothing;
+    };
     match (key.modifiers, key.code) {
         (crossterm::event::KeyModifiers::CONTROL, crossterm::event::KeyCode::Char('c')) => {
             StreamingAction::Cancel

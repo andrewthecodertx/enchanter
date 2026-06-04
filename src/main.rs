@@ -73,6 +73,7 @@ mod prompt;
 mod protocol;
 mod recorder;
 mod replay;
+mod sandbox;
 mod session;
 mod skills;
 mod soul;
@@ -84,8 +85,15 @@ mod tui;
 use anyhow::Result;
 use clap::Parser;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = cli::Args::parse();
-    cli::run(args).await
+fn main() -> Result<()> {
+    // Intercept the sandbox helper before starting the async runtime: Landlock
+    // must be applied while the process is still single-threaded (see sandbox.rs).
+    if std::env::args().nth(1).as_deref() == Some(sandbox::SANDBOX_ARG) {
+        return sandbox::run_sandboxed_child();
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async { cli::run(cli::Args::parse()).await })
 }

@@ -93,12 +93,12 @@ pub fn merge_configs(global: &Config, project: &Config) -> Config {
 pub fn load_config(overlay: Option<&Overlay>) -> Result<Config> {
     let global_config = Config::load()?;
 
-    if let Some(ov) = overlay {
-        if ov.has_config {
-            let path = ov.path.join("config.yaml");
-            let project_config = Config::load_from(&path)?;
-            return Ok(merge_configs(&global_config, &project_config));
-        }
+    if let Some(ov) = overlay
+        && ov.has_config
+    {
+        let path = ov.path.join("config.yaml");
+        let project_config = Config::load_from(&path)?;
+        return Ok(merge_configs(&global_config, &project_config));
     }
 
     Ok(global_config)
@@ -108,13 +108,13 @@ pub fn load_config(overlay: Option<&Overlay>) -> Result<Config> {
 pub fn load_soul(overlay: Option<&Overlay>) -> Result<crate::soul::Soul> {
     let mut soul = crate::soul::Soul::load_or_fallback()?;
 
-    if let Some(ov) = overlay {
-        if ov.has_soul {
-            let project_soul_path = ov.path.join("SOUL.md");
-            if let Ok(content) = std::fs::read_to_string(&project_soul_path) {
-                soul.content.push_str("\n\n");
-                soul.content.push_str(&content);
-            }
+    if let Some(ov) = overlay
+        && ov.has_soul
+    {
+        let project_soul_path = ov.path.join("SOUL.md");
+        if let Ok(content) = std::fs::read_to_string(&project_soul_path) {
+            soul.content.push_str("\n\n");
+            soul.content.push_str(&content);
         }
     }
 
@@ -125,11 +125,11 @@ pub fn load_soul(overlay: Option<&Overlay>) -> Result<crate::soul::Soul> {
 pub fn load_memories(overlay: Option<&Overlay>) -> Result<crate::memory::MemoryStore> {
     let mut memory = crate::memory::MemoryStore::load()?;
 
-    if let Some(ov) = overlay {
-        if ov.has_memories {
-            let project_mem_dir = ov.path.join("memories");
-            memory.merge_from_dir(&project_mem_dir)?;
-        }
+    if let Some(ov) = overlay
+        && ov.has_memories
+    {
+        let project_mem_dir = ov.path.join("memories");
+        memory.merge_from_dir(&project_mem_dir)?;
     }
 
     Ok(memory)
@@ -139,11 +139,11 @@ pub fn load_memories(overlay: Option<&Overlay>) -> Result<crate::memory::MemoryS
 pub fn discover_skills(overlay: Option<&Overlay>) -> Result<crate::skills::SkillsIndex> {
     let mut skills = crate::skills::SkillsIndex::discover()?;
 
-    if let Some(ov) = overlay {
-        if ov.has_skills {
-            let project_skills_dir = ov.path.join("skills");
-            skills.merge_from_dir(&project_skills_dir)?;
-        }
+    if let Some(ov) = overlay
+        && ov.has_skills
+    {
+        let project_skills_dir = ov.path.join("skills");
+        skills.merge_from_dir(&project_skills_dir)?;
     }
 
     Ok(skills)

@@ -6,6 +6,7 @@
 use anyhow::Result;
 use colored::Colorize;
 use serde_json::Value;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::api::{LlmClient, Message};
@@ -39,6 +40,14 @@ pub struct AgentSession {
     pub previous_prompt_layers: Option<PromptLayers>,
 }
 
+/// Runtime options for an agent session, separate from the loaded core state.
+#[derive(Debug, Default)]
+pub struct SessionOptions {
+    pub no_stream: bool,
+    pub no_tools: bool,
+    pub system_override: Option<String>,
+}
+
 /// Result of a single chat turn.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -70,10 +79,13 @@ impl AgentSession {
         memory: MemoryStore,
         skills: SkillsIndex,
         resolved: ResolvedModel,
-        no_stream: bool,
-        no_tools: bool,
-        system_override: Option<String>,
+        options: SessionOptions,
     ) -> Result<Self> {
+        let SessionOptions {
+            no_stream,
+            no_tools,
+            system_override,
+        } = options;
         let client = LlmClient::new(
             &resolved.base_url,
             resolved.api_key.as_deref(),
@@ -338,9 +350,15 @@ impl AgentSession {
                 match &sink {
                     EventSink::Channel(tx) => {
                         self.client
-                            .chat_stream_with(self.messages.clone(), tools_payload.clone(), |token| {
-                                let _ = tx.send(Event::Content { text: token.to_string() });
-                            })
+                            .chat_stream_with(
+                                self.messages.clone(),
+                                tools_payload.clone(),
+                                |token| {
+                                    let _ = tx.send(Event::Content {
+                                        text: token.to_string(),
+                                    });
+                                },
+                            )
                             .await?
                     }
                     EventSink::Silent => {
@@ -358,7 +376,9 @@ impl AgentSession {
                 if let Some(ref content) = result.content
                     && !content.is_empty()
                 {
-                    sink.send(Event::Content { text: content.clone() });
+                    sink.send(Event::Content {
+                        text: content.clone(),
+                    });
                 }
 
                 for tc in &tool_calls {
@@ -377,9 +397,15 @@ impl AgentSession {
                 for tc in &tool_calls {
                     let tc_args: Value =
                         serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                    let output =
-                        dispatch_tool(&tc.function.name, &tc_args, &mut self.memory, &mut self.mcp)
-                            .await;
+                    let output = dispatch_tool(
+                        &tc.function.name,
+                        &tc_args,
+                        &mut self.memory,
+                        &mut self.mcp,
+                        &self.config.allowed_paths(),
+                        self.config.allow_unsandboxed_exec(),
+                    )
+                    .await;
                     sink.send(Event::ToolResult {
                         id: tc.id.clone(),
                         content: output.clone(),
@@ -427,7 +453,9 @@ enum EventSink {
 impl EventSink {
     fn send(&self, event: Event) {
         match self {
-            EventSink::Channel(tx) => { let _ = tx.send(event); }
+            EventSink::Channel(tx) => {
+                let _ = tx.send(event);
+            }
             EventSink::Silent => {}
         }
     }
@@ -439,6 +467,8 @@ async fn dispatch_tool(
     args: &Value,
     memory: &mut MemoryStore,
     mcp: &mut McpManager,
+    allowed_paths: &[PathBuf],
+    allow_unsandboxed_exec: bool,
 ) -> String {
     let built_in_names = [
         "exec_command",
@@ -450,7 +480,7 @@ async fn dispatch_tool(
         "memory",
     ];
     if built_in_names.contains(&name) {
-        tools::dispatch(name, args, memory)
+        tools::dispatch(name, args, memory, allowed_paths, allow_unsandboxed_exec)
     } else if name.contains(':') {
         match mcp.dispatch(name, args).await {
             Some(Ok(result)) => result,
@@ -461,4 +491,3 @@ async fn dispatch_tool(
         format!("Unknown tool: {}", name)
     }
 }
-

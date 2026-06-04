@@ -34,9 +34,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // header
-            Constraint::Min(3),     // body
-            Constraint::Length(1),  // footer
+            Constraint::Length(1), // header
+            Constraint::Min(3),    // body
+            Constraint::Length(1), // footer
         ])
         .split(size);
 
@@ -52,7 +52,9 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         &app.info.session_id
     };
 
-    let short_url = app.info.base_url
+    let short_url = app
+        .info
+        .base_url
         .trim_end_matches('/')
         .replace("https://api.openai.com/v1", "openai")
         .replace("http://localhost:11434/v1", "ollama")
@@ -62,7 +64,12 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 
     let line = Line::from(vec![
         Span::styled(" ⟡ ", Style::default().fg(colors::ACCENT2)),
-        Span::styled("Enchanter", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Enchanter",
+            Style::default()
+                .fg(colors::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" │ "),
         Span::styled(&app.info.model, Style::default().fg(Color::White)),
         Span::raw(" @ "),
@@ -81,7 +88,7 @@ fn draw_body(f: &mut Frame, app: &App, area: Rect) {
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(30),  // sidebar
+            Constraint::Length(30), // sidebar
             Constraint::Min(20),    // chat + input
         ])
         .split(area);
@@ -105,9 +112,17 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_skills_pane(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Skills;
-    let border_color = if focused { colors::BORDER_FOCUS } else { colors::BORDER_IDLE };
+    let border_color = if focused {
+        colors::BORDER_FOCUS
+    } else {
+        colors::BORDER_IDLE
+    };
 
-    let items: Vec<ListItem> = app.agent.skills.skills.iter()
+    let items: Vec<ListItem> = app
+        .agent
+        .skills
+        .skills
+        .iter()
         .map(|skill| {
             let cat = skill.category.as_deref().unwrap_or("other");
             let label = format!("[{}] {}", cat, skill.name);
@@ -127,16 +142,22 @@ fn draw_skills_pane(f: &mut Frame, app: &App, area: Rect) {
         state.select(Some(app.skills_selected.min(items.len() - 1)));
     }
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(Style::default().bg(colors::HIGHLIGHT_BG).add_modifier(Modifier::BOLD));
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .bg(colors::HIGHLIGHT_BG)
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Memory;
-    let border_color = if focused { colors::BORDER_FOCUS } else { colors::BORDER_IDLE };
+    let border_color = if focused {
+        colors::BORDER_FOCUS
+    } else {
+        colors::BORDER_IDLE
+    };
 
     let total = app.agent.memory.user_entries.len() + app.agent.memory.memory_entries.len();
     let title = format!(" MEMORY ({}) ", total);
@@ -144,12 +165,17 @@ fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     if !app.agent.memory.user_entries.is_empty() {
-        lines.push(Line::from(Span::styled("── USER ──", Style::default().fg(colors::USER))));
+        lines.push(Line::from(Span::styled(
+            "── USER ──",
+            Style::default().fg(colors::USER),
+        )));
         for (i, entry) in app.agent.memory.user_entries.iter().enumerate() {
             let truncated: String = entry.chars().take(28).collect();
             let is_selected = focused && app.memory_selected == i;
             let style = if is_selected {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -158,22 +184,33 @@ fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
     }
 
     if !app.agent.memory.memory_entries.is_empty() {
-        lines.push(Line::from(Span::styled("── NOTES ──", Style::default().fg(colors::ACCENT))));
+        lines.push(Line::from(Span::styled(
+            "── NOTES ──",
+            Style::default().fg(colors::ACCENT),
+        )));
         for (i, entry) in app.agent.memory.memory_entries.iter().enumerate() {
             let truncated: String = entry.chars().take(28).collect();
             let global_idx = app.agent.memory.user_entries.len() + i;
             let is_selected = focused && app.memory_selected == global_idx;
             let style = if is_selected {
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(colors::DIM)
             };
-            lines.push(Line::from(Span::styled(format!("[{}] {}", i + 1, truncated), style)));
+            lines.push(Line::from(Span::styled(
+                format!("[{}] {}", i + 1, truncated),
+                style,
+            )));
         }
     }
 
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled("(empty)", Style::default().fg(colors::DIM))));
+        lines.push(Line::from(Span::styled(
+            "(empty)",
+            Style::default().fg(colors::DIM),
+        )));
     }
 
     // Auto-scroll memory to keep selected item visible
@@ -211,7 +248,11 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Chat;
-    let border_color = if focused { colors::BORDER_FOCUS } else { colors::BORDER_IDLE };
+    let border_color = if focused {
+        colors::BORDER_FOCUS
+    } else {
+        colors::BORDER_IDLE
+    };
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -219,8 +260,16 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
         match line {
             ChatLine::User(text) => {
                 lines.push(Line::from(vec![
-                    Span::styled("⟩ ", Style::default().fg(colors::USER).add_modifier(Modifier::BOLD)),
-                    Span::styled(truncate_to_width(text, (area.width as usize).saturating_sub(4)), Style::default().fg(Color::White)),
+                    Span::styled(
+                        "⟩ ",
+                        Style::default()
+                            .fg(colors::USER)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        truncate_to_width(text, (area.width as usize).saturating_sub(4)),
+                        Style::default().fg(Color::White),
+                    ),
                 ]));
             }
             ChatLine::Assistant(text) => {
@@ -235,15 +284,23 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
             ChatLine::ToolCall { name, id: _ } => {
                 lines.push(Line::from(vec![
                     Span::styled(" ⟩ ", Style::default().fg(colors::TOOL)),
-                    Span::styled(name.clone(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        name.clone(),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
             }
             ChatLine::ToolResult { id: _, content } => {
-                for (i, text_line) in content.lines().take(5).enumerate() {
-                    let prefix = if i == 0 { " │ " } else { " │ " };
+                for text_line in content.lines().take(5) {
+                    let prefix = " │ ";
                     lines.push(Line::from(vec![
                         Span::styled(prefix, Style::default().fg(colors::TOOL_RESULT)),
-                        Span::styled(truncate_to_width(text_line, (area.width as usize).saturating_sub(6)), Style::default().fg(colors::DIM)),
+                        Span::styled(
+                            truncate_to_width(text_line, (area.width as usize).saturating_sub(6)),
+                            Style::default().fg(colors::DIM),
+                        ),
                     ]));
                 }
                 let total_lines = content.lines().count();
@@ -262,7 +319,12 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
             }
             ChatLine::Error(text) => {
                 lines.push(Line::from(vec![
-                    Span::styled("✗ ", Style::default().fg(colors::ERROR).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "✗ ",
+                        Style::default()
+                            .fg(colors::ERROR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(text.clone(), Style::default().fg(colors::ERROR)),
                 ]));
             }
@@ -280,7 +342,10 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
             ]));
         }
     } else if app.streaming {
-        lines.push(Line::from(Span::styled("  thinking▌", Style::default().fg(colors::DIM))));
+        lines.push(Line::from(Span::styled(
+            "  thinking▌",
+            Style::default().fg(colors::DIM),
+        )));
     }
 
     if lines.is_empty() {
@@ -313,7 +378,11 @@ fn draw_chat_pane(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_input_bar(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Input;
-    let border_color = if focused { colors::BORDER_FOCUS } else { colors::BORDER_IDLE };
+    let border_color = if focused {
+        colors::BORDER_FOCUS
+    } else {
+        colors::BORDER_IDLE
+    };
 
     let mode_hint = if app.input.multiline { " [M]" } else { "" };
     let title = format!(" INPUT{} ", mode_hint);

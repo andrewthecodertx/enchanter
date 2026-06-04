@@ -47,10 +47,7 @@ pub enum SessionEntry {
     ToolResult { id: String, content: String },
     /// Metadata about the session (model, timestamp).
     #[serde(rename = "meta")]
-    Meta {
-        model: String,
-        started_at: String,
-    },
+    Meta { model: String, started_at: String },
 }
 
 /// Summary of a session file for listing.
@@ -199,7 +196,11 @@ impl Session {
                 SessionEntry::Assistant { content } => {
                     messages.push(Message::assistant(content));
                 }
-                SessionEntry::ToolCall { id, name, arguments } => {
+                SessionEntry::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => {
                     let tc = crate::api::ToolCall {
                         id: id.clone(),
                         call_type: "function".to_string(),
@@ -318,11 +319,12 @@ fn message_to_entries(message: &Message) -> Vec<SessionEntry> {
 
             // If there's also text content, record it
             if let Some(content) = &message.content
-                && !content.is_empty() {
-                    entries.push(SessionEntry::Assistant {
-                        content: content.clone(),
-                    });
-                }
+                && !content.is_empty()
+            {
+                entries.push(SessionEntry::Assistant {
+                    content: content.clone(),
+                });
+            }
 
             // Edge case: assistant message with no tool calls and no content
             if entries.is_empty() {
@@ -414,14 +416,14 @@ mod tests {
         session.append(&tool_result).unwrap();
 
         let entries = Session::load_from_dir(session.id(), &sdir).unwrap();
-        let tool_call_entry = entries.iter().find(|e| {
-            matches!(e, SessionEntry::ToolCall { name, .. } if name == "list_directory")
-        });
+        let tool_call_entry = entries
+            .iter()
+            .find(|e| matches!(e, SessionEntry::ToolCall { name, .. } if name == "list_directory"));
         assert!(tool_call_entry.is_some());
 
-        let tool_result_entry = entries.iter().find(|e| {
-            matches!(e, SessionEntry::ToolResult { id, .. } if id == "call_tc_1")
-        });
+        let tool_result_entry = entries
+            .iter()
+            .find(|e| matches!(e, SessionEntry::ToolResult { id, .. } if id == "call_tc_1"));
         assert!(tool_result_entry.is_some());
     }
 

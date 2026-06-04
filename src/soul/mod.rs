@@ -30,7 +30,10 @@ impl Soul {
         }
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("reading SOUL from {}", path.display()))?;
-        Ok(Some(Self { content, source: path }))
+        Ok(Some(Self {
+            content,
+            source: path,
+        }))
     }
 
     /// Load SOUL.md, or return a fallback persona.

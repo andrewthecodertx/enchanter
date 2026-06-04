@@ -32,6 +32,11 @@ crossterm = { version = "0.29", optional = true }
 libc = "0.2"
 ctrlc = "3"
 
+# Filesystem sandbox for shell execution. Linux-only kernel LSM, no runtime
+# dependency — keeps non-Linux builds clean.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 [features]
 default = ["tui"]
 tui = ["dep:ratatui", "dep:ratatui-crossterm", "dep:crossterm"]

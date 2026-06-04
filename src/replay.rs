@@ -53,7 +53,8 @@ pub fn replay_session(
     println!("  {} Schema version: {}", "↳".dimmed(), schema);
 
     // Find config snapshot to get original model
-    let original_model = events.iter()
+    let original_model = events
+        .iter()
         .find(|e| e.event_type == "config_snapshot")
         .and_then(|e| e.payload.get("model"))
         .and_then(|v| v.as_str());
@@ -66,32 +67,50 @@ pub fn replay_session(
     // Exact mode check
     if exact
         && let Some(orig) = original_model
-            && let Some(swapped) = swap_model
-                && orig != swapped {
-                    anyhow::bail!(
-                        "Exact mode: recorded model '{}' does not match --swap-model '{}'",
-                        orig,
-                        swapped
-                    );
-                }
-
-    println!("  {} Original model: {}", "↳".dimmed(), original_model.unwrap_or("unknown"));
-    if swap_model.is_some() {
-        println!("  {} Swapped model:  {}", "↳".dimmed(), swap_model.unwrap().bright_yellow());
+        && let Some(swapped) = swap_model
+        && orig != swapped
+    {
+        anyhow::bail!(
+            "Exact mode: recorded model '{}' does not match --swap-model '{}'",
+            orig,
+            swapped
+        );
     }
-    println!("  {} Tools mode:      {}", "↳".dimmed(), match tools_mode {
-        ReplayToolMode::Live => "live",
-        ReplayToolMode::Stubbed => "stubbed (deterministic)",
-    });
+
+    println!(
+        "  {} Original model: {}",
+        "↳".dimmed(),
+        original_model.unwrap_or("unknown")
+    );
+    if let Some(swapped_model) = swap_model {
+        println!(
+            "  {} Swapped model:  {}",
+            "↳".dimmed(),
+            swapped_model.bright_yellow()
+        );
+    }
+    println!(
+        "  {} Tools mode:      {}",
+        "↳".dimmed(),
+        match tools_mode {
+            ReplayToolMode::Live => "live",
+            ReplayToolMode::Stubbed => "stubbed (deterministic)",
+        }
+    );
     println!();
 
     // Replay events
-    let mut tool_results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut tool_results: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     for event in &events {
         match event.event_type.as_str() {
             "config_snapshot" => {
-                println!("{} {}", "⚙ Config Snapshot".bright_cyan(), format!("[seq={}]", event.seq).dimmed());
+                println!(
+                    "{} {}",
+                    "⚙ Config Snapshot".bright_cyan(),
+                    format!("[seq={}]", event.seq).dimmed()
+                );
                 if let Some(model) = event.payload.get("model").and_then(|v| v.as_str()) {
                     println!("    Model: {}", model);
                 }
@@ -99,7 +118,8 @@ pub fn replay_session(
                     println!("    Base URL: {}", base_url);
                 }
                 if let Some(providers) = event.payload.get("providers").and_then(|v| v.as_array()) {
-                    let names: Vec<String> = providers.iter()
+                    let names: Vec<String> = providers
+                        .iter()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
                         .collect();
                     if !names.is_empty() {
@@ -117,12 +137,20 @@ pub fn replay_session(
             }
             "user_message" => {
                 if let Some(content) = event.payload.get("content").and_then(|v| v.as_str()) {
-                    println!("{} {}", "⟩".bright_blue(), content.chars().take(200).collect::<String>());
+                    println!(
+                        "{} {}",
+                        "⟩".bright_blue(),
+                        content.chars().take(200).collect::<String>()
+                    );
                 }
             }
             "assistant_response" => {
                 if let Some(content) = event.payload.get("content").and_then(|v| v.as_str()) {
-                    println!("{} {}", "⟨".bright_green(), content.chars().take(200).collect::<String>());
+                    println!(
+                        "{} {}",
+                        "⟨".bright_green(),
+                        content.chars().take(200).collect::<String>()
+                    );
                 }
             }
             "tool_call" => {
@@ -130,9 +158,23 @@ pub fn replay_session(
                     event.payload.get("tool_name").and_then(|v| v.as_str()),
                     event.payload.get("tool_id").and_then(|v| v.as_str()),
                 ) {
-                    let is_mcp = event.payload.get("is_mcp").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let tag = if is_mcp { " (MCP)".dimmed() } else { "".normal() };
-                    println!("{} {}{} [seq={}]", "🔧".bright_yellow(), name, tag, event.seq);
+                    let is_mcp = event
+                        .payload
+                        .get("is_mcp")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let tag = if is_mcp {
+                        " (MCP)".dimmed()
+                    } else {
+                        "".normal()
+                    };
+                    println!(
+                        "{} {}{} [seq={}]",
+                        "🔧".bright_yellow(),
+                        name,
+                        tag,
+                        event.seq
+                    );
                     if tools_mode == &ReplayToolMode::Stubbed {
                         println!("    {} Stubbed: tool call not executed", "↳".dimmed());
                     }
@@ -140,14 +182,27 @@ pub fn replay_session(
             }
             "tool_result" => {
                 if let Some(id) = event.payload.get("tool_id").and_then(|v| v.as_str()) {
-                    let is_error = event.payload.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let result = event.payload.get("result").and_then(|v| v.as_str()).unwrap_or("");
+                    let is_error = event
+                        .payload
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let result = event
+                        .payload
+                        .get("result")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     tool_results.insert(id.to_string(), result.to_string());
 
                     if tools_mode == &ReplayToolMode::Stubbed {
                         let icon = if is_error { "✗".red() } else { "✓".green() };
                         let preview: String = result.chars().take(100).collect();
-                        println!("    {} Result: {}{}", icon, preview.dimmed(), if result.len() > 100 { "…" } else { "" });
+                        println!(
+                            "    {} Result: {}{}",
+                            icon,
+                            preview.dimmed(),
+                            if result.len() > 100 { "…" } else { "" }
+                        );
                     }
                 }
             }
@@ -166,7 +221,11 @@ pub fn replay_session(
             }
             "session_summary" => {
                 if let Some(content) = event.payload.get("content").and_then(|v| v.as_str()) {
-                    println!("{} Session summary: {}", "📋".bright_cyan(), content.chars().take(100).collect::<String>());
+                    println!(
+                        "{} Session summary: {}",
+                        "📋".bright_cyan(),
+                        content.chars().take(100).collect::<String>()
+                    );
                 }
             }
             _ => {
@@ -176,10 +235,18 @@ pub fn replay_session(
     }
 
     println!();
-    println!("{} Replay complete. {} events processed.", "✓".green(), events.len());
+    println!(
+        "{} Replay complete. {} events processed.",
+        "✓".green(),
+        events.len()
+    );
 
     if tools_mode == &ReplayToolMode::Stubbed {
-        println!("{} {} tool results restored from recording.", "↳".dimmed(), tool_results.len());
+        println!(
+            "{} {} tool results restored from recording.",
+            "↳".dimmed(),
+            tool_results.len()
+        );
     }
 
     Ok(())
@@ -192,9 +259,15 @@ mod tests {
     #[test]
     fn test_parse_tools_mode() {
         assert_eq!(parse_tools_mode("live").unwrap(), ReplayToolMode::Live);
-        assert_eq!(parse_tools_mode("stubbed").unwrap(), ReplayToolMode::Stubbed);
+        assert_eq!(
+            parse_tools_mode("stubbed").unwrap(),
+            ReplayToolMode::Stubbed
+        );
         assert_eq!(parse_tools_mode("LIVE").unwrap(), ReplayToolMode::Live);
-        assert_eq!(parse_tools_mode("STUBBED").unwrap(), ReplayToolMode::Stubbed);
+        assert_eq!(
+            parse_tools_mode("STUBBED").unwrap(),
+            ReplayToolMode::Stubbed
+        );
         assert!(parse_tools_mode("invalid").is_err());
     }
 }

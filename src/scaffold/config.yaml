@@ -33,6 +33,18 @@ model:
 #     base_url: https://api.groq.com/openai/v1
 #     api_key: ${GROQ_API_KEY}
 
+# Filesystem sandbox for the agent's file tools and shell execution.
+# security:
+#   # Directories the agent may read/write. Defaults to your home directory.
+#   allowed_paths:
+#     - ~/Projects
+#     - /tmp
+#   # On Linux, exec_command runs sh under a Landlock sandbox confined to the
+#   # paths above (plus system dirs read-only). If the kernel can't enforce it
+#   # (old kernel, non-Linux), exec_command refuses by default. Set this true to
+#   # run the shell unsandboxed on such systems (escape hatch — use with care).
+#   allow_unsandboxed_exec: false
+
 agent:
   # max_turns: 30                       # Max agent loop turns
   # summarize_on_exit: true             # Generate session summary on clean exit (default: true)

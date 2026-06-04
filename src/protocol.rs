@@ -48,10 +48,7 @@ pub enum Event {
         arguments: String,
     },
     /// A tool call has completed with a result.
-    ToolResult {
-        id: String,
-        content: String,
-    },
+    ToolResult { id: String, content: String },
     /// The response is complete.
     Done,
     /// Response to a Ping.
@@ -110,9 +107,18 @@ mod tests {
         };
         let jsonl = req.to_jsonl().unwrap();
         let decoded = Request::from_jsonl(&jsonl).unwrap();
-        assert_eq!(jsonl, r#"{"type":"chat","prompt":"explain ownership","model":"gpt-4.1","no_stream":false,"no_tools":false}"#);
+        assert_eq!(
+            jsonl,
+            r#"{"type":"chat","prompt":"explain ownership","model":"gpt-4.1","no_stream":false,"no_tools":false}"#
+        );
         match decoded {
-            Request::Chat { prompt, model, no_stream, no_tools, .. } => {
+            Request::Chat {
+                prompt,
+                model,
+                no_stream,
+                no_tools,
+                ..
+            } => {
                 assert_eq!(prompt, "explain ownership");
                 assert_eq!(model, Some("gpt-4.1".into()));
                 assert!(!no_stream);
@@ -133,9 +139,18 @@ mod tests {
         };
         let jsonl = req.to_jsonl().unwrap();
         let decoded = Request::from_jsonl(&jsonl).unwrap();
-        assert_eq!(jsonl, r#"{"type":"chat","prompt":"hello","no_stream":false,"no_tools":false}"#);
+        assert_eq!(
+            jsonl,
+            r#"{"type":"chat","prompt":"hello","no_stream":false,"no_tools":false}"#
+        );
         match decoded {
-            Request::Chat { prompt, model, system, no_stream, no_tools } => {
+            Request::Chat {
+                prompt,
+                model,
+                system,
+                no_stream,
+                no_tools,
+            } => {
                 assert_eq!(prompt, "hello");
                 assert!(model.is_none());
                 assert!(system.is_none());
@@ -172,7 +187,9 @@ mod tests {
 
     #[test]
     fn content_event_roundtrip() {
-        let event = Event::Content { text: "Ownership is...".into() };
+        let event = Event::Content {
+            text: "Ownership is...".into(),
+        };
         let jsonl = event.to_jsonl().unwrap();
         let decoded = Event::from_jsonl(&jsonl).unwrap();
         assert!(jsonl.contains(r#""type":"content""#));
@@ -193,7 +210,11 @@ mod tests {
         let jsonl = event.to_jsonl().unwrap();
         let decoded = Event::from_jsonl(&jsonl).unwrap();
         match decoded {
-            Event::ToolCall { id, name, arguments } => {
+            Event::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "exec_command");
                 assert_eq!(arguments, r#"{"command":"ls"}"#);
@@ -245,7 +266,11 @@ mod tests {
         let jsonl = event.to_jsonl().unwrap();
         let decoded = Event::from_jsonl(&jsonl).unwrap();
         match decoded {
-            Event::StatusInfo { model, mcp_servers, uptime_secs } => {
+            Event::StatusInfo {
+                model,
+                mcp_servers,
+                uptime_secs,
+            } => {
                 assert_eq!(model, "gpt-4.1");
                 assert_eq!(mcp_servers, vec!["github", "images"]);
                 assert_eq!(uptime_secs, 3600);
@@ -266,7 +291,11 @@ mod tests {
         assert!(!jsonl.contains("mcp_servers"));
         let decoded = Event::from_jsonl(&jsonl).unwrap();
         match decoded {
-            Event::StatusInfo { model, mcp_servers, uptime_secs } => {
+            Event::StatusInfo {
+                model,
+                mcp_servers,
+                uptime_secs,
+            } => {
                 assert_eq!(model, "claude-3");
                 assert!(mcp_servers.is_empty());
                 assert_eq!(uptime_secs, 0);
@@ -277,7 +306,9 @@ mod tests {
 
     #[test]
     fn error_event_roundtrip() {
-        let event = Event::Error { message: "connection refused".into() };
+        let event = Event::Error {
+            message: "connection refused".into(),
+        };
         let jsonl = event.to_jsonl().unwrap();
         let decoded = Event::from_jsonl(&jsonl).unwrap();
         match decoded {
@@ -289,7 +320,10 @@ mod tests {
     #[test]
     fn all_request_types_from_raw_json() {
         let cases = [
-            (r#"{"type":"chat","prompt":"hi","no_stream":true,"no_tools":false}"#, "chat"),
+            (
+                r#"{"type":"chat","prompt":"hi","no_stream":true,"no_tools":false}"#,
+                "chat",
+            ),
             (r#"{"type":"ping"}"#, "ping"),
             (r#"{"type":"status"}"#, "status"),
             (r#"{"type":"shutdown"}"#, "shutdown"),
@@ -310,11 +344,20 @@ mod tests {
     fn all_event_types_from_raw_json() {
         let cases: Vec<(&str, &str)> = vec![
             (r#"{"type":"content","text":"hello"}"#, "content"),
-            (r#"{"type":"tool_call","id":"1","name":"ls","arguments":"{}"}"#, "tool_call"),
-            (r#"{"type":"tool_result","id":"1","content":"ok"}"#, "tool_result"),
+            (
+                r#"{"type":"tool_call","id":"1","name":"ls","arguments":"{}"}"#,
+                "tool_call",
+            ),
+            (
+                r#"{"type":"tool_result","id":"1","content":"ok"}"#,
+                "tool_result",
+            ),
             (r#"{"type":"done"}"#, "done"),
             (r#"{"type":"pong"}"#, "pong"),
-            (r#"{"type":"status_info","model":"gpt-4.1","uptime_secs":100}"#, "status_info"),
+            (
+                r#"{"type":"status_info","model":"gpt-4.1","uptime_secs":100}"#,
+                "status_info",
+            ),
             (r#"{"type":"error","message":"fail"}"#, "error"),
         ];
         for (json, label) in cases {

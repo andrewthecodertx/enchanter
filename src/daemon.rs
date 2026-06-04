@@ -25,15 +25,15 @@ use colored::Colorize;
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 #[allow(unused_imports)]
 use tokio::sync::mpsc;
 
-use crate::agent::AgentSession;
+use crate::agent::{AgentSession, SessionOptions};
 use crate::home;
 use crate::protocol::{Event, Request};
 
@@ -73,7 +73,10 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
         // Try to connect — if it works, another daemon is running
         if let Ok(stream) = tokio::net::UnixStream::connect(&sock_path).await {
             drop(stream);
-            anyhow::bail!("Daemon is already running (socket {} is active)", sock_path.display());
+            anyhow::bail!(
+                "Daemon is already running (socket {} is active)",
+                sock_path.display()
+            );
         }
         // Stale socket — remove it
         std::fs::remove_file(&sock_path)
@@ -95,7 +98,8 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
 
     // Initialize agent session
     eprintln!("Loading config, soul, memory, skills...");
-    let overlay = std::env::current_dir().ok()
+    let overlay = std::env::current_dir()
+        .ok()
         .as_ref()
         .and_then(|cwd| crate::overlay::discover_overlay(cwd))
         .map(|path| crate::overlay::analyze_overlay(&path));
@@ -111,9 +115,7 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
         memory,
         skills,
         resolved,
-        false, // streaming
-        false, // tools enabled
-        None,  // no system override
+        SessionOptions::default(), // streaming + tools enabled, no system override
     )?;
 
     agent.session.append(&agent.messages[0])?;
@@ -128,7 +130,12 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     agent.start_mcp().await;
 
     let model = agent.resolved.model.clone();
-    let mcp_servers: Vec<String> = agent.mcp.server_names().into_iter().map(String::from).collect();
+    let mcp_servers: Vec<String> = agent
+        .mcp
+        .server_names()
+        .into_iter()
+        .map(String::from)
+        .collect();
 
     eprintln!("Daemon ready on {}", sock_path.display());
     eprintln!("  Model: {}", model);
@@ -188,9 +195,8 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding socket {}", sock_path.display()))?;
 
-    let idle_timeout = Duration::from_secs(
-        idle_timeout_mins.unwrap_or(DEFAULT_IDLE_TIMEOUT_MINS) * 60
-    );
+    let idle_timeout =
+        Duration::from_secs(idle_timeout_mins.unwrap_or(DEFAULT_IDLE_TIMEOUT_MINS) * 60);
     let state = DaemonState {
         started_at: Instant::now(),
         idle_timeout,
@@ -209,7 +215,10 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
 
         // Check idle timeout
         if last_activity.elapsed() > state.idle_timeout {
-            eprintln!("Idle timeout reached ({} min), shutting down.", state.idle_timeout.as_secs() / 60);
+            eprintln!(
+                "Idle timeout reached ({} min), shutting down.",
+                state.idle_timeout.as_secs() / 60
+            );
             break;
         }
 
@@ -246,15 +255,22 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
         match tokio::time::timeout(
             Duration::from_secs(10),
             crate::summary::generate_session_summary(&agent.client, &agent.messages),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(summary_text)) if !summary_text.is_empty() => {
-                if let Err(e) = agent.memory.add_memory(format!("session_summary\n{}", summary_text)) {
+                if let Err(e) = agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", summary_text))
+                {
                     eprintln!("Warning: Failed to save summary: {}", e);
                 }
             }
             _ => {
                 let fallback = crate::summary::fallback_summary(&agent.messages);
-                let _ = agent.memory.add_memory(format!("session_summary\n{}", fallback));
+                let _ = agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", fallback));
             }
         }
     }
@@ -301,18 +317,25 @@ async fn handle_connection(
     };
 
     match request {
-        Request::Chat { prompt, model, system: _system, no_stream, no_tools } => {
+        Request::Chat {
+            prompt,
+            model,
+            system: _system,
+            no_stream,
+            no_tools,
+        } => {
             // Switch model if requested
             if let Some(new_model) = model
-                && let Err(e) = agent.switch_model(&new_model) {
-                    let err_event = Event::Error {
-                        message: format!("Failed to switch model: {}", e),
-                    };
-                    if let Ok(jsonl) = err_event.to_jsonl() {
-                        let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
-                    }
-                    return;
+                && let Err(e) = agent.switch_model(&new_model)
+            {
+                let err_event = Event::Error {
+                    message: format!("Failed to switch model: {}", e),
+                };
+                if let Ok(jsonl) = err_event.to_jsonl() {
+                    let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
                 }
+                return;
+            }
 
             // Apply overrides
             let prev_no_stream = agent.no_stream;
@@ -326,9 +349,13 @@ async fn handle_connection(
                     // Forward events to client
                     while let Some(event) = rx.recv().await {
                         if let Ok(jsonl) = event.to_jsonl()
-                            && writer.write_all(format!("{}\n", jsonl).as_bytes()).await.is_err() {
-                                break; // Client disconnected
-                            }
+                            && writer
+                                .write_all(format!("{}\n", jsonl).as_bytes())
+                                .await
+                                .is_err()
+                        {
+                            break; // Client disconnected
+                        }
                     }
                 }
                 Err(e) => {
@@ -390,15 +417,23 @@ pub async fn connect() -> Result<tokio::net::UnixStream> {
 pub async fn send_request(request: &Request) -> Result<Vec<Event>> {
     let mut stream = connect().await?;
     let jsonl = request.to_jsonl()?;
-    stream.write_all(format!("{}\n", jsonl).as_bytes()).await
+    stream
+        .write_all(format!("{}\n", jsonl).as_bytes())
+        .await
         .context("sending request to daemon")?;
-    stream.shutdown().await
+    stream
+        .shutdown()
+        .await
         .context("shutting down write side of daemon connection")?;
 
     let mut events = Vec::new();
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();
-    while let Some(line) = lines.next_line().await.context("reading response from daemon")? {
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("reading response from daemon")?
+    {
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;
@@ -406,7 +441,10 @@ pub async fn send_request(request: &Request) -> Result<Vec<Event>> {
         match Event::from_jsonl(&line) {
             Ok(event) => events.push(event),
             Err(e) => {
-                eprintln!("Warning: failed to parse event from daemon: {} (line: {})", e, line);
+                eprintln!(
+                    "Warning: failed to parse event from daemon: {} (line: {})",
+                    e, line
+                );
             }
         }
     }
@@ -420,16 +458,21 @@ pub async fn is_running() -> bool {
             // Try to send a ping
             let ping = Request::Ping;
             if let Ok(jsonl) = ping.to_jsonl()
-                && stream.write_all(format!("{}\n", jsonl).as_bytes()).await.is_ok()
-                    && stream.shutdown().await.is_ok() {
-                        // Read response
-                        let reader = BufReader::new(stream);
-                        let mut lines = reader.lines();
-                        if let Ok(Some(line)) = lines.next_line().await
-                            && let Ok(Event::Pong) = Event::from_jsonl(line.trim()) {
-                                return true;
-                            }
-                    }
+                && stream
+                    .write_all(format!("{}\n", jsonl).as_bytes())
+                    .await
+                    .is_ok()
+                && stream.shutdown().await.is_ok()
+            {
+                // Read response
+                let reader = BufReader::new(stream);
+                let mut lines = reader.lines();
+                if let Ok(Some(line)) = lines.next_line().await
+                    && let Ok(Event::Pong) = Event::from_jsonl(line.trim())
+                {
+                    return true;
+                }
+            }
             false
         }
         Err(_) => false,
@@ -444,8 +487,7 @@ pub async fn is_running() -> bool {
 /// - Is in its own session (immune to SIGHUP from terminal exit)
 /// - Has no controlling terminal
 pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
-    let exe = std::env::current_exe()
-        .context("finding current executable")?;
+    let exe = std::env::current_exe().context("finding current executable")?;
 
     // Clean up stale socket/pid files
     let sock = socket_path();
@@ -472,8 +514,9 @@ pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
         .context("converting exe path to C string")?;
     let mut c_args: Vec<std::ffi::CString> = vec![exe_cstr.clone()];
     for arg in &args {
-        c_args.push(std::ffi::CString::new(arg.as_str())
-            .context("converting daemon arg to C string")?);
+        c_args.push(
+            std::ffi::CString::new(arg.as_str()).context("converting daemon arg to C string")?,
+        );
     }
     let mut argv: Vec<*const libc::c_char> = c_args.iter().map(|s| s.as_ptr()).collect();
     argv.push(std::ptr::null());
@@ -503,29 +546,39 @@ pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
     if first_pid > 0 {
         // ── Original caller (parent) ──
         // Wait for the grandchild's PID via pipe, then return.
-        unsafe { libc::close(write_fd); }
+        unsafe {
+            libc::close(write_fd);
+        }
 
         let mut pid_buf = [0u8; 4];
-        let n = unsafe {
-            libc::read(read_fd, pid_buf.as_mut_ptr() as *mut libc::c_void, 4)
-        };
-        unsafe { libc::close(read_fd); }
+        let n = unsafe { libc::read(read_fd, pid_buf.as_mut_ptr() as *mut libc::c_void, 4) };
+        unsafe {
+            libc::close(read_fd);
+        }
 
         let result = if n == 4 {
             let daemon_pid = u32::from_be_bytes(pid_buf);
             // Reap the intermediate child (first fork child)
-            unsafe { libc::waitpid(first_pid, std::ptr::null_mut(), 0); }
+            unsafe {
+                libc::waitpid(first_pid, std::ptr::null_mut(), 0);
+            }
             Ok(daemon_pid)
         } else {
-            unsafe { libc::waitpid(first_pid, std::ptr::null_mut(), 0); }
-            Err(anyhow::anyhow!("daemon failed to start: grandchild did not report PID"))
+            unsafe {
+                libc::waitpid(first_pid, std::ptr::null_mut(), 0);
+            }
+            Err(anyhow::anyhow!(
+                "daemon failed to start: grandchild did not report PID"
+            ))
         };
         return result;
     }
 
     // ── Intermediate child (first fork) ──
     // Close the read end — we don't need it.
-    unsafe { libc::close(read_fd); }
+    unsafe {
+        libc::close(read_fd);
+    }
 
     // Start a new session to detach from the controlling terminal.
     unsafe {
@@ -537,19 +590,23 @@ pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
     // ── Second fork ──
     let second_pid = unsafe { libc::fork() };
     if second_pid < 0 {
-        unsafe { libc::_exit(2); }
+        unsafe {
+            libc::_exit(2);
+        }
     }
 
     if second_pid > 0 {
         // Intermediate child: exit immediately. The grandchild is now orphaned
         // (adopted by init/systemd) and fully detached from any terminal.
-        unsafe { libc::_exit(0); }
+        unsafe {
+            libc::_exit(0);
+        }
     }
 
     // ── Grandchild (actual daemon process) ──
     // Redirect stdin/stdout/stderr to /dev/null
     unsafe {
-        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const i8, libc::O_RDWR);
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
         if devnull >= 0 {
             libc::dup2(devnull, 0); // stdin
             libc::dup2(devnull, 1); // stdout
@@ -572,7 +629,9 @@ pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
 
     // Set the FOREGROUND flag so the daemon child runs run_daemon() directly
     // Safety: we're in the grandchild process about to exec; no other threads exist.
-    unsafe { std::env::set_var("__ENCHANTER_DAEMON_FOREGROUND", "1"); }
+    unsafe {
+        std::env::set_var("__ENCHANTER_DAEMON_FOREGROUND", "1");
+    }
 
     // Exec the enchanter binary as the daemon
     unsafe {
@@ -628,7 +687,11 @@ pub async fn print_status() -> Result<()> {
         Ok(events) => {
             for event in events {
                 match event {
-                    Event::StatusInfo { model, mcp_servers, uptime_secs } => {
+                    Event::StatusInfo {
+                        model,
+                        mcp_servers,
+                        uptime_secs,
+                    } => {
                         println!("{}", "═══ DAEMON STATUS ═══".bright_cyan());
                         println!("  Model:       {}", model.bright_white());
                         println!("  MCP servers: {}", mcp_servers.join(", ").bright_white());
@@ -658,7 +721,13 @@ pub async fn print_status() -> Result<()> {
 
 /// Run a chat request through the daemon, printing events to stdout.
 /// Returns the final text response if available.
-pub async fn chat_via_daemon(prompt: &str, model: Option<String>, system: Option<String>, no_stream: bool, no_tools: bool) -> Result<Option<String>> {
+pub async fn chat_via_daemon(
+    prompt: &str,
+    model: Option<String>,
+    system: Option<String>,
+    no_stream: bool,
+    no_tools: bool,
+) -> Result<Option<String>> {
     let request = Request::Chat {
         prompt: prompt.to_string(),
         model,
@@ -669,16 +738,24 @@ pub async fn chat_via_daemon(prompt: &str, model: Option<String>, system: Option
 
     let mut stream = connect().await?;
     let jsonl = request.to_jsonl()?;
-    stream.write_all(format!("{}\n", jsonl).as_bytes()).await
+    stream
+        .write_all(format!("{}\n", jsonl).as_bytes())
+        .await
         .context("sending chat request to daemon")?;
-    stream.shutdown().await
+    stream
+        .shutdown()
+        .await
         .context("shutting down write side of daemon connection")?;
 
     let mut full_response = String::new();
     let reader = BufReader::new(stream);
     let mut lines = reader.lines();
 
-    while let Some(line) = lines.next_line().await.context("reading response from daemon")? {
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .context("reading response from daemon")?
+    {
         let line = line.trim().to_string();
         if line.is_empty() {
             continue;

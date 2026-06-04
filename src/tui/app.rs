@@ -37,8 +37,16 @@ impl Pane {
 pub enum ChatLine {
     User(String),
     Assistant(String),
-    ToolCall { name: String, #[allow(dead_code)] id: String },
-    ToolResult { #[allow(dead_code)] id: String, content: String },
+    ToolCall {
+        name: String,
+        #[allow(dead_code)]
+        id: String,
+    },
+    ToolResult {
+        #[allow(dead_code)]
+        id: String,
+        content: String,
+    },
     System(String),
     Error(String),
 }
@@ -149,7 +157,11 @@ impl App {
                 self.current_stream_text.push_str(&text);
                 self.chat_auto_scroll = true;
             }
-            Event::ToolCall { id, name, arguments: _ } => {
+            Event::ToolCall {
+                id,
+                name,
+                arguments: _,
+            } => {
                 // Finalize any streaming text first
                 self.finalize_stream();
                 self.chat_lines.push(ChatLine::ToolCall { name, id });
@@ -177,9 +189,9 @@ impl App {
 
     pub fn finalize_stream(&mut self) {
         if !self.current_stream_text.is_empty() {
-            self.chat_lines.push(ChatLine::Assistant(
-                std::mem::take(&mut self.current_stream_text),
-            ));
+            self.chat_lines.push(ChatLine::Assistant(std::mem::take(
+                &mut self.current_stream_text,
+            )));
         }
     }
 

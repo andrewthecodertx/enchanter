@@ -98,10 +98,9 @@ impl SkillsIndex {
         {
             if entry.file_name() == "SKILL.md"
                 && let Some(skill) = parse_skill_file(entry.path(), dir)
+                && !existing_names.contains(&skill.name)
             {
-                if !existing_names.contains(&skill.name) {
-                    self.skills.push(skill);
-                }
+                self.skills.push(skill);
             }
         }
 
@@ -200,7 +199,8 @@ mod tests {
 
     #[test]
     fn frontmatter_parsing() {
-        let content = "---\nname: my-skill\ndescription: Does stuff\n---\n\n# My Skill\n\nDo the thing.";
+        let content =
+            "---\nname: my-skill\ndescription: Does stuff\n---\n\n# My Skill\n\nDo the thing.";
         let (fm, body) = parse_frontmatter(content);
         assert_eq!(fm.name, Some("my-skill".to_string()));
         assert_eq!(fm.description, Some("Does stuff".to_string()));

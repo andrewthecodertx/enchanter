@@ -22,7 +22,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
-use crate::agent::{AgentSession, SessionInfo};
+use crate::agent::{AgentSession, SessionInfo, SessionOptions};
 use crate::config::{Config, ResolvedModel};
 use crate::recorder::Recorder;
 use crate::session::Session;
@@ -149,7 +149,8 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     // Discover project overlay (.enchanter/ in CWD or parents)
-    let overlay = std::env::current_dir().ok()
+    let overlay = std::env::current_dir()
+        .ok()
         .as_ref()
         .and_then(|cwd| crate::overlay::discover_overlay(cwd))
         .map(|path| crate::overlay::analyze_overlay(&path));
@@ -178,7 +179,8 @@ pub async fn run(args: Args) -> Result<()> {
                 args.system.clone(),
                 args.no_stream,
                 args.no_tools,
-            ).await;
+            )
+            .await;
 
             match result {
                 Ok(Some(text)) => {
@@ -207,7 +209,8 @@ pub async fn run(args: Args) -> Result<()> {
                     args.system.clone(),
                     args.no_stream,
                     args.no_tools,
-                ).await;
+                )
+                .await;
 
                 match result {
                     Ok(Some(text)) => {
@@ -223,7 +226,10 @@ pub async fn run(args: Args) -> Result<()> {
                     }
                 }
             } else {
-                eprintln!("{} Daemon did not become ready, falling back to inline mode", "Warning:".yellow());
+                eprintln!(
+                    "{} Daemon did not become ready, falling back to inline mode",
+                    "Warning:".yellow()
+                );
             }
         }
     }
@@ -237,15 +243,14 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Resolve initial model: -m flag > config
     let resolved = if let Some(model_flag) = &args.model {
-        config.resolve_provider(model_flag)
-            .unwrap_or_else(|| {
-                let default = config.resolve_default();
-                ResolvedModel {
-                    model: model_flag.clone(),
-                    base_url: default.base_url,
-                    api_key: default.api_key,
-                }
-            })
+        config.resolve_provider(model_flag).unwrap_or_else(|| {
+            let default = config.resolve_default();
+            ResolvedModel {
+                model: model_flag.clone(),
+                base_url: default.base_url,
+                api_key: default.api_key,
+            }
+        })
     } else {
         config.resolve_default()
     };
@@ -257,9 +262,11 @@ pub async fn run(args: Args) -> Result<()> {
         memory,
         skills,
         resolved,
-        args.no_stream,
-        args.no_tools,
-        args.system.clone(),
+        SessionOptions {
+            no_stream: args.no_stream,
+            no_tools: args.no_tools,
+            system_override: args.system.clone(),
+        },
     )?;
 
     // Initialize system prompt in session
@@ -294,7 +301,11 @@ pub async fn run(args: Args) -> Result<()> {
         )?;
         // Record prompt layer hashes
         let layers = crate::prompt::build_prompt_layers(
-            &agent.soul, &agent.memory, &agent.skills, &agent.config, &agent.resolved.model,
+            &agent.soul,
+            &agent.memory,
+            &agent.skills,
+            &agent.config,
+            &agent.resolved.model,
         );
         for layer in &layers.layers {
             use std::hash::Hasher;
@@ -313,14 +324,16 @@ pub async fn run(args: Args) -> Result<()> {
         let result = agent.chat(user_prompt).await;
         // Record assistant response
         if let (Some(rec), Ok(cr)) = (&mut recorder, &result)
-            && let Some(ref text) = cr.response {
-                rec.record_assistant_response(text)?;
-            }
+            && let Some(ref text) = cr.response
+        {
+            rec.record_assistant_response(text)?;
+        }
         if args.no_stream
             && let Ok(cr) = &result
-                && let Some(ref text) = cr.response {
-                    println!("{}", text);
-                }
+            && let Some(ref text) = cr.response
+        {
+            println!("{}", text);
+        }
         agent.shutdown_mcp().await;
         return result.map(|_| ());
     }
@@ -342,8 +355,15 @@ pub async fn run(args: Args) -> Result<()> {
                 if let Some(ref mut rec) = recorder {
                     let _ = rec.record_session_summary(&summary_text);
                 }
-                if let Err(e) = agent.memory.add_memory(format!("session_summary\n{}", summary_text)) {
-                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
+                if let Err(e) = agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", summary_text))
+                {
+                    eprintln!(
+                        "{} Failed to save session summary: {}",
+                        "Warning:".yellow(),
+                        e
+                    );
                 } else {
                     eprintln!("{}", "  Session summary saved to memory.".dimmed());
                 }
@@ -351,19 +371,41 @@ pub async fn run(args: Args) -> Result<()> {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => {
                 let fallback = summary::fallback_summary(&agent.messages);
-                if let Err(e2) = agent.memory.add_memory(format!("session_summary\n{}", fallback)) {
-                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e2);
+                if let Err(e2) = agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", fallback))
+                {
+                    eprintln!(
+                        "{} Failed to save session summary: {}",
+                        "Warning:".yellow(),
+                        e2
+                    );
                 } else {
-                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
+                    eprintln!(
+                        "{} Session saved (fallback: {})",
+                        "  ↳".dimmed(),
+                        fallback.dimmed()
+                    );
                 }
                 eprintln!("{} Summary generation failed: {}", "Warning:".yellow(), e);
             }
             Err(_) => {
                 let fallback = summary::fallback_summary(&agent.messages);
-                if let Err(e) = agent.memory.add_memory(format!("session_summary\n{}", fallback)) {
-                    eprintln!("{} Failed to save session summary: {}", "Warning:".yellow(), e);
+                if let Err(e) = agent
+                    .memory
+                    .add_memory(format!("session_summary\n{}", fallback))
+                {
+                    eprintln!(
+                        "{} Failed to save session summary: {}",
+                        "Warning:".yellow(),
+                        e
+                    );
                 } else {
-                    eprintln!("{} Session saved (fallback: {})", "  ↳".dimmed(), fallback.dimmed());
+                    eprintln!(
+                        "{} Session saved (fallback: {})",
+                        "  ↳".dimmed(),
+                        fallback.dimmed()
+                    );
                 }
                 eprintln!("{}", "  Summary timed out, using fallback.".dimmed());
             }
@@ -402,7 +444,11 @@ async fn handle_daemon_command(action: &DaemonAction, args: &Args) -> Result<()>
             eprintln!("{} Waiting for daemon to become ready...", "  ↳".dimmed());
             match crate::daemon::wait_for_socket(30).await {
                 Ok(()) => {
-                    eprintln!("{} Daemon is ready on {}", "✓".green(), crate::daemon::socket_path().display());
+                    eprintln!(
+                        "{} Daemon is ready on {}",
+                        "✓".green(),
+                        crate::daemon::socket_path().display()
+                    );
                 }
                 Err(e) => {
                     eprintln!("{} Daemon did not become ready: {}", "Warning:".yellow(), e);
@@ -452,15 +498,14 @@ async fn run_tui(
     skills: crate::skills::SkillsIndex,
 ) -> Result<()> {
     let resolved = if let Some(model_flag) = &args.model {
-        config.resolve_provider(model_flag)
-            .unwrap_or_else(|| {
-                let default = config.resolve_default();
-                ResolvedModel {
-                    model: model_flag.clone(),
-                    base_url: default.base_url,
-                    api_key: default.api_key,
-                }
-            })
+        config.resolve_provider(model_flag).unwrap_or_else(|| {
+            let default = config.resolve_default();
+            ResolvedModel {
+                model: model_flag.clone(),
+                base_url: default.base_url,
+                api_key: default.api_key,
+            }
+        })
     } else {
         config.resolve_default()
     };
@@ -471,9 +516,11 @@ async fn run_tui(
         memory,
         skills,
         resolved,
-        false, // streaming in TUI
-        args.no_tools,
-        args.system.clone(),
+        SessionOptions {
+            no_stream: false, // streaming in TUI
+            no_tools: args.no_tools,
+            system_override: args.system.clone(),
+        },
     )?;
 
     agent.session.append(&agent.messages[0])?;
@@ -499,7 +546,11 @@ fn handle_command(
             let cwd = std::env::current_dir()?;
             match crate::overlay::init_project_overlay(&cwd) {
                 Ok(path) => {
-                    println!("{} Created project overlay at {}", "✓".green(), path.display());
+                    println!(
+                        "{} Created project overlay at {}",
+                        "✓".green(),
+                        path.display()
+                    );
                 }
                 Err(e) => {
                     // Check if it's the "already exists" case
@@ -569,7 +620,11 @@ fn handle_command(
             println!("{}", "═══ CONFIG ═══".bright_cyan());
             println!("  Model:      {}", config.model_id());
             println!("  Base URL:   {}", config.base_url());
-            println!("  Max turns:  {} (soft limit: {})", config.max_turns(), config.soft_limit());
+            println!(
+                "  Max turns:  {} (soft limit: {})",
+                config.max_turns(),
+                config.soft_limit()
+            );
             println!(
                 "  API key:    {}",
                 if config.api_key().is_some() {
@@ -587,24 +642,43 @@ fn handle_command(
                         let model = p.model.as_deref().unwrap_or("(default)");
                         let base = p.base_url.as_deref().unwrap_or("(default)");
                         let key_status = if p.api_key.is_some() { "✓" } else { "—" };
-                        println!("    {} → {} | {} | key: {}", name.bright_green(), model, base, key_status);
+                        println!(
+                            "    {} → {} | {} | key: {}",
+                            name.bright_green(),
+                            model,
+                            base,
+                            key_status
+                        );
                     }
                 }
             }
         }
         Commands::Prompt { diff, budget } => {
-            let layers = crate::prompt::build_prompt_layers(soul, memory, skills, config, &config.model_id());
+            let layers = crate::prompt::build_prompt_layers(
+                soul,
+                memory,
+                skills,
+                config,
+                &config.model_id(),
+            );
             if *diff {
                 // Diff against itself (no previous state for CLI — show current layers)
                 // A meaningful diff requires two turns, so we show the current structure
                 println!("{}", "═══ PROMPT DIFF ═══".bright_cyan());
-                println!("{}", "(No previous prompt to diff against — showing current layer structure.)".dimmed());
+                println!(
+                    "{}",
+                    "(No previous prompt to diff against — showing current layer structure.)"
+                        .dimmed()
+                );
                 println!();
                 for layer in &layers.layers {
                     println!("  {} {}", "●".bright_cyan(), layer.name.bold());
                 }
                 println!();
-                println!("{}", "Use /prompt diff in a REPL session to diff between turns.".dimmed());
+                println!(
+                    "{}",
+                    "Use /prompt diff in a REPL session to diff between turns.".dimmed()
+                );
             } else if *budget {
                 let report = layers.budget();
                 println!("{}", report.render(4000));
@@ -615,67 +689,81 @@ fn handle_command(
                 println!("{}", system_prompt);
             }
         }
-        Commands::Replay { file, swap_model, exact, tools } => {
+        Commands::Replay {
+            file,
+            swap_model,
+            exact,
+            tools,
+        } => {
             let path = std::path::PathBuf::from(file);
-            let tools_mode = crate::replay::parse_tools_mode(tools)
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            crate::replay::replay_session(
-                &path,
-                swap_model.as_deref(),
-                *exact,
-                &tools_mode,
-            )?;
+            let tools_mode =
+                crate::replay::parse_tools_mode(tools).map_err(|e| anyhow::anyhow!("{}", e))?;
+            crate::replay::replay_session(&path, swap_model.as_deref(), *exact, &tools_mode)?;
         }
-        Commands::Sessions { id } => {
-            match id {
-                Some(session_id) => {
-                    match Session::load(session_id) {
-                        Ok(entries) => {
-                            let messages = Session::entries_to_messages(&entries);
-                            if messages.is_empty() {
-                                println!("{} Session {} is empty.", "Note:".dimmed(), session_id);
-                            } else {
-                                println!("{} Session {} ({} messages)", "═══ SESSION ═══".bright_cyan(), session_id, messages.len());
-                                for msg in &messages {
-                                    match msg.role.as_str() {
-                                        "system" => continue,
-                                        "user" => println!("{} {}", "⟩".bright_blue(), msg.content.as_deref().unwrap_or("")),
-                                        "assistant" => {
-                                            if let Some(content) = &msg.content {
-                                                println!("{} {}", "⟨".bright_green(), content.chars().take(200).collect::<String>());
-                                            } else if msg.tool_calls.is_some() {
-                                                println!("{} [used tools]", "⟨".dimmed());
-                                            }
-                                        }
-                                        "tool" => continue,
-                                        _ => continue,
+        Commands::Sessions { id } => match id {
+            Some(session_id) => match Session::load(session_id) {
+                Ok(entries) => {
+                    let messages = Session::entries_to_messages(&entries);
+                    if messages.is_empty() {
+                        println!("{} Session {} is empty.", "Note:".dimmed(), session_id);
+                    } else {
+                        println!(
+                            "{} Session {} ({} messages)",
+                            "═══ SESSION ═══".bright_cyan(),
+                            session_id,
+                            messages.len()
+                        );
+                        for msg in &messages {
+                            match msg.role.as_str() {
+                                "system" => continue,
+                                "user" => println!(
+                                    "{} {}",
+                                    "⟩".bright_blue(),
+                                    msg.content.as_deref().unwrap_or("")
+                                ),
+                                "assistant" => {
+                                    if let Some(content) = &msg.content {
+                                        println!(
+                                            "{} {}",
+                                            "⟨".bright_green(),
+                                            content.chars().take(200).collect::<String>()
+                                        );
+                                    } else if msg.tool_calls.is_some() {
+                                        println!("{} [used tools]", "⟨".dimmed());
                                     }
                                 }
+                                "tool" => continue,
+                                _ => continue,
                             }
                         }
-                        Err(e) => println!("{} Session '{}' not found: {}", "Error:".red(), session_id, e),
                     }
                 }
-                None => {
-                    let sessions = Session::list_all()?;
-                    if sessions.is_empty() {
-                        println!("No sessions found.");
-                    } else {
-                        println!("{}", "═══ SESSIONS ═══".bright_cyan());
-                        for s in &sessions {
-                            let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
-                            println!(
-                                "  {}{}  {} msgs, {}",
-                                short_id.bright_white(),
-                                "…".dimmed(),
-                                format!("{}", s.message_count).bright_blue(),
-                                format_bytes(s.file_size).dimmed()
-                            );
-                        }
+                Err(e) => println!(
+                    "{} Session '{}' not found: {}",
+                    "Error:".red(),
+                    session_id,
+                    e
+                ),
+            },
+            None => {
+                let sessions = Session::list_all()?;
+                if sessions.is_empty() {
+                    println!("No sessions found.");
+                } else {
+                    println!("{}", "═══ SESSIONS ═══".bright_cyan());
+                    for s in &sessions {
+                        let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                        println!(
+                            "  {}{}  {} msgs, {}",
+                            short_id.bright_white(),
+                            "…".dimmed(),
+                            format!("{}", s.message_count).bright_blue(),
+                            format_bytes(s.file_size).dimmed()
+                        );
                     }
                 }
             }
-        }
+        },
         #[cfg(unix)]
         Commands::Daemon { .. } => {
             // Handled in run() before this
@@ -690,7 +778,11 @@ fn handle_command(
     Ok(())
 }
 
-async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&mut Recorder>) -> Result<()> {
+async fn run_repl(
+    agent: &mut AgentSession,
+    _args: &Args,
+    mut recorder: Option<&mut Recorder>,
+) -> Result<()> {
     let info = agent.info();
     print_banner(&info);
 
@@ -747,12 +839,23 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                             continue;
                         }
                         "/prompt" => {
-                            println!("{}", agent.messages.first().map(|m| m.content.as_deref().unwrap_or("")).unwrap_or(""));
+                            println!(
+                                "{}",
+                                agent
+                                    .messages
+                                    .first()
+                                    .map(|m| m.content.as_deref().unwrap_or(""))
+                                    .unwrap_or("")
+                            );
                             continue;
                         }
                         cmd if cmd.starts_with("/prompt diff") => {
                             let layers = crate::prompt::build_prompt_layers(
-                                &agent.soul, &agent.memory, &agent.skills, &agent.config, &agent.resolved.model,
+                                &agent.soul,
+                                &agent.memory,
+                                &agent.skills,
+                                &agent.config,
+                                &agent.resolved.model,
                             );
                             if let Some(prev_layers) = &agent.previous_prompt_layers {
                                 let diff_result = layers.diff(prev_layers);
@@ -772,7 +875,11 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                         }
                         cmd if cmd.starts_with("/prompt budget") => {
                             let layers = crate::prompt::build_prompt_layers(
-                                &agent.soul, &agent.memory, &agent.skills, &agent.config, &agent.resolved.model,
+                                &agent.soul,
+                                &agent.memory,
+                                &agent.skills,
+                                &agent.config,
+                                &agent.resolved.model,
                             );
                             let report = layers.budget();
                             println!("{}", report.render(4000));
@@ -790,7 +897,8 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                                     } else {
                                         println!("{}", "═══ SESSIONS ═══".bright_cyan());
                                         for s in &sessions {
-                                            let short_id = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                                            let short_id =
+                                                if s.id.len() > 8 { &s.id[..8] } else { &s.id };
                                             println!(
                                                 "  {}{}  {} msgs, {}",
                                                 short_id.bright_white(),
@@ -801,7 +909,9 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                                         }
                                     }
                                 }
-                                Err(e) => eprintln!("{} Could not list sessions: {}", "Error:".red(), e),
+                                Err(e) => {
+                                    eprintln!("{} Could not list sessions: {}", "Error:".red(), e)
+                                }
                             }
                             continue;
                         }
@@ -811,22 +921,29 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                                 let old_model = agent.resolved.model.clone();
                                 let new_name = new_name.trim().to_string();
                                 if new_name.is_empty() {
-                                    println!("{} Usage: /model <name> (provider name from config or model ID)", "Error:".red());
+                                    println!(
+                                        "{} Usage: /model <name> (provider name from config or model ID)",
+                                        "Error:".red()
+                                    );
                                 } else {
-                                    match agent
-                                        .switch_model(&new_name)
-                                    {
+                                    match agent.switch_model(&new_name) {
                                         Ok(provider_label) => {
                                             // Record model change
                                             if let Some(ref mut rec) = recorder {
                                                 rec.record_model_change(&old_model, &new_name)?;
                                             }
                                             let info = agent.info();
-                                            println!("{} Switched to {}", "✓".green(), provider_label.bright_white());
-                                            println!("  {} {} | API key: {}",
+                                            println!(
+                                                "{} Switched to {}",
+                                                "✓".green(),
+                                                provider_label.bright_white()
+                                            );
+                                            println!(
+                                                "  {} {} | API key: {}",
                                                 "↳".dimmed(),
                                                 info.base_url.bright_white(),
-                                                if info.api_key_set { "set" } else { "none" }.dimmed()
+                                                if info.api_key_set { "set" } else { "none" }
+                                                    .dimmed()
                                             );
                                         }
                                         Err(e) => eprintln!("{} {}", "Error:".red(), e),
@@ -838,14 +955,20 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                                 match agent.retry().await {
                                     Ok(cr) => {
                                         if agent.no_stream
-                                            && let Some(ref text) = cr.response {
-                                                println!("{}", text);
-                                            }
+                                            && let Some(ref text) = cr.response
+                                        {
+                                            println!("{}", text);
+                                        }
                                     }
                                     Err(e) => {
                                         eprintln!("{} {}", "Error:".red(), e);
                                         // Remove the failed user message if it's still there
-                                        if !agent.messages.is_empty() && agent.messages.last().is_some_and(|m| m.role == "user") {
+                                        if !agent.messages.is_empty()
+                                            && agent
+                                                .messages
+                                                .last()
+                                                .is_some_and(|m| m.role == "user")
+                                        {
                                             agent.messages.pop();
                                         }
                                     }
@@ -875,13 +998,15 @@ async fn run_repl(agent: &mut AgentSession, _args: &Args, mut recorder: Option<&
                     Ok(cr) => {
                         // Record assistant response
                         if let Some(ref mut rec) = recorder
-                            && let Some(ref text) = cr.response {
-                                rec.record_assistant_response(text)?;
-                            }
+                            && let Some(ref text) = cr.response
+                        {
+                            rec.record_assistant_response(text)?;
+                        }
                         if agent.no_stream
-                            && let Some(ref text) = cr.response {
-                                println!("{}", text);
-                            }
+                            && let Some(ref text) = cr.response
+                        {
+                            println!("{}", text);
+                        }
                     }
                     Err(e) => {
                         eprintln!("{} {}", "Error:".red(), e);
@@ -915,14 +1040,19 @@ fn print_banner(info: &SessionInfo) {
         String::new()
     };
 
-    let short_session_id = if info.session_id.len() > 8 { &info.session_id[..8] } else { &info.session_id };
+    let short_session_id = if info.session_id.len() > 8 {
+        &info.session_id[..8]
+    } else {
+        &info.session_id
+    };
     println!(
         "\n  {} {}  session={}",
         "⟡".bright_magenta(),
         name.bright_cyan().bold(),
         short_session_id.dimmed()
     );
-    let short_url = info.base_url
+    let short_url = info
+        .base_url
         .trim_end_matches('/')
         .replace("https://api.openai.com/v1", "openai")
         .replace("http://localhost:11434/v1", "ollama")
@@ -941,7 +1071,6 @@ fn print_banner(info: &SessionInfo) {
 }
 
 fn print_tools(mcp: &crate::mcp::McpManager) {
-
     println!("{}", "═══ TOOLS ═══".bright_cyan());
 
     println!("{}", "── BUILT-IN ──".bright_blue());
@@ -965,11 +1094,15 @@ fn print_tools(mcp: &crate::mcp::McpManager) {
             println!("  [{}]", server_name.bright_green());
             let mcp_tools = mcp.all_tools_json();
             for tool in &mcp_tools {
-                if let Some(name) = tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str())
+                if let Some(name) = tool
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
                     && name.starts_with(&format!("{}:", server_name))
                 {
                     let short_name = &name[server_name.len() + 1..];
-                    let desc = tool.get("function")
+                    let desc = tool
+                        .get("function")
                         .and_then(|f| f.get("description"))
                         .and_then(|d| d.as_str())
                         .map(|d| format!(" — {}", d.lines().next().unwrap_or("")))
@@ -992,14 +1125,23 @@ fn print_help(config: &Config) {
         ("/memory", "Show loaded memory"),
         ("/skills", "List discovered skills"),
         ("/tools", "List all available tools (built-in + MCP)"),
-        ("/model <name>", "Switch model or provider (see config.yaml providers)"),
+        (
+            "/model <name>",
+            "Switch model or provider (see config.yaml providers)",
+        ),
         ("/retry", "Re-send the last user message"),
         ("/undo", "Remove last exchange from history"),
         ("/sessions", "List session history"),
         ("/config", "Show resolved configuration"),
         ("/prompt", "Show assembled system prompt"),
-        ("/prompt diff", "Show diff of system prompt from previous turn"),
-        ("/prompt budget", "Show token/character budget per prompt layer"),
+        (
+            "/prompt diff",
+            "Show diff of system prompt from previous turn",
+        ),
+        (
+            "/prompt budget",
+            "Show token/character budget per prompt layer",
+        ),
         ("/exit, /quit, /bye", "Exit the REPL"),
     ];
 
@@ -1029,7 +1171,16 @@ fn print_init_guidance() {
         home.display().to_string().bright_white()
     );
     println!("  Created:");
-    println!("    {}/SOUL.md       — edit to set your agent's persona", home.display());
-    println!("    {}/config.yaml   — set model, base_url, api_key, MCP servers", home.display());
-    println!("    {}/memories/     — MEMORY.md & USER.md go here", home.display());
+    println!(
+        "    {}/SOUL.md       — edit to set your agent's persona",
+        home.display()
+    );
+    println!(
+        "    {}/config.yaml   — set model, base_url, api_key, MCP servers",
+        home.display()
+    );
+    println!(
+        "    {}/memories/     — MEMORY.md & USER.md go here",
+        home.display()
+    );
 }

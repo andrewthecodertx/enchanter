@@ -82,10 +82,7 @@ fn build_summary_prompt(messages: &[Message]) -> String {
 ///
 /// Uses a non-streaming call with a 10-second timeout.
 /// Falls back to a minimal summary on timeout or error.
-pub async fn generate_session_summary(
-    client: &LlmClient,
-    messages: &[Message],
-) -> Result<String> {
+pub async fn generate_session_summary(client: &LlmClient, messages: &[Message]) -> Result<String> {
     if !should_summarize(messages) {
         return Ok(String::new());
     }
@@ -95,7 +92,7 @@ pub async fn generate_session_summary(
         Message::system(
             "You are a session summarizer. Produce concise, factual summaries. \
              Format as bullet points starting with '- '. \
-             Focus on what was done and decided, not on meta-conversation."
+             Focus on what was done and decided, not on meta-conversation.",
         ),
         Message::user(&prompt),
     ];
@@ -133,10 +130,7 @@ mod tests {
 
     #[test]
     fn should_not_summarize_single_user() {
-        let messages = vec![
-            Message::system("You are helpful."),
-            Message::user("hello"),
-        ];
+        let messages = vec![Message::system("You are helpful."), Message::user("hello")];
         assert!(!should_summarize(&messages));
     }
 
