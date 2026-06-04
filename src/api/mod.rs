@@ -129,14 +129,14 @@ impl ChatResult {
 // ── API request/response types ──────────────────────────────────
 
 #[derive(Debug, Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<Message>,
+struct ChatRequest<'a> {
+    model: &'a str,
+    messages: &'a [Message],
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Value>,
+    tools: Option<&'a Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,8 +232,8 @@ impl LlmClient {
     /// provider layer (opencode/packages/opencode/src/provider/).
     pub async fn chat_stream_with<F>(
         &self,
-        messages: Vec<Message>,
-        tools: Option<Value>,
+        messages: &[Message],
+        tools: Option<&Value>,
         mut on_token: F,
     ) -> Result<ChatResult>
     where
@@ -242,7 +242,7 @@ impl LlmClient {
         let url = format!("{}/chat/completions", self.base_url);
 
         let request = ChatRequest {
-            model: self.model.clone(),
+            model: &self.model,
             messages,
             stream: true,
             temperature: None,
@@ -363,8 +363,8 @@ impl LlmClient {
     /// Convenience wrapper: streaming chat that prints tokens to stdout.
     pub async fn chat_stream(
         &self,
-        messages: Vec<Message>,
-        tools: Option<Value>,
+        messages: &[Message],
+        tools: Option<&Value>,
     ) -> Result<ChatResult> {
         use std::io::Write;
         let result = self
@@ -380,11 +380,11 @@ impl LlmClient {
     }
 
     /// Non-streaming chat.
-    pub async fn chat(&self, messages: Vec<Message>, tools: Option<Value>) -> Result<ChatResult> {
+    pub async fn chat(&self, messages: &[Message], tools: Option<&Value>) -> Result<ChatResult> {
         let url = format!("{}/chat/completions", self.base_url);
 
         let request = ChatRequest {
-            model: self.model.clone(),
+            model: &self.model,
             messages,
             stream: false,
             temperature: None,

@@ -784,6 +784,12 @@ pub async fn chat_via_daemon(
                             };
                             println!("  {}", truncated);
                         }
+                    Event::Compacted { removed_messages, budget_tokens } => {
+                        eprintln!(
+                            "\n  {} Compacted {} earlier message(s) to stay within the context budget (~{} tokens).",
+                            "⟡".dimmed(), removed_messages, budget_tokens
+                        );
+                    }
                     Event::Done
                         if !full_response.is_empty() => {
                             println!(); // Trailing newline after content

@@ -171,6 +171,17 @@ impl App {
                 self.chat_lines.push(ChatLine::ToolResult { id, content });
                 self.chat_auto_scroll = true;
             }
+            Event::Compacted {
+                removed_messages,
+                budget_tokens,
+            } => {
+                self.finalize_stream();
+                self.chat_lines.push(ChatLine::System(format!(
+                    "Compacted {} earlier message(s) to stay within the context budget (~{} tokens).",
+                    removed_messages, budget_tokens
+                )));
+                self.chat_auto_scroll = true;
+            }
             Event::Done => {
                 self.finalize_stream();
                 self.streaming = false;

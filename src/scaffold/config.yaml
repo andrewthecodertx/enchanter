@@ -51,6 +51,9 @@ agent:
   # memory:
   #   max_entries: 50                   # Max memory entries loaded into prompt
   #   summarize_threshold: 40           # Summarize old entries when count exceeds this
+  # context:                            # Rolling conversation context (long sessions)
+  #   max_tokens: 96000                 # Compact older turns when the live window exceeds this (est. chars/4)
+  #   keep_last_turns: 20               # Always keep this many most-recent messages verbatim
 
 # MCP servers — extend Enchanter with external tool servers
 # Tools from MCP servers are namespaced as server_name:tool_name

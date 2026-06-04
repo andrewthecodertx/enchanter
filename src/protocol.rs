@@ -49,6 +49,12 @@ pub enum Event {
     },
     /// A tool call has completed with a result.
     ToolResult { id: String, content: String },
+    /// Older conversation turns were rolled up into a summary to stay within the
+    /// context budget. Informational — the turn continues normally afterward.
+    Compacted {
+        removed_messages: usize,
+        budget_tokens: u64,
+    },
     /// The response is complete.
     Done,
     /// Response to a Ping.
@@ -257,6 +263,26 @@ mod tests {
     }
 
     #[test]
+    fn compacted_event_roundtrip() {
+        let event = Event::Compacted {
+            removed_messages: 12,
+            budget_tokens: 96_000,
+        };
+        let json = event.to_jsonl().unwrap();
+        assert!(json.contains(r#""type":"compacted""#));
+        match Event::from_jsonl(&json).unwrap() {
+            Event::Compacted {
+                removed_messages,
+                budget_tokens,
+            } => {
+                assert_eq!(removed_messages, 12);
+                assert_eq!(budget_tokens, 96_000);
+            }
+            other => panic!("expected Compacted, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn status_info_event_roundtrip() {
         let event = Event::StatusInfo {
             model: "gpt-4.1".into(),
@@ -358,6 +384,10 @@ mod tests {
                 r#"{"type":"status_info","model":"gpt-4.1","uptime_secs":100}"#,
                 "status_info",
             ),
+            (
+                r#"{"type":"compacted","removed_messages":5,"budget_tokens":96000}"#,
+                "compacted",
+            ),
             (r#"{"type":"error","message":"fail"}"#, "error"),
         ];
         for (json, label) in cases {
@@ -369,6 +399,7 @@ mod tests {
                 "done" => assert!(matches!(evt, Event::Done)),
                 "pong" => assert!(matches!(evt, Event::Pong)),
                 "status_info" => assert!(matches!(evt, Event::StatusInfo { .. })),
+                "compacted" => assert!(matches!(evt, Event::Compacted { .. })),
                 "error" => assert!(matches!(evt, Event::Error { .. })),
                 _ => panic!("unknown label"),
             }

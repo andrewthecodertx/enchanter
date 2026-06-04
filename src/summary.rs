@@ -100,12 +100,99 @@ pub async fn generate_session_summary(client: &LlmClient, messages: &[Message]) 
     // Non-streaming call — we don't need to display it
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        client.chat(summary_messages, None),
+        client.chat(&summary_messages, None),
     )
     .await??;
 
     let summary = result.content.unwrap_or_default();
     Ok(summary)
+}
+
+/// Truncate a string to at most `max` chars without splitting a UTF-8 code
+/// point (plain slicing like `&s[..n]` panics on a multibyte boundary).
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max).collect();
+        format!("{}…[truncated]", truncated)
+    }
+}
+
+/// Render conversation turns for compaction, preserving the detail an agent
+/// needs to keep working: tool calls (name + arguments) and tool results, not
+/// just "[used tools]". Each message is individually truncated to bound size.
+fn build_compaction_prompt(messages: &[Message]) -> String {
+    let mut turns = Vec::new();
+    for msg in messages {
+        match msg.role.as_str() {
+            "system" => continue,
+            "user" => {
+                if let Some(content) = &msg.content {
+                    turns.push(format!("User: {}", truncate_chars(content, 1000)));
+                }
+            }
+            "assistant" => {
+                if let Some(content) = &msg.content
+                    && !content.is_empty()
+                {
+                    turns.push(format!("Assistant: {}", truncate_chars(content, 1000)));
+                }
+                if let Some(tool_calls) = &msg.tool_calls {
+                    for tc in tool_calls {
+                        turns.push(format!(
+                            "Assistant called `{}` with {}",
+                            tc.function.name,
+                            truncate_chars(&tc.function.arguments, 300)
+                        ));
+                    }
+                }
+            }
+            "tool" => {
+                if let Some(content) = &msg.content {
+                    turns.push(format!("Tool result: {}", truncate_chars(content, 500)));
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    let conversation = turns.join("\n");
+    format!(
+        "The following is the earlier portion of an ongoing agent session that \
+         must be condensed to free up context. Write a dense, factual summary \
+         that preserves everything needed to CONTINUE the work: the user's \
+         goals and constraints, decisions made, files and paths touched, \
+         important command/tool results and errors, and any open or pending \
+         tasks. Prefer specifics (names, paths, values) over generalities. Do \
+         not add commentary.\n\n{}",
+        truncate_chars(&conversation, 16_000)
+    )
+}
+
+/// Summarize older conversation turns into a single synthetic message body for
+/// rolling compaction. Returns the summary text (without role framing).
+///
+/// Non-streaming with a 20-second timeout (longer than the on-exit summary
+/// since the input is larger and the result is load-bearing).
+pub async fn summarize_for_compaction(client: &LlmClient, messages: &[Message]) -> Result<String> {
+    let prompt = build_compaction_prompt(messages);
+    let summary_messages = vec![
+        Message::system(
+            "You compress agent conversation history. Produce a dense, factual \
+             summary that lets the agent resume seamlessly. No preamble, no \
+             meta-commentary — just the substance.",
+        ),
+        Message::user(&prompt),
+    ];
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client.chat(&summary_messages, None),
+    )
+    .await??;
+
+    Ok(result.content.unwrap_or_default())
 }
 
 /// Generate a fallback summary when the LLM call fails or times out.
@@ -168,6 +255,44 @@ mod tests {
         assert!(!prompt.contains("You are helpful")); // system excluded
         assert!(prompt.contains("[used tools]")); // assistant with tool calls
         assert!(prompt.contains("The answer is 4."));
+    }
+
+    #[test]
+    fn truncate_chars_is_utf8_safe() {
+        // Plain `&s[..n]` would panic mid code point here; truncate_chars must not.
+        let s = "héllo wörld ✨ über";
+        let out = truncate_chars(s, 5);
+        assert!(out.starts_with("héllo"));
+        assert!(out.contains("truncated"));
+        // Short strings pass through untouched.
+        assert_eq!(truncate_chars("hi", 10), "hi");
+    }
+
+    #[test]
+    fn compaction_prompt_keeps_tool_detail() {
+        let messages = vec![
+            Message::system("ignored"),
+            Message::user("build the thing"),
+            Message::assistant_with_tools(
+                vec![crate::api::ToolCall {
+                    id: "1".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::api::ToolCallFunction {
+                        name: "exec_command".to_string(),
+                        arguments: "{\"command\":\"cargo build\"}".to_string(),
+                    },
+                }],
+                None,
+            ),
+            Message::tool_result("1", "compiled OK"),
+        ];
+        let prompt = build_compaction_prompt(&messages);
+        assert!(prompt.contains("build the thing"));
+        // Unlike the session summarizer, tool name/args and results are kept.
+        assert!(prompt.contains("exec_command"));
+        assert!(prompt.contains("cargo build"));
+        assert!(prompt.contains("compiled OK"));
+        assert!(!prompt.contains("ignored")); // system excluded
     }
 
     #[test]

@@ -321,6 +321,57 @@ impl AgentSession {
         self.run_loop(EventSink::Channel(tx.clone())).await
     }
 
+    /// Compact the live message window if its estimated token count exceeds the
+    /// configured budget. Keeps the system prompt and the most recent turns
+    /// verbatim, replacing the older span with a single synthetic summary
+    /// message. The full conversation is still preserved on disk (session JSONL)
+    /// — this only trims what is re-sent to the model each turn.
+    ///
+    /// On summarizer failure the window is left untouched (never drops history
+    /// uncondensed), so a flaky summary call degrades to a longer prompt rather
+    /// than lost context.
+    async fn compact_if_needed(&mut self, sink: &EventSink) {
+        let cfg = self.config.context_config();
+        let max_tokens = cfg.max_tokens;
+        let keep_last = cfg.keep_last_turns;
+
+        // max_tokens == 0 disables compaction entirely.
+        if max_tokens == 0 || estimate_messages_tokens(&self.messages) <= max_tokens {
+            return;
+        }
+
+        let Some(split) = compaction_split(&self.messages, keep_last) else {
+            return;
+        };
+
+        // Clone the span to summarize so we don't hold a borrow across the await.
+        let head: Vec<Message> = self.messages[1..split].to_vec();
+        let summary = match crate::summary::summarize_for_compaction(&self.client, &head).await {
+            Ok(s) if !s.trim().is_empty() => s,
+            _ => return,
+        };
+
+        let removed = split - 1;
+        self.messages = apply_compaction(&self.messages, split, &summary);
+
+        // Surface it the same way streaming output is surfaced: as an event for
+        // channel consumers (daemon, TUI), and as a direct stderr notice for the
+        // REPL/inline path, which prints rather than consuming events.
+        match sink {
+            EventSink::Channel(_) => sink.send(Event::Compacted {
+                removed_messages: removed,
+                budget_tokens: max_tokens,
+            }),
+            EventSink::Silent => {
+                let note = format!(
+                    "Compacted {} earlier message(s) into a summary to stay within the context budget (~{} tokens).",
+                    removed, max_tokens
+                );
+                eprintln!("{} {}", "⟡".dimmed(), note.dimmed());
+            }
+        }
+    }
+
     /// Core agent loop: call model, handle tool_calls, with soft-limit nudging
     /// and a hard turn limit as a safety net.
     async fn run_loop(&mut self, sink: EventSink) -> Result<ChatResult> {
@@ -333,6 +384,9 @@ impl AgentSession {
         for turn in 0..max_turns {
             let turns_remaining = max_turns.saturating_sub(turn);
 
+            // Roll up older turns into a summary if the live window is over budget.
+            self.compact_if_needed(&sink).await;
+
             if !soft_limit_triggered && soft_limit > 0 && turns_remaining <= soft_limit {
                 soft_limit_triggered = true;
                 let nudge = format!(
@@ -344,26 +398,22 @@ impl AgentSession {
 
             let result = if self.no_stream {
                 self.client
-                    .chat(self.messages.clone(), tools_payload.clone())
+                    .chat(&self.messages, tools_payload.as_ref())
                     .await?
             } else {
                 match &sink {
                     EventSink::Channel(tx) => {
                         self.client
-                            .chat_stream_with(
-                                self.messages.clone(),
-                                tools_payload.clone(),
-                                |token| {
-                                    let _ = tx.send(Event::Content {
-                                        text: token.to_string(),
-                                    });
-                                },
-                            )
+                            .chat_stream_with(&self.messages, tools_payload.as_ref(), |token| {
+                                let _ = tx.send(Event::Content {
+                                    text: token.to_string(),
+                                });
+                            })
                             .await?
                     }
                     EventSink::Silent => {
                         self.client
-                            .chat_stream(self.messages.clone(), tools_payload.clone())
+                            .chat_stream(&self.messages, tools_payload.as_ref())
                             .await?
                     }
                 }
@@ -489,5 +539,158 @@ async fn dispatch_tool(
         }
     } else {
         format!("Unknown tool: {}", name)
+    }
+}
+
+// ── Rolling-context compaction helpers (pure, unit-tested) ──────────
+
+/// Estimate the token footprint of a single message: content plus any tool-call
+/// names and arguments. Uses the shared chars÷4 heuristic.
+fn estimate_message_tokens(msg: &Message) -> u64 {
+    use crate::prompt::inspect::estimate_tokens;
+    let mut total = msg.content.as_deref().map(estimate_tokens).unwrap_or(0);
+    if let Some(tool_calls) = &msg.tool_calls {
+        for tc in tool_calls {
+            total += estimate_tokens(&tc.function.name);
+            total += estimate_tokens(&tc.function.arguments);
+        }
+    }
+    total
+}
+
+/// Estimate the total token footprint of a message window.
+fn estimate_messages_tokens(messages: &[Message]) -> u64 {
+    messages.iter().map(estimate_message_tokens).sum()
+}
+
+/// Decide where to split history for compaction. Returns the index at which the
+/// kept (verbatim) tail begins: messages `[1..split]` are summarized and
+/// `[split..]` are kept, with `messages[0]` (the system prompt) always retained.
+///
+/// The split is chosen at a clean turn boundary — the first `user` message at or
+/// after `len - keep_last_turns` — so a kept `tool` result is never separated
+/// from the assistant tool-call message it answers (which OpenAI-compatible APIs
+/// reject). Returns `None` when there is nothing safe to compact (too short, or
+/// no clean boundary leaves at least one message to summarize).
+fn compaction_split(messages: &[Message], keep_last_turns: usize) -> Option<usize> {
+    let n = messages.len();
+    // Need at least system + 2 messages to have anything worth compacting.
+    if n < 3 {
+        return None;
+    }
+    let naive = n.saturating_sub(keep_last_turns).max(1);
+    // Walk forward to the first clean user-turn boundary.
+    (naive..n)
+        .find(|&i| messages[i].role == "user")
+        // Need at least one non-system message before the split to summarize.
+        .filter(|&i| i >= 2)
+}
+
+/// Build the compacted message window: system prompt, a synthetic summary
+/// message standing in for `[1..split]`, then the kept tail `[split..]`.
+fn apply_compaction(messages: &[Message], split: usize, summary: &str) -> Vec<Message> {
+    let mut out = Vec::with_capacity(messages.len() - split + 2);
+    out.push(messages[0].clone());
+    out.push(Message::user(format!(
+        "[Summary of earlier conversation, condensed to save context]\n{}",
+        summary
+    )));
+    out.extend_from_slice(&messages[split..]);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{ToolCall, ToolCallFunction};
+
+    fn tool_call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "exec_command".to_string(),
+                arguments: "{\"command\":\"ls\"}".to_string(),
+            },
+        }
+    }
+
+    /// system + two tool-using turns + a final plain turn (11 messages).
+    fn sample_history() -> Vec<Message> {
+        vec![
+            Message::system("SYSTEM"),                                 // 0
+            Message::user("q1"),                                       // 1
+            Message::assistant_with_tools(vec![tool_call("a")], None), // 2
+            Message::tool_result("a", "result a"),                     // 3
+            Message::assistant("answer1"),                             // 4
+            Message::user("q2"),                                       // 5
+            Message::assistant_with_tools(vec![tool_call("b")], None), // 6
+            Message::tool_result("b", "result b"),                     // 7
+            Message::assistant("answer2"),                             // 8
+            Message::user("q3"),                                       // 9
+            Message::assistant("answer3"),                             // 10
+        ]
+    }
+
+    #[test]
+    fn estimate_tokens_sums_content_and_tool_calls() {
+        let msgs = vec![
+            Message::user("hello world"), // 11 chars → 3 tokens
+            Message::assistant_with_tools(vec![tool_call("a")], None),
+        ];
+        // Non-zero and equals the sum of the parts.
+        let total = estimate_messages_tokens(&msgs);
+        assert_eq!(
+            total,
+            estimate_message_tokens(&msgs[0]) + estimate_message_tokens(&msgs[1])
+        );
+        assert!(estimate_message_tokens(&msgs[1]) > 0); // tool name+args counted
+    }
+
+    #[test]
+    fn split_picks_clean_user_boundary() {
+        let h = sample_history();
+        // keep_last_turns=3 → naive=8 (assistant answer2); next user is index 9.
+        let split = compaction_split(&h, 3).unwrap();
+        assert_eq!(split, 9);
+        assert_eq!(h[split].role, "user");
+    }
+
+    #[test]
+    fn split_never_orphans_a_tool_result() {
+        let h = sample_history();
+        // keep_last_turns=4 → naive=7 (a tool result). Must skip forward to the
+        // user boundary at 9, never leaving a tool message at the tail head.
+        let split = compaction_split(&h, 4).unwrap();
+        assert_eq!(h[split].role, "user");
+        assert_ne!(h[split].role, "tool");
+    }
+
+    #[test]
+    fn split_returns_none_when_nothing_to_compact() {
+        let h = sample_history();
+        // Keeping more than the whole history → no compaction.
+        assert!(compaction_split(&h, 100).is_none());
+        // keep_last_turns=0 → naive past the end → no boundary.
+        assert!(compaction_split(&h, 0).is_none());
+        // Too short to bother.
+        assert!(compaction_split(&[Message::system("s"), Message::user("u")], 1).is_none());
+    }
+
+    #[test]
+    fn apply_compaction_preserves_system_and_tail() {
+        let h = sample_history();
+        let split = compaction_split(&h, 3).unwrap();
+        let out = apply_compaction(&h, split, "SUMMARY TEXT");
+
+        // system, summary, then the kept tail (q3, answer3).
+        assert_eq!(out.len(), 2 + (h.len() - split));
+        assert_eq!(out[0].role, "system");
+        assert_eq!(out[0].content.as_deref(), Some("SYSTEM"));
+        assert!(out[1].content.as_deref().unwrap().contains("SUMMARY TEXT"));
+        // Tail starts at a clean user boundary — no orphaned tool result.
+        assert_eq!(out[2].role, "user");
+        assert_eq!(out[2].content.as_deref(), Some("q3"));
+        assert_eq!(out.last().unwrap().content.as_deref(), Some("answer3"));
     }
 }

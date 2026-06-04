@@ -100,10 +100,47 @@ pub struct AgentConfig {
     pub memory: MemoryConfig,
     #[serde(default = "default_true")]
     pub summarize_on_exit: Option<bool>,
+    #[serde(default)]
+    pub context: ContextConfig,
 }
 
 fn default_true() -> Option<bool> {
     Some(true)
+}
+
+/// Rolling-context (conversation compaction) settings.
+///
+/// When the estimated token count of the live message window exceeds
+/// `max_tokens`, older turns are summarized into a single synthetic message
+/// while the system prompt and the most recent `keep_last_turns` user/assistant
+/// turns are kept verbatim. Estimation uses the chars÷4 heuristic shared with
+/// the `/prompt budget` report — approximate, intentionally conservative.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContextConfig {
+    /// Token budget for the live window before compaction triggers.
+    #[serde(default = "default_context_max_tokens")]
+    pub max_tokens: u64,
+    /// Number of most-recent turns to always keep verbatim (a "turn" here is a
+    /// single message in history — user, assistant, or tool result).
+    #[serde(default = "default_keep_last_turns")]
+    pub keep_last_turns: usize,
+}
+
+fn default_context_max_tokens() -> u64 {
+    96_000
+}
+
+fn default_keep_last_turns() -> usize {
+    20
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens: default_context_max_tokens(),
+            keep_last_turns: default_keep_last_turns(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -362,6 +399,10 @@ impl Config {
 
     pub fn memory_config(&self) -> &MemoryConfig {
         &self.agent.memory
+    }
+
+    pub fn context_config(&self) -> &ContextConfig {
+        &self.agent.context
     }
 
     /// Resolve allowed paths for the security sandbox.
