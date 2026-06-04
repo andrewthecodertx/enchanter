@@ -80,7 +80,7 @@ pub struct McpToolDef {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
+    #[serde(default, rename = "inputSchema")]
     pub input_schema: Value,
 }
 
