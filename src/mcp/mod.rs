@@ -121,6 +121,8 @@ async fn connect_transport(name: &str, config: &McpServerConfig) -> Result<McpTr
     }
 }
 
+use crate::config::expand_env;
+
 /// Spawn a stdio process and return handles.
 async fn connect_stdio(name: &str, config: &McpServerConfig) -> Result<McpTransport> {
     let command = config.command.as_ref().context(format!(
@@ -130,13 +132,10 @@ async fn connect_stdio(name: &str, config: &McpServerConfig) -> Result<McpTransp
 
     let mut env_vars = HashMap::new();
     for (key, val) in &config.env {
-        let expanded = if val.starts_with("${") && val.ends_with('}') {
-            let var_name = &val[2..val.len() - 1];
-            std::env::var(var_name).unwrap_or(val.clone())
-        } else {
-            val.clone()
-        };
-        env_vars.insert(key.clone(), expanded);
+        env_vars.insert(
+            key.clone(),
+            expand_env(&format!("MCP server '{name}' env '{key}'"), val),
+        );
     }
 
     let mut cmd = Command::new(command);
@@ -177,12 +176,10 @@ async fn connect_http(name: &str, config: &McpServerConfig) -> Result<McpTranspo
         .headers
         .iter()
         .map(|(k, v)| {
-            if v.starts_with("${") && v.ends_with('}') {
-                let var_name = &v[2..v.len() - 1];
-                (k.clone(), std::env::var(var_name).unwrap_or(v.clone()))
-            } else {
-                (k.clone(), v.clone())
-            }
+            (
+                k.clone(),
+                expand_env(&format!("MCP server '{name}' header '{k}'"), v),
+            )
         })
         .collect::<Vec<_>>();
 

@@ -18,10 +18,32 @@
 //! (hermes-agent/tools/mcp_tool.py).
 
 use anyhow::{Context, Result};
+use colored::Colorize;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::home;
+
+/// Expand `${VAR}` references anywhere in a config value (model api_key/base_url,
+/// MCP env values and headers). Supports mixed/partial strings like
+/// `Bearer ${TOKEN}`. When a referenced variable is unset, warns (naming the
+/// context and variable) and falls back to the literal value, so the
+/// misconfiguration is visible at startup rather than surfacing later as a
+/// broken request. Values with no `${…}` reference are returned unchanged.
+pub fn expand_env(context: &str, val: &str) -> String {
+    match shellexpand::env(val) {
+        Ok(expanded) => expanded.into_owned(),
+        Err(e) => {
+            eprintln!(
+                "{} {}: environment variable '{}' is not set; using literal value",
+                "Warning:".yellow(),
+                context,
+                e.var_name
+            );
+            val.to_string()
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Config {
@@ -300,15 +322,8 @@ impl Config {
 
         // Expand ${VAR} in api_key and base_url — pattern from hermes-agent's
         // mcp_servers config (hermes-agent/tools/mcp_tool.py)
-        let api_key = api_key.map(|k| {
-            shellexpand::env(&k)
-                .unwrap_or_else(|_| k.clone().into())
-                .to_string()
-        });
-        let base_url_clone = base_url.clone();
-        let base_url = shellexpand::env(&base_url)
-            .unwrap_or_else(|_| base_url_clone.into())
-            .to_string();
+        let api_key = api_key.map(|k| expand_env("model api_key", &k));
+        let base_url = expand_env("model base_url", &base_url);
 
         Some(ResolvedModel {
             model,
@@ -320,14 +335,8 @@ impl Config {
     /// Resolve the default connection settings (top-level model config + env).
     pub fn resolve_default(&self) -> ResolvedModel {
         let model = self.model_id();
-        let base_url = shellexpand::env(&self.base_url())
-            .unwrap_or_else(|_| self.base_url().into())
-            .to_string();
-        let api_key = self.api_key().map(|k| {
-            shellexpand::env(&k)
-                .unwrap_or_else(|_| k.clone().into())
-                .to_string()
-        });
+        let base_url = expand_env("model base_url", &self.base_url());
+        let api_key = self.api_key().map(|k| expand_env("model api_key", &k));
         ResolvedModel {
             model,
             base_url,
@@ -373,6 +382,29 @@ fn config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_env_handles_partial_whole_and_missing() {
+        // SAFETY: single-threaded test setup.
+        unsafe { std::env::set_var("ENCHANTER_TEST_TOKEN", "secret123") };
+
+        // Whole-string reference.
+        assert_eq!(expand_env("ctx", "${ENCHANTER_TEST_TOKEN}"), "secret123");
+        // Mixed/partial — the README's `Bearer ${MY_TOKEN}` header case.
+        assert_eq!(
+            expand_env("ctx", "Bearer ${ENCHANTER_TEST_TOKEN}"),
+            "Bearer secret123"
+        );
+        // No reference — passthrough.
+        assert_eq!(expand_env("ctx", "plain value"), "plain value");
+        // Undefined variable — warns and falls back to the literal.
+        assert_eq!(
+            expand_env("ctx", "Bearer ${ENCHANTER_UNDEFINED_VAR_XYZ}"),
+            "Bearer ${ENCHANTER_UNDEFINED_VAR_XYZ}"
+        );
+
+        unsafe { std::env::remove_var("ENCHANTER_TEST_TOKEN") };
+    }
 
     #[test]
     fn default_config() {

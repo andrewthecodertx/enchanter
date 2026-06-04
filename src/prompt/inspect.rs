@@ -309,18 +309,39 @@ fn format_diff<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> String {
 }
 
 /// Redact API keys, tokens, and auth headers from text (REQ-INS-004).
-/// Will be used by the recording feature (REQ-REC-004).
+/// Used by the recording feature (REQ-REC-004).
+///
+/// Best-effort only — this matches common key shapes (provider-prefixed tokens,
+/// JWTs, `key: value` / auth-header forms), not every possible secret. It will
+/// miss bare high-entropy tokens with no recognizable prefix or surrounding key
+/// name, since matching those generically produces too many false positives
+/// (hashes, git SHAs, base64 blobs). Treat it as defense-in-depth, not a
+/// guarantee: don't paste secrets you can't afford to leak into a recording.
 #[allow(dead_code)]
 pub fn redact_secrets(text: &str) -> String {
     let mut result = text.to_string();
 
-    // Redact common API key patterns (sk-..., key-..., etc.)
     let key_patterns = [
-        // OpenAI-style keys (sk-...)
-        regex::Regex::new(r"(sk-[a-zA-Z0-9]{8})[a-zA-Z0-9]+").unwrap(),
-        // Generic long hex/base64 keys (32+ chars after prefix)
-        regex::Regex::new(r#"(api[_-]?key|token|bearer|authorization)\s*[:=]\s*["']?[a-zA-Z0-9_\-]{8}[a-zA-Z0-9_\-]+"#).unwrap(),
-        // Authorization headers
+        // OpenAI-style keys (sk-..., sk-proj-..., etc.)
+        regex::Regex::new(r"(?i)\b(sk-[a-z0-9_\-]{8})[a-z0-9_\-]+").unwrap(),
+        // Provider-prefixed tokens: GitHub (ghp_/gho_/ghu_/ghs_/ghr_/github_pat_),
+        // Slack (xoxb-/xoxp-/...), Stripe (sk_live_/rk_live_/...), AWS access key
+        // IDs (AKIA/ASIA), Google API keys (AIza).
+        regex::Regex::new(
+            r"(?i)\b(gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|sk_test_|rk_live_|AKIA|ASIA|AIza)[a-z0-9_\-]{8,}",
+        )
+        .unwrap(),
+        // JWTs (header.payload.signature, base64url segments).
+        regex::Regex::new(
+            r"\beyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+",
+        )
+        .unwrap(),
+        // Generic key/value forms: api_key, secret, token, password, bearer.
+        regex::Regex::new(
+            r#"(?i)(api[_-]?key|secret|token|password|passwd|bearer|authorization)\s*[:=]\s*["']?[a-zA-Z0-9_\-\.]{8}[a-zA-Z0-9_\-\.]+"#,
+        )
+        .unwrap(),
+        // Authorization headers.
         regex::Regex::new(r"(?i)(authorization|api-key|x-api-key)\s*[:=]\s*\S{8,}").unwrap(),
     ];
 
@@ -484,6 +505,18 @@ mod tests {
         let redacted = redact_secrets(text);
         // The key should be partially redacted
         assert!(!redacted.contains("sk-1234567890abcdef1234567890"));
+    }
+
+    #[test]
+    fn test_redact_provider_tokens_and_jwt() {
+        let ghp = "ghp_abcdef1234567890ABCDEFghijklmnopqrst";
+        let jwt = "eyJhbGciOiJIUzI1Ni1.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJ";
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        let text = format!("token {ghp}\nauth {jwt}\naws_key={aws}");
+        let redacted = redact_secrets(&text);
+        assert!(!redacted.contains(ghp), "GitHub token leaked: {redacted}");
+        assert!(!redacted.contains(jwt), "JWT leaked: {redacted}");
+        assert!(!redacted.contains(aws), "AWS key leaked: {redacted}");
     }
 
     #[test]
