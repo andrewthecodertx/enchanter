@@ -21,9 +21,10 @@ mod config;
 #[cfg(unix)]
 mod daemon;
 #[cfg(not(unix))]
+#[allow(dead_code)]
 mod daemon {
     //! Stub — daemon mode requires Unix sockets (not available on Windows).
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
 
     pub fn socket_path() -> std::path::PathBuf {
         unreachable!()
@@ -63,10 +64,11 @@ mod daemon {
         bail!("Daemon mode is not supported on this platform")
     }
 }
+
 mod home;
-mod overlay;
 mod mcp;
 mod memory;
+mod overlay;
 mod prompt;
 mod protocol;
 mod recorder;

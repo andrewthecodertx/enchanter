@@ -64,8 +64,21 @@ pub struct SessionInfo {
 
 impl AgentSession {
     /// Create a new agent session from config, loading all state.
-    pub fn new(config: Config, soul: Soul, memory: MemoryStore, skills: SkillsIndex, resolved: ResolvedModel, no_stream: bool, no_tools: bool, system_override: Option<String>) -> Result<Self> {
-        let client = LlmClient::new(&resolved.base_url, resolved.api_key.as_deref(), &resolved.model);
+    pub fn new(
+        config: Config,
+        soul: Soul,
+        memory: MemoryStore,
+        skills: SkillsIndex,
+        resolved: ResolvedModel,
+        no_stream: bool,
+        no_tools: bool,
+        system_override: Option<String>,
+    ) -> Result<Self> {
+        let client = LlmClient::new(
+            &resolved.base_url,
+            resolved.api_key.as_deref(),
+            &resolved.model,
+        );
         let mcp = McpManager::new();
         if !no_tools && !config.mcp.servers.is_empty() {
             // MCP startup is async, handled by `start_mcp()` later.
@@ -74,7 +87,13 @@ impl AgentSession {
 
         let system_prompt = match &system_override {
             Some(s) => s.clone(),
-            None => prompt::build_system_prompt_with_model(&soul, &memory, &skills, &config, &resolved.model),
+            None => prompt::build_system_prompt_with_model(
+                &soul,
+                &memory,
+                &skills,
+                &config,
+                &resolved.model,
+            ),
         };
         let messages = vec![Message::system(&system_prompt)];
 
@@ -135,7 +154,12 @@ impl AgentSession {
             soft_limit: self.config.soft_limit(),
             tool_count,
             mcp_tool_count: self.mcp.total_tool_count(),
-            mcp_servers: self.mcp.server_names().into_iter().map(String::from).collect(),
+            mcp_servers: self
+                .mcp
+                .server_names()
+                .into_iter()
+                .map(String::from)
+                .collect(),
             skill_count: self.skills.skills.len(),
             session_id: self.session.id().to_string(),
         }
@@ -156,7 +180,10 @@ impl AgentSession {
     /// Returns the final ChatResult and the receiving end of the event channel.
     /// The caller should read events from the receiver and handle them (print,
     /// send over socket, etc.). Event::Done signals the end.
-    pub async fn chat_events(&mut self, user_prompt: &str) -> Result<(ChatResult, mpsc::UnboundedReceiver<Event>)> {
+    pub async fn chat_events(
+        &mut self,
+        user_prompt: &str,
+    ) -> Result<(ChatResult, mpsc::UnboundedReceiver<Event>)> {
         let user_msg = Message::user(user_prompt);
         self.session.append(&user_msg)?;
         self.messages.push(user_msg);
@@ -171,9 +198,10 @@ impl AgentSession {
     pub async fn retry_events(&mut self) -> Result<(ChatResult, mpsc::UnboundedReceiver<Event>)> {
         let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
         if let Some(idx) = last_user_idx
-            && idx + 1 < self.messages.len() {
-                self.messages.truncate(idx + 1);
-            }
+            && idx + 1 < self.messages.len()
+        {
+            self.messages.truncate(idx + 1);
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let result = self.run_agent_loop_events(&tx).await?;
         Ok((result, rx))
@@ -184,9 +212,10 @@ impl AgentSession {
         // Remove everything after last user message, then re-run
         let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
         if let Some(idx) = last_user_idx
-            && idx + 1 < self.messages.len() {
-                self.messages.truncate(idx + 1);
-            }
+            && idx + 1 < self.messages.len()
+        {
+            self.messages.truncate(idx + 1);
+        }
         self.run_agent_loop().await
     }
 
@@ -206,7 +235,11 @@ impl AgentSession {
         let fresh_prompt = match &self.system_override {
             Some(s) => s.clone(),
             None => prompt::build_system_prompt_with_model(
-                &self.soul, &self.memory, &self.skills, &self.config, &self.resolved.model,
+                &self.soul,
+                &self.memory,
+                &self.skills,
+                &self.config,
+                &self.resolved.model,
             ),
         };
         self.messages = vec![Message::system(&fresh_prompt)];
@@ -224,15 +257,14 @@ impl AgentSession {
 
     /// Switch model/provider. Returns a description of the new model.
     pub fn switch_model(&mut self, name: &str) -> Result<String> {
-        let new_resolved = self.config.resolve_provider(name)
-            .unwrap_or_else(|| {
-                let default = self.config.resolve_default();
-                ResolvedModel {
-                    model: name.to_string(),
-                    base_url: default.base_url,
-                    api_key: default.api_key,
-                }
-            });
+        let new_resolved = self.config.resolve_provider(name).unwrap_or_else(|| {
+            let default = self.config.resolve_default();
+            ResolvedModel {
+                model: name.to_string(),
+                base_url: default.base_url,
+                api_key: default.api_key,
+            }
+        });
 
         let provider_label = if self.config.providers.contains_key(name) {
             format!("{} (provider: {})", new_resolved.model, name)
@@ -240,13 +272,21 @@ impl AgentSession {
             new_resolved.model.clone()
         };
 
-        self.client = LlmClient::new(&new_resolved.base_url, new_resolved.api_key.as_deref(), &new_resolved.model);
+        self.client = LlmClient::new(
+            &new_resolved.base_url,
+            new_resolved.api_key.as_deref(),
+            &new_resolved.model,
+        );
         self.resolved = new_resolved;
 
         // Refresh system prompt to update the Model: line
         if self.system_override.is_none() {
             let refreshed = prompt::build_system_prompt_with_model(
-                &self.soul, &self.memory, &self.skills, &self.config, &self.resolved.model,
+                &self.soul,
+                &self.memory,
+                &self.skills,
+                &self.config,
+                &self.resolved.model,
             );
             if let Some(sys_msg) = self.messages.first_mut() {
                 sys_msg.content = Some(refreshed);
@@ -256,68 +296,22 @@ impl AgentSession {
         Ok(provider_label)
     }
 
-    /// Run the agent loop: call model, handle tool_calls, with soft-limit nudging
-    /// and a hard turn limit as a safety net.
+    /// Run one agent loop, returning the result directly (no events).
     async fn run_agent_loop(&mut self) -> Result<ChatResult> {
-        let max_turns = self.config.max_turns();
-        let soft_limit = self.config.soft_limit();
-        let tools_payload = self.tools_payload();
-        let mut total_tool_calls = 0;
-        let mut soft_limit_triggered = false;
-
-        for turn in 0..max_turns {
-            let turns_remaining = max_turns.saturating_sub(turn);
-
-            // Soft limit: inject a nudge when we're running low on turns
-            if !soft_limit_triggered && soft_limit > 0 && turns_remaining <= soft_limit {
-                soft_limit_triggered = true;
-                let nudge = format!(
-                    "[System] You have {} turns remaining before the hard limit. Wrap up now: produce a final text response without any tool calls.",
-                    turns_remaining,
-                );
-                self.messages.push(Message::user(&nudge));
-            }
-
-            let result = if self.no_stream {
-                self.client.chat(self.messages.clone(), tools_payload.clone()).await?
-            } else {
-                self.client.chat_stream(self.messages.clone(), tools_payload.clone()).await?
-            };
-
-            if result.has_tool_calls() {
-                let tool_calls = result.tool_calls.unwrap();
-                let assistant_msg = Message::assistant_with_tools(tool_calls.clone(), result.content);
-                self.session.append(&assistant_msg)?;
-                self.messages.push(assistant_msg);
-
-                for tc in &tool_calls {
-                    let tc_args: Value = serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(Value::Null);
-                    let output = dispatch_tool(&tc.function.name, &tc_args, &mut self.memory, &mut self.mcp).await;
-                    let tool_msg = Message::tool_result(&tc.id, output);
-                    self.session.append(&tool_msg)?;
-                    self.messages.push(tool_msg);
-                    total_tool_calls += 1;
-                }
-            } else {
-                let content = result.content;
-                if let Some(ref text) = content {
-                    self.session.append(&Message::assistant(text))?;
-                }
-                return Ok(ChatResult {
-                    response: content,
-                    tool_calls: total_tool_calls,
-                });
-            }
-        }
-
-        anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
+        self.run_loop(EventSink::Silent).await
     }
 
-    /// Event-yielding version of the agent loop.
-    /// Sends structured events through the channel instead of printing to stdout.
-    /// Supports both streaming and non-streaming modes.
-    async fn run_agent_loop_events(&mut self, tx: &mpsc::UnboundedSender<Event>) -> Result<ChatResult> {
+    /// Run one agent loop, emitting events through a channel.
+    async fn run_agent_loop_events(
+        &mut self,
+        tx: &mpsc::UnboundedSender<Event>,
+    ) -> Result<ChatResult> {
+        self.run_loop(EventSink::Channel(tx.clone())).await
+    }
+
+    /// Core agent loop: call model, handle tool_calls, with soft-limit nudging
+    /// and a hard turn limit as a safety net.
+    async fn run_loop(&mut self, sink: EventSink) -> Result<ChatResult> {
         let max_turns = self.config.max_turns();
         let soft_limit = self.config.soft_limit();
         let tools_payload = self.tools_payload();
@@ -337,42 +331,56 @@ impl AgentSession {
             }
 
             let result = if self.no_stream {
-                self.client.chat(self.messages.clone(), tools_payload.clone()).await?
+                self.client
+                    .chat(self.messages.clone(), tools_payload.clone())
+                    .await?
             } else {
-                // Streaming: send each content token as an event
-                self.client.chat_stream_with(
-                    self.messages.clone(),
-                    tools_payload.clone(),
-                    |token| {
-                        let _ = tx.send(Event::Content { text: token.to_string() });
-                    },
-                ).await?
+                match &sink {
+                    EventSink::Channel(tx) => {
+                        self.client
+                            .chat_stream_with(self.messages.clone(), tools_payload.clone(), |token| {
+                                let _ = tx.send(Event::Content { text: token.to_string() });
+                            })
+                            .await?
+                    }
+                    EventSink::Silent => {
+                        self.client
+                            .chat_stream(self.messages.clone(), tools_payload.clone())
+                            .await?
+                    }
+                }
             };
 
             if result.has_tool_calls() {
                 let tool_calls = result.tool_calls.unwrap();
-                // If there was content alongside the tool calls, emit it
+
+                // Emit content that came alongside tool calls
                 if let Some(ref content) = result.content
-                    && !content.is_empty() {
-                        let _ = tx.send(Event::Content { text: content.clone() });
-                    }
+                    && !content.is_empty()
+                {
+                    sink.send(Event::Content { text: content.clone() });
+                }
+
                 for tc in &tool_calls {
-                    let _ = tx.send(Event::ToolCall {
+                    sink.send(Event::ToolCall {
                         id: tc.id.clone(),
                         name: tc.function.name.clone(),
                         arguments: tc.function.arguments.clone(),
                     });
                 }
 
-                let assistant_msg = Message::assistant_with_tools(tool_calls.clone(), result.content);
+                let assistant_msg =
+                    Message::assistant_with_tools(tool_calls.clone(), result.content);
                 self.session.append(&assistant_msg)?;
                 self.messages.push(assistant_msg);
 
                 for tc in &tool_calls {
-                    let tc_args: Value = serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(Value::Null);
-                    let output = dispatch_tool(&tc.function.name, &tc_args, &mut self.memory, &mut self.mcp).await;
-                    let _ = tx.send(Event::ToolResult {
+                    let tc_args: Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                    let output =
+                        dispatch_tool(&tc.function.name, &tc_args, &mut self.memory, &mut self.mcp)
+                            .await;
+                    sink.send(Event::ToolResult {
                         id: tc.id.clone(),
                         content: output.clone(),
                     });
@@ -385,13 +393,14 @@ impl AgentSession {
                 let content = result.content;
                 // Non-streaming mode: send the full content at once
                 if self.no_stream
-                    && let Some(ref text) = content {
-                        let _ = tx.send(Event::Content { text: text.clone() });
-                    }
+                    && let Some(ref text) = content
+                {
+                    sink.send(Event::Content { text: text.clone() });
+                }
                 if let Some(ref text) = content {
                     self.session.append(&Message::assistant(text))?;
                 }
-                let _ = tx.send(Event::Done);
+                sink.send(Event::Done);
                 return Ok(ChatResult {
                     response: content,
                     tool_calls: total_tool_calls,
@@ -399,10 +408,28 @@ impl AgentSession {
             }
         }
 
-        let _ = tx.send(Event::Error {
+        sink.send(Event::Error {
             message: format!("Max agent turns reached ({}).", max_turns),
         });
-        anyhow::bail!("Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.", max_turns);
+        anyhow::bail!(
+            "Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.",
+            max_turns
+        );
+    }
+}
+
+/// Event sink for the agent loop — either sends events through a channel or drops them.
+enum EventSink {
+    Channel(mpsc::UnboundedSender<Event>),
+    Silent,
+}
+
+impl EventSink {
+    fn send(&self, event: Event) {
+        match self {
+            EventSink::Channel(tx) => { let _ = tx.send(event); }
+            EventSink::Silent => {}
+        }
     }
 }
 
@@ -413,8 +440,15 @@ async fn dispatch_tool(
     memory: &mut MemoryStore,
     mcp: &mut McpManager,
 ) -> String {
-    let built_in_names = ["exec_command", "read_file", "write_file", "edit_file",
-                          "search_files", "list_directory", "memory"];
+    let built_in_names = [
+        "exec_command",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "search_files",
+        "list_directory",
+        "memory",
+    ];
     if built_in_names.contains(&name) {
         tools::dispatch(name, args, memory)
     } else if name.contains(':') {
@@ -427,3 +461,4 @@ async fn dispatch_tool(
         format!("Unknown tool: {}", name)
     }
 }
+
