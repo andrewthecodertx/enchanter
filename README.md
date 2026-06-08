@@ -362,6 +362,21 @@ Five categories are supported:
 
 The store lives at `~/.enchanter/knowledge/kstore.json` and is human-readable, git-friendly, and portable. It persists to disk on every write (store, forget) so crashes don't lose data.
 
+### Project-level knowledge
+
+When you run enchanter inside a project with a `.enchanter/` directory, project-level knowledge is merged on top of the global store. Project entries override global entries with the same key.
+
+Place a `kstore.json` in your project's `.enchanter/knowledge/` directory:
+
+```
+my-project/
+  .enchanter/
+    knowledge/
+      kstore.json      # project-specific facts
+```
+
+This lets you store project-specific facts (framework version, project paths, team conventions) alongside global facts, with project values taking precedence. Running `enchanter init` in a project directory creates the `knowledge/` directory automatically.
+
 ## How it works
 
 The system prompt is built in layers:

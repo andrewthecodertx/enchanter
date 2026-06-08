@@ -158,7 +158,7 @@ pub async fn run(args: Args) -> Result<()> {
     let config = crate::overlay::load_config(overlay.as_ref())?;
     let soul = crate::overlay::load_soul(overlay.as_ref())?;
     let memory = crate::overlay::load_memories(overlay.as_ref())?;
-    let kstore = crate::kstore::KnowledgeStore::load()?;
+    let kstore = crate::overlay::load_knowledge(overlay.as_ref())?;
     let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     if let Some(cmd) = &args.command {
@@ -240,7 +240,7 @@ pub async fn run(args: Args) -> Result<()> {
     let config = crate::overlay::load_config(overlay.as_ref())?;
     let soul = crate::overlay::load_soul(overlay.as_ref())?;
     let memory = crate::overlay::load_memories(overlay.as_ref())?;
-    let kstore = crate::kstore::KnowledgeStore::load()?;
+    let kstore = crate::overlay::load_knowledge(overlay.as_ref())?;
     let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     // Resolve initial model: -m flag > config

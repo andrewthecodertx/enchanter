@@ -26,6 +26,8 @@ pub struct Overlay {
     pub has_memories: bool,
     /// Whether a project-level skills/ directory exists.
     pub has_skills: bool,
+    /// Whether a project-level knowledge/ directory exists.
+    pub has_knowledge: bool,
 }
 
 /// Discover a `.enchanter/` directory by searching from `start_dir` upward
@@ -64,6 +66,7 @@ pub fn analyze_overlay(path: &Path) -> Overlay {
         has_config: path.join("config.yaml").exists(),
         has_memories: path.join("memories").is_dir(),
         has_skills: path.join("skills").is_dir(),
+        has_knowledge: path.join("knowledge").is_dir(),
     }
 }
 
@@ -135,6 +138,21 @@ pub fn load_memories(overlay: Option<&Overlay>) -> Result<crate::memory::MemoryS
     Ok(memory)
 }
 
+/// Load knowledge store: global always, project entries overlay on top.
+/// Project entries override global entries with the same key.
+pub fn load_knowledge(overlay: Option<&Overlay>) -> Result<crate::kstore::KnowledgeStore> {
+    let mut kstore = crate::kstore::KnowledgeStore::load()?;
+
+    if let Some(ov) = overlay
+        && ov.has_knowledge
+    {
+        let project_knowledge_dir = ov.path.join("knowledge");
+        kstore.merge_from_dir(&project_knowledge_dir)?;
+    }
+
+    Ok(kstore)
+}
+
 /// Discover skills: global always, project added to the index.
 pub fn discover_skills(overlay: Option<&Overlay>) -> Result<crate::skills::SkillsIndex> {
     let mut skills = crate::skills::SkillsIndex::discover()?;
@@ -166,6 +184,8 @@ pub fn init_project_overlay(dir: &Path) -> Result<PathBuf> {
         .with_context(|| "creating memories/ directory")?;
     std::fs::create_dir_all(enchanter_dir.join("skills"))
         .with_context(|| "creating skills/ directory")?;
+    std::fs::create_dir_all(enchanter_dir.join("knowledge"))
+        .with_context(|| "creating knowledge/ directory")?;
 
     let config_content = "# Enchanter project overlay configuration\n\
         # Project config is additive: it only adds new providers/MCP servers\n\
@@ -235,6 +255,7 @@ mod tests {
         assert!(!overlay.has_config);
         assert!(overlay.has_memories);
         assert!(!overlay.has_skills);
+        assert!(!overlay.has_knowledge);
     }
 
     #[test]
@@ -246,6 +267,7 @@ mod tests {
         assert!(result.join("SOUL.md").exists());
         assert!(result.join("memories").is_dir());
         assert!(result.join("skills").is_dir());
+        assert!(result.join("knowledge").is_dir());
 
         let err = init_project_overlay(dir.path());
         assert!(err.is_err());
@@ -309,5 +331,76 @@ mod tests {
         // Global value wins — project does NOT override
         let provider = merged.providers.get("shared-provider").unwrap();
         assert_eq!(provider.model, Some("gpt-4".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_overlay_with_knowledge() {
+        let dir = tempfile::tempdir().unwrap();
+        let enchanter_dir = dir.path().join(".enchanter");
+        std::fs::create_dir_all(&enchanter_dir).unwrap();
+        std::fs::create_dir_all(enchanter_dir.join("knowledge")).unwrap();
+
+        let overlay = analyze_overlay(&enchanter_dir);
+        assert!(overlay.has_knowledge);
+    }
+
+    #[test]
+    fn test_load_knowledge_without_overlay() {
+        // Should load global store without error when no overlay
+        let result = load_knowledge(None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_load_knowledge_with_overlay_merges() {
+        use crate::kstore::{Category, KnowledgeStore, Source};
+
+        let dir = tempfile::tempdir().unwrap();
+        let enchanter_dir = dir.path().join(".enchanter");
+        std::fs::create_dir_all(enchanter_dir.join("knowledge")).unwrap();
+
+        // Write a project-level kstore.json
+        let mut project_store = KnowledgeStore::default();
+        project_store.store("project.test_key", "project_value", Category::Project, Source::Told);
+        let json = serde_json::to_string_pretty(&project_store).unwrap();
+        std::fs::write(enchanter_dir.join("knowledge").join("kstore.json"), json).unwrap();
+
+        let overlay = Overlay {
+            path: enchanter_dir.clone(),
+            has_soul: false,
+            has_config: false,
+            has_memories: false,
+            has_skills: false,
+            has_knowledge: true,
+        };
+
+        let merged = load_knowledge(Some(&overlay)).unwrap();
+        let entry = merged.get("project.test_key").unwrap();
+        assert_eq!(entry.value, "project_value");
+    }
+
+    #[test]
+    fn test_knowledge_overlay_overrides_global() {
+        use crate::kstore::{Category, KnowledgeStore, Source};
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_knowledge_dir = dir.path().join("knowledge");
+        std::fs::create_dir_all(&project_knowledge_dir).unwrap();
+
+        let mut project_store = KnowledgeStore::default();
+        project_store.store("environment.rust_version", "1.85-project", Category::Environment, Source::Told);
+        let json = serde_json::to_string_pretty(&project_store).unwrap();
+        std::fs::write(project_knowledge_dir.join("kstore.json"), json).unwrap();
+
+        // Create a global store with the same key but different value
+        let mut global_store = KnowledgeStore::default();
+        global_store.store("environment.rust_version", "1.84", Category::Environment, Source::Observed);
+        global_store.store("environment.os", "linux", Category::Environment, Source::Observed);
+
+        // Merge project into global — project key should override
+        let overridden = global_store.merge_from_dir(&project_knowledge_dir).unwrap();
+        assert_eq!(overridden, 1); // 1 entry was overridden
+        assert_eq!(global_store.get("environment.rust_version").unwrap().value, "1.85-project");
+        assert_eq!(global_store.get("environment.os").unwrap().value, "linux"); // non-conflicting preserved
     }
 }
