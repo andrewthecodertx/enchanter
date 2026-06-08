@@ -19,6 +19,7 @@ It creates `~/.enchanter/` with everything you need:
 - `SOUL.md` ,  your agent's personality
 - `config.yaml` ,  model, provider, API key
 - `memories/` ,  persistent memory files
+- `knowledge/` ,  structured key-value facts (kstore.json)
 - `skills/` ,  drop in SKILL.md files
 - `sessions/` ,  conversation history (JSONL)
 
@@ -206,7 +207,7 @@ The TUI is an optional feature (enabled by default). Build without it: `cargo bu
 
 ## Prompt inspection
 
-Enchanter builds the system prompt in layers (SOUL → CONTEXT → SKILLS → INSTRUCTIONS → VOLATILE → SESSION). You can inspect exactly what the model receives:
+Enchanter builds the system prompt in layers (SOUL → CONTEXT → SKILLS → INSTRUCTIONS → KNOWLEDGE → VOLATILE → SESSION). You can inspect exactly what the model receives:
 
 ```bash
 # Show the full assembled system prompt
@@ -339,6 +340,22 @@ Inside the REPL, use `/sessions` to list session history.
 
 Sessions are also used internally for crash recovery and will power upcoming features like session branching and replay.
 
+## Knowledge store
+
+Unlike memory (free-form narrative text), the knowledge store captures discrete, typed facts that persist across sessions. Keys use dot-namespaced identifiers (e.g., `project.rust_version`, `user.email`) and values are short strings. Categories group related facts for search.
+
+The agent uses the `knowledge` tool internally to store, retrieve, search, and forget facts. This means your agent can learn once and never ask again, reducing token waste on repeated questions.
+
+The store lives at `~/.enchanter/knowledge/kstore.json` and is human-readable, git-friendly, and portable. Five categories are supported:
+
+- **environment** — runtime and system facts
+- **project** — project-specific details
+- **preference** — user preferences and style
+- **decision** — architectural or design decisions
+- **fact** — general facts that don't fit other categories
+
+Each entry tracks its source: observed (detected from tool output), told (explicitly stated by the user), or inferred (concluded by the agent).
+
 ## How it works
 
 The system prompt is built in layers:
@@ -347,8 +364,9 @@ The system prompt is built in layers:
 2. **CONTEXT** ,  environment info (model, user, cwd, host, platform)
 3. **SKILLS** ,  discovered SKILL.md files index
 4. **INSTRUCTIONS** ,  tool usage guidance
-5. **VOLATILE** ,  memory entries, user profile
-6. **SESSION** ,  timestamp
+5. **KNOWLEDGE** ,  structured key-value facts from the knowledge store
+6. **VOLATILE** ,  memory entries, user profile
+7. **SESSION** ,  timestamp
 
 Each layer can be inspected via `/prompt budget` and compared across turns with `/prompt diff`.
 
