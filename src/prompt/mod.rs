@@ -195,11 +195,9 @@ fn build_environment_block(_config: &Config, model: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kstore::KnowledgeStore;
     use crate::soul::Soul;
     use std::path::PathBuf;
-
-    use super::*;
-    use crate::kstore::KnowledgeStore;
 
     #[test]
     fn prompt_contains_soul() {
