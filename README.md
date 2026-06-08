@@ -16,12 +16,12 @@ enchanter
 
 It creates `~/.enchanter/` with everything you need:
 
-- `SOUL.md` ,  your agent's personality
-- `config.yaml` ,  model, provider, API key
-- `memories/` ,  persistent memory files
-- `knowledge/` ,  structured key-value facts (kstore.json)
-- `skills/` ,  drop in SKILL.md files
-- `sessions/` ,  conversation history (JSONL)
+- `SOUL.md` — your agent's personality
+- `config.yaml` — model, provider, API key
+- `memories/` — persistent memory files
+- `knowledge/` — structured key-value facts (kstore.json)
+- `skills/` — drop in SKILL.md files
+- `sessions/` — conversation history (JSONL)
 
 Then configure a provider in `config.yaml`. A few examples:
 
@@ -114,8 +114,14 @@ enchanter -p "Explain Rust ownership in one paragraph"
 # Use a different model for this session
 enchanter -m qwen3
 
+# Override the system prompt
+enchanter -s "You are a pirate. Always respond in pirate speech."
+
 # Disable streaming (wait for the full reply)
 enchanter --no-stream -p "Summarize this"
+
+# Disable all tools (built-in + MCP)
+enchanter --no-tools -p "What is 2+2?"
 
 # Record the session to a JSONL file
 enchanter --record session.jsonl
@@ -253,11 +259,11 @@ Recordings include schema version, monotonic sequence numbers, timestamps, confi
 | macOS    | ✅ | ✅ |
 | Windows  | ✅ | ❌ |
 
-Daemon mode requires Unix domain sockets, which aren't available on Windows. On Windows, Enchanter always runs in inline mode ,  no `--no-daemon` flag or `daemon` subcommand is needed or available.
+Daemon mode requires Unix domain sockets, which aren't available on Windows. On Windows, Enchanter always runs in inline mode — no `--no-daemon` flag or `daemon` subcommand is needed or available.
 
 ## Daemon mode
 
-> **Unix only** ,  daemon mode requires Unix domain sockets and is available on Linux and macOS. On Windows, Enchanter always runs in inline mode.
+> **Unix only** — daemon mode requires Unix domain sockets and is available on Linux and macOS. On Windows, Enchanter always runs in inline mode.
 
 Enchanter can run as a background daemon that keeps MCP servers warm. This
 eliminates the 3–15 second cold start on every invocation (most of which is
@@ -291,7 +297,7 @@ enchanter --no-daemon -p "quick question"
 ```
 
 The daemon streams responses as JSONL events over the Unix socket, so you
-still see content tokens as they arrive ,  not just a final blob of text.
+still see content tokens as they arrive — not just a final blob of text.
 
 ## Info subcommands
 
@@ -307,6 +313,7 @@ enchanter sessions      # List session history
 enchanter sessions <id> # Show a specific session
 enchanter replay <file.jsonl>  # Replay a recorded session
 enchanter daemon status # Show daemon status (model, MCP, uptime)
+enchanter init          # Scaffold .enchanter/ overlay in current directory
 ```
 
 ### Session summaries
@@ -322,7 +329,7 @@ When you exit the REPL with `/exit`, `/quit`, `/bye`, or Ctrl+D, Enchanter gener
 
 ### Session history
 
-Every conversation is automatically saved to `~/.enchanter/sessions/` as a JSONL file. Each session gets a unique ID, and every message (user, assistant, tool calls, tool results) is recorded turn-by-turn. The format is crash-safe ,  if the process dies mid-session, the file contains everything written up to that point.
+Every conversation is automatically saved to `~/.enchanter/sessions/` as a JSONL file. Each session gets a unique ID, and every message (user, assistant, tool calls, tool results) is recorded turn-by-turn. The format is crash-safe — if the process dies mid-session, the file contains everything written up to that point.
 
 List recent sessions:
 
@@ -381,19 +388,19 @@ This lets you store project-specific facts (framework version, project paths, te
 
 The system prompt is built in layers:
 
-1. **SOUL** ,  your persona from SOUL.md, stable across turns
-2. **CONTEXT** ,  environment info (model, user, cwd, host, platform)
-3. **SKILLS** ,  discovered SKILL.md files index
-4. **INSTRUCTIONS** ,  tool usage guidance
-5. **KNOWLEDGE** ,  structured key-value facts from the knowledge store
-6. **VOLATILE** ,  memory entries, user profile
-7. **SESSION** ,  timestamp
+1. **SOUL** — your persona from SOUL.md, stable across turns
+2. **CONTEXT** — environment info (model, user, cwd, host, platform)
+3. **SKILLS** — discovered SKILL.md files index
+4. **INSTRUCTIONS** — tool usage guidance
+5. **KNOWLEDGE** — structured key-value facts from the knowledge store
+6. **VOLATILE** — memory entries, user profile
+7. **SESSION** — timestamp
 
 Each layer can be inspected via `/prompt budget` and compared across turns with `/prompt diff`.
 
 Memory uses the same `§`-delimited format as Hermes Agent. Skills use the
 same SKILL.md format (agentskills.io). If you're coming from Hermes, just
-copy or symlink your data ,  the structure matches.
+copy or symlink your data — the structure matches.
 
 Sessions are saved as JSONL files in `~/.enchanter/sessions/`. Each conversation
 turn is appended atomically, so the file is safe against crashes.
@@ -402,8 +409,8 @@ turn is appended atomically, so the file is safe against crashes.
 
 Enchanter supports two MCP transport types:
 
-- **stdio** ,  local processes spawned by Enchanter
-- **HTTP** ,  remote servers reached via POST requests
+- **stdio** — local processes spawned by Enchanter
+- **HTTP** — remote servers reached via POST requests
 
 Configure them in `~/.enchanter/config.yaml`:
 
@@ -423,8 +430,58 @@ mcp:
 ```
 
 Stdio servers are auto-restarted on crash (up to 3 attempts). HTTP servers
-use the Streamable HTTP transport ,  they handle both direct JSON responses
+use the Streamable HTTP transport — they handle both direct JSON responses
 and SSE-streamed responses, with `Mcp-Session-Id` tracking.
+
+## Security sandbox
+
+On Linux, Enchanter confines `exec_command` (shell execution) using Landlock,
+a kernel-level LSM that restricts file access to an allowlist. The sandboxed
+shell can only read/write within `allowed_paths` and read/execute system
+directories (`/usr`, `/bin`, `/lib`, etc.). Write access to system dirs is
+denied.
+
+Configure it in `config.yaml`:
+
+```yaml
+security:
+  # Directories the agent may read/write. Defaults to your home directory.
+  allowed_paths:
+    - ~/Projects
+    - /tmp
+  # On Linux, exec_command runs under Landlock by default. If the kernel
+  # can't enforce it (old kernel, non-Linux), exec_command refuses to run.
+  # Set this true as an escape hatch (use with care).
+  allow_unsandboxed_exec: false
+```
+
+On **macOS and Windows**, there is no Landlock support. If
+`allow_unsandboxed_exec` is `false` (the default), `exec_command` will refuse
+to run. Set it to `true` to allow unsandboxed shell execution — understand
+that this means the LLM can run any command your user can.
+
+File tools (`read_file`, `write_file`, `edit_file`, `search_files`,
+`list_directory`) always check `allowed_paths` regardless of platform.
+
+## Rolling context compaction
+
+For long sessions, the conversation window can grow beyond the model's context
+limit. Enchanter supports rolling compaction to keep the live context within
+bounds:
+
+```yaml
+agent:
+  context:
+    max_tokens: 96000      # Compact older turns when estimated tokens exceed this
+    keep_last_turns: 20    # Always keep this many recent messages verbatim
+```
+
+When the live window exceeds `max_tokens` (estimated at chars÷4), older turns
+are summarized into a single compact message. The most recent
+`keep_last_turns` messages are always preserved verbatim.
+
+Both values are optional. Without them, no compaction occurs — the full
+conversation is always sent.
 
 ## License
 

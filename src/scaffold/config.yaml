@@ -46,7 +46,7 @@ model:
 #   allow_unsandboxed_exec: false
 
 agent:
-  # max_turns: 30                       # Max agent loop turns
+  # max_turns: 30                       # Max agent loop turns (0 = unlimited)
   # summarize_on_exit: true             # Generate session summary on clean exit (default: true)
   # memory:
   #   max_entries: 50                   # Max memory entries loaded into prompt
