@@ -391,7 +391,7 @@ The system prompt is built in layers:
 1. **SOUL** — your persona from SOUL.md, stable across turns
 2. **CONTEXT** — environment info (model, user, cwd, host, platform)
 3. **SKILLS** — discovered SKILL.md files index
-4. **INSTRUCTIONS** — tool usage guidance
+4. **INSTRUCTIONS** — tool usage guidance, canonical tool descriptions, and knowledge capture directives
 5. **KNOWLEDGE** — structured key-value facts from the knowledge store
 6. **VOLATILE** — memory entries, user profile
 7. **SESSION** — timestamp
@@ -463,25 +463,33 @@ that this means the LLM can run any command your user can.
 File tools (`read_file`, `write_file`, `edit_file`, `search_files`,
 `list_directory`) always check `allowed_paths` regardless of platform.
 
-## Rolling context compaction
+## Agent configuration
 
-For long sessions, the conversation window can grow beyond the model's context
-limit. Enchanter supports rolling compaction to keep the live context within
-bounds:
+The `agent` section of `config.yaml` controls the agent loop and conversation
+behavior:
 
 ```yaml
 agent:
-  context:
+  max_turns: 150           # Max agent loop turns (0 = unlimited, default: 150)
+  summarize_on_exit: true  # Generate session summary on clean exit (default: true)
+  memory:
+    max_entries: 50         # Max memory entries loaded into prompt (default: 50)
+    summarize_threshold: 40 # Summarize older entries when count exceeds this (default: 40)
+  context:                            # Rolling conversation context (long sessions)
     max_tokens: 96000      # Compact older turns when estimated tokens exceed this
     keep_last_turns: 20    # Always keep this many recent messages verbatim
 ```
 
-When the live window exceeds `max_tokens` (estimated at chars÷4), older turns
-are summarized into a single compact message. The most recent
-`keep_last_turns` messages are always preserved verbatim.
+`max_turns` sets a hard limit on how many agent loop iterations (model calls)
+can occur in a single session. When the limit is approached, a soft-limit
+nudge reminds the agent to wrap up. Set to `0` for unlimited. Default is 150.
 
-Both values are optional. Without them, no compaction occurs — the full
-conversation is always sent.
+The `context` block controls rolling compaction for long sessions. When the
+estimated token count exceeds `max_tokens` (estimated at chars÷4), older
+turns are summarized into a single compact message. The most recent
+`keep_last_turns` messages are always preserved verbatim. Both values are
+optional — without them, no compaction occurs and the full conversation is
+always sent.
 
 ## License
 
