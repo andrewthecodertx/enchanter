@@ -207,8 +207,12 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(base_url: &str, api_key: Option<&str>, model: &str) -> Self {
+        let client = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("reqwest client builder should not fail with these settings");
         Self {
-            client: Client::new(),
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.map(|s| s.to_string()),
             model: model.to_string(),
@@ -275,11 +279,21 @@ impl LlmClient {
         let mut buffer = String::new();
         let mut done = false;
 
-        while let Some(chunk) = stream.next().await {
-            if done {
-                break;
-            }
-            let chunk = chunk.context("reading stream chunk")?;
+        // Per-chunk timeout: if we don't receive data within this duration,
+        // the stream is stalled and we bail rather than hanging forever.
+        const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+        loop {
+            if done { break; }
+
+            let chunk_opt = tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next())
+                .await
+                .context("stream timed out — no data received for 120s")?;
+
+            let chunk = match chunk_opt {
+                Some(c) => c.context("reading stream chunk")?,
+                None => break, // stream ended normally
+            };
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(newline_pos) = buffer.find('\n') {
@@ -391,13 +405,17 @@ impl LlmClient {
             tools,
         };
 
-        let response = self
+        // Non-streaming requests get a 5-minute total timeout as a safety net.
+        const NON_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+        let req_builder = self
             .client
             .post(&url)
+            .timeout(NON_STREAM_TIMEOUT)
             .header("Content-Type", "application/json")
             .json(&request);
         let response = self
-            .apply_auth(response)
+            .apply_auth(req_builder)
             .send()
             .await
             .with_context(|| format!("connecting to {}", url))?;
