@@ -41,6 +41,32 @@ impl Default for Source {
     }
 }
 
+impl Source {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Observed => "observed",
+            Self::Told => "told",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
+impl std::str::FromStr for Source {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "observed" => Ok(Self::Observed),
+            "told" => Ok(Self::Told),
+            "inferred" => Ok(Self::Inferred),
+            other => Err(format!(
+                "unknown source '{}'. Use: observed, told, inferred",
+                other
+            )),
+        }
+    }
+}
+
 /// Category of knowledge for grouping and search.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -342,6 +368,19 @@ mod tests {
         assert_eq!(Category::from_str("PROJECT").unwrap(), Category::Project);
         assert_eq!(Category::from_str("Preference").unwrap(), Category::Preference);
         assert!(Category::from_str("unknown").is_err());
+    }
+
+    #[test]
+    fn source_parse_and_str() {
+        use std::str::FromStr;
+        assert_eq!(Source::from_str("observed").unwrap(), Source::Observed);
+        assert_eq!(Source::from_str("TOLD").unwrap(), Source::Told);
+        assert_eq!(Source::from_str("Inferred").unwrap(), Source::Inferred);
+        assert!(Source::from_str("guessed").is_err());
+
+        assert_eq!(Source::Observed.as_str(), "observed");
+        assert_eq!(Source::Told.as_str(), "told");
+        assert_eq!(Source::Inferred.as_str(), "inferred");
     }
 
     #[test]

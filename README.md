@@ -344,9 +344,15 @@ Sessions are also used internally for crash recovery and will power upcoming fea
 
 Unlike memory (free-form narrative text), the knowledge store captures discrete, typed facts that persist across sessions. Keys use dot-namespaced identifiers (e.g., `project.rust_version`, `user.email`) and values are short strings. Categories group related facts for search.
 
-The agent uses the `knowledge` tool internally to store, retrieve, search, and forget facts. This means your agent can learn once and never ask again, reducing token waste on repeated questions.
+Each entry tracks its source:
 
-The store lives at `~/.enchanter/knowledge/kstore.json` and is human-readable, git-friendly, and portable. Five categories are supported:
+- **observed** — detected from tool output, filesystem, or runtime
+- **told** — explicitly stated by the user
+- **inferred** — concluded by the agent from context
+
+The agent proactively stores facts it discovers during conversation using the `knowledge` tool. When it learns a version number, a project path, a user preference, or a bug workaround, it stores it so it never has to ask again. The INSTRUCTIONS prompt layer directs this behavior; no separate classifier is needed.
+
+Five categories are supported:
 
 - **environment** — runtime and system facts
 - **project** — project-specific details
@@ -354,7 +360,7 @@ The store lives at `~/.enchanter/knowledge/kstore.json` and is human-readable, g
 - **decision** — architectural or design decisions
 - **fact** — general facts that don't fit other categories
 
-Each entry tracks its source: observed (detected from tool output), told (explicitly stated by the user), or inferred (concluded by the agent).
+The store lives at `~/.enchanter/knowledge/kstore.json` and is human-readable, git-friendly, and portable. It persists to disk on every write (store, forget) so crashes don't lose data.
 
 ## How it works
 

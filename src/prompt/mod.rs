@@ -108,6 +108,14 @@ pub fn build_prompt_layers(
              - write_file: write content to a file (creates parents, overwrites)\n\
              - list_directory: list directory entries (names, types, sizes)\n\
              \n\
+             Knowledge capture:\n\
+             When you learn a durable, look-up-able fact during a session — a project path, \
+             a version number, a user preference, a design decision, a bug workaround — store \
+             it with the knowledge tool. Use source 'told' if the user stated it directly, \
+             'observed' if you detected it from tool output, or 'inferred' if you concluded it \
+             from context. Don't store conversation summaries or transient state; those belong \
+             in memory. Store facts that the agent should never have to re-ask or re-discover.\n\
+             \n\
              MCP tools may also be available for specialty operations (image generation, \
              GitHub, etc.). Use them when relevant.",
         ),
@@ -116,9 +124,12 @@ pub fn build_prompt_layers(
     // KNOWLEDGE — structured key-value facts, much more compact than narrative memory
     let knowledge_block = kstore.format_for_prompt();
     if !knowledge_block.is_empty() {
+        let header = "Facts you already know (do not re-ask about these). To capture new facts, \
+            use the knowledge tool with source 'told' (user stated), 'observed' (detected), or \
+            'inferred' (concluded).";
         layers.push(PromptLayer {
             name: "KNOWLEDGE".to_string(),
-            content: knowledge_block,
+            content: format!("{}\n{}", header, knowledge_block),
         });
     }
 

@@ -282,7 +282,10 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 'search' to find entries by key prefix, 'list' to see all entries, \
                 or 'forget' to remove a stale entry. \
                 Keys use dot-namespace (e.g., project.rust_version, user.email). \
-                Categories: environment, project, preference, decision, fact.",
+                Categories: environment, project, preference, decision, fact. \
+                Source: told (user stated), observed (detected from output), inferred (concluded from context). \
+                Proactively store facts you discover — project paths, version numbers, user preferences, \
+                design decisions, bug workarounds — so you never have to re-ask.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -302,6 +305,10 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                     "category": {
                         "type": "string",
                         "description": "Category for the fact: environment, project, preference, decision, or fact. Defaults to fact."
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "How this fact was learned: 'told' (user stated it), 'observed' (detected from tool output or environment), or 'inferred' (concluded from context). Defaults to 'told'."
                     },
                     "query": {
                         "type": "string",
@@ -909,7 +916,15 @@ fn tool_knowledge(args: &Value, kstore: &mut KnowledgeStore) -> String {
                 Ok(c) => c,
                 Err(e) => return format!("Error: {}", e),
             };
-            kstore.store(key, value, category, crate::kstore::Source::Observed);
+            let source_str = args
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("told");
+            let source = match crate::kstore::Source::from_str(source_str) {
+                Ok(s) => s,
+                Err(e) => return format!("Error: {}", e),
+            };
+            kstore.store(key, value, category, source);
             match kstore.save() {
                 Ok(()) => format!("Stored: {} = {}", key, value),
                 Err(e) => format!("Stored in memory but failed to persist: {}", e),
