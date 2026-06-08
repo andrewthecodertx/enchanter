@@ -630,10 +630,17 @@ fn handle_command(
             println!("{}", "═══ CONFIG ═══".bright_cyan());
             println!("  Model:      {}", config.model_id());
             println!("  Base URL:   {}", config.base_url());
+            let turns_display = match config.max_turns() {
+                Some(n) => n.to_string(),
+                None => "unlimited".to_string(),
+            };
+            let soft_display = match config.soft_limit() {
+                Some(n) => n.to_string(),
+                None => "n/a".to_string(),
+            };
             println!(
                 "  Max turns:  {} (soft limit: {})",
-                config.max_turns(),
-                config.soft_limit()
+                turns_display, soft_display
             );
             println!(
                 "  API key:    {}",
@@ -846,7 +853,10 @@ async fn run_repl(
                             println!("  Model:    {}", info.model.bright_white());
                             println!("  Base URL: {}", info.base_url.bright_white());
                             println!("  API key:  {}", key_status);
-                            println!("  Max:      {} (soft: {})", info.max_turns, info.soft_limit);
+                            println!("  Max:      {} (soft: {})",
+                                info.max_turns.map_or("unlimited".to_string(), |n| n.to_string()),
+                                info.soft_limit.map_or("n/a".to_string(), |n| n.to_string())
+                            );
                             continue;
                         }
                         "/prompt" => {

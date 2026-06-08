@@ -99,7 +99,9 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             };
             app.chat_lines.push(crate::tui::app::ChatLine::System(
                 format!("Config:\n  Model: {}\n  Base URL: {}\n  API key: {}\n  Max turns: {} (soft: {})\n  Tools: {} ({} MCP)\n  Skills: {}",
-                    info.model, info.base_url, key_status, info.max_turns, info.soft_limit,
+                    info.model, info.base_url, key_status,
+                    info.max_turns.map_or("unlimited".to_string(), |n| n.to_string()),
+                    info.soft_limit.map_or("n/a".to_string(), |n| n.to_string()),
                     info.tool_count, info.mcp_tool_count, info.skill_count),
             ));
             CommandResult::Done

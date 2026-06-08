@@ -64,8 +64,8 @@ pub struct SessionInfo {
     pub model: String,
     pub base_url: String,
     pub api_key_set: bool,
-    pub max_turns: u32,
-    pub soft_limit: u32,
+    pub max_turns: Option<u32>,
+    pub soft_limit: Option<u32>,
     pub tool_count: usize,
     pub mcp_tool_count: usize,
     pub mcp_servers: Vec<String>,
@@ -380,7 +380,7 @@ impl AgentSession {
     }
 
     /// Core agent loop: call model, handle tool_calls, with soft-limit nudging
-    /// and a hard turn limit as a safety net.
+    /// and a hard turn limit as a safety net (or unlimited when max_turns is None).
     async fn run_loop(&mut self, sink: EventSink) -> Result<ChatResult> {
         let max_turns = self.config.max_turns();
         let soft_limit = self.config.soft_limit();
@@ -388,19 +388,31 @@ impl AgentSession {
         let mut total_tool_calls = 0;
         let mut soft_limit_triggered = false;
 
-        for turn in 0..max_turns {
-            let turns_remaining = max_turns.saturating_sub(turn);
+        // Safety cap to prevent runaway loops from bugs (e.g., tool calling itself forever).
+        // Only enforced when max_turns is unlimited.
+        const SAFETY_CAP: u32 = 5000;
 
-            // Roll up older turns into a summary if the live window is over budget.
-            self.compact_if_needed(&sink).await;
+        let effective_limit = max_turns.unwrap_or(SAFETY_CAP);
+        let mut turn: u32 = 0;
 
-            if !soft_limit_triggered && soft_limit > 0 && turns_remaining <= soft_limit {
-                soft_limit_triggered = true;
-                let nudge = format!(
-                    "[System] You have {} turns remaining before the hard limit. Wrap up now: produce a final text response without any tool calls.",
-                    turns_remaining,
-                );
-                self.messages.push(Message::user(&nudge));
+        loop {
+            if let Some(limit) = max_turns {
+                let turns_remaining = limit.saturating_sub(turn);
+
+                // Roll up older turns into a summary if the live window is over budget.
+                self.compact_if_needed(&sink).await;
+
+                if !soft_limit_triggered && soft_limit.unwrap_or(0) > 0 && turns_remaining <= soft_limit.unwrap_or(0) {
+                    soft_limit_triggered = true;
+                    let nudge = format!(
+                        "[System] You have {} turns remaining before the hard limit. Wrap up now: produce a final text response without any tool calls.",
+                        turns_remaining,
+                    );
+                    self.messages.push(Message::user(&nudge));
+                }
+            } else {
+                // Unlimited: still compact if needed, but no soft-limit nudging.
+                self.compact_if_needed(&sink).await;
             }
 
             let result = if self.no_stream {
@@ -490,14 +502,23 @@ impl AgentSession {
                     tool_calls: total_tool_calls,
                 });
             }
+
+            turn += 1;
+            if turn >= effective_limit {
+                break;
+            }
         }
 
+        let limit_display = match max_turns {
+            Some(n) => format!("{}", n),
+            None => "unlimited (safety cap)".to_string(),
+        };
         sink.send(Event::Error {
-            message: format!("Max agent turns reached ({}).", max_turns),
+            message: format!("Max agent turns reached ({}).", limit_display),
         });
         anyhow::bail!(
             "Max agent turns reached ({}). The agent exceeded its turn limit without producing a final response.",
-            max_turns
+            limit_display
         );
     }
 }
