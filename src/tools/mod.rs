@@ -444,9 +444,10 @@ fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsandboxed:
                 ));
             }
 
-            // Truncate to 10,000 characters
+            // Truncate to ~10,000 bytes, respecting char boundaries
             if result.len() > 10_000 {
-                result.truncate(10_000);
+                let trunc_at = result.floor_char_boundary(10_000);
+                result.truncate(trunc_at);
                 result.push_str("\n... [truncated]");
             }
 
