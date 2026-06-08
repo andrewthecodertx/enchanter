@@ -158,14 +158,15 @@ pub async fn run(args: Args) -> Result<()> {
     let config = crate::overlay::load_config(overlay.as_ref())?;
     let soul = crate::overlay::load_soul(overlay.as_ref())?;
     let memory = crate::overlay::load_memories(overlay.as_ref())?;
+    let kstore = crate::kstore::KnowledgeStore::load()?;
     let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     if let Some(cmd) = &args.command {
         #[cfg(feature = "tui")]
         if let Commands::Tui = cmd {
-            return run_tui(&args, config, soul, memory, skills).await;
+            return run_tui(&args, config, soul, memory, kstore, skills).await;
         }
-        return handle_command(cmd, &config, &soul, &memory, &skills);
+        return handle_command(cmd, &config, &soul, &memory, &kstore, &skills);
     }
 
     // Try daemon mode first (unless --no-daemon) — Unix only
@@ -239,6 +240,7 @@ pub async fn run(args: Args) -> Result<()> {
     let config = crate::overlay::load_config(overlay.as_ref())?;
     let soul = crate::overlay::load_soul(overlay.as_ref())?;
     let memory = crate::overlay::load_memories(overlay.as_ref())?;
+    let kstore = crate::kstore::KnowledgeStore::load()?;
     let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     // Resolve initial model: -m flag > config
@@ -260,6 +262,7 @@ pub async fn run(args: Args) -> Result<()> {
         config,
         soul,
         memory,
+        kstore,
         skills,
         resolved,
         SessionOptions {
@@ -303,6 +306,7 @@ pub async fn run(args: Args) -> Result<()> {
         let layers = crate::prompt::build_prompt_layers(
             &agent.soul,
             &agent.memory,
+            &agent.kstore,
             &agent.skills,
             &agent.config,
             &agent.resolved.model,
@@ -413,7 +417,10 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     // Memory is auto-saved on every mutation (add_memory/remove/replace all persist immediately),
-    // so no explicit save is needed here.
+    // so no explicit save is needed here. But knowledge store needs to be saved.
+    if let Err(e) = agent.kstore.save() {
+        eprintln!("{} Failed to save knowledge store: {}", "Warning:".yellow(), e);
+    }
 
     result
 }
@@ -495,6 +502,7 @@ async fn run_tui(
     config: Config,
     soul: crate::soul::Soul,
     memory: crate::memory::MemoryStore,
+    kstore: crate::kstore::KnowledgeStore,
     skills: crate::skills::SkillsIndex,
 ) -> Result<()> {
     let resolved = if let Some(model_flag) = &args.model {
@@ -514,6 +522,7 @@ async fn run_tui(
         config,
         soul,
         memory,
+        kstore,
         skills,
         resolved,
         SessionOptions {
@@ -539,6 +548,7 @@ fn handle_command(
     config: &Config,
     soul: &crate::soul::Soul,
     memory: &crate::memory::MemoryStore,
+    kstore: &crate::kstore::KnowledgeStore,
     skills: &crate::skills::SkillsIndex,
 ) -> Result<()> {
     match cmd {
@@ -657,6 +667,7 @@ fn handle_command(
             let layers = crate::prompt::build_prompt_layers(
                 soul,
                 memory,
+                kstore,
                 skills,
                 config,
                 &config.model_id(),
@@ -853,6 +864,7 @@ async fn run_repl(
                             let layers = crate::prompt::build_prompt_layers(
                                 &agent.soul,
                                 &agent.memory,
+                                &agent.kstore,
                                 &agent.skills,
                                 &agent.config,
                                 &agent.resolved.model,
@@ -877,6 +889,7 @@ async fn run_repl(
                             let layers = crate::prompt::build_prompt_layers(
                                 &agent.soul,
                                 &agent.memory,
+                                &agent.kstore,
                                 &agent.skills,
                                 &agent.config,
                                 &agent.resolved.model,

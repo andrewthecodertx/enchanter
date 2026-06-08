@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::api::{LlmClient, Message};
 use crate::config::{Config, ResolvedModel};
+use crate::kstore::KnowledgeStore;
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
 use crate::prompt;
@@ -27,6 +28,7 @@ pub struct AgentSession {
     pub config: Config,
     pub soul: Soul,
     pub memory: MemoryStore,
+    pub kstore: KnowledgeStore,
     pub skills: SkillsIndex,
     pub mcp: McpManager,
     pub messages: Vec<Message>,
@@ -77,6 +79,7 @@ impl AgentSession {
         config: Config,
         soul: Soul,
         memory: MemoryStore,
+        kstore: KnowledgeStore,
         skills: SkillsIndex,
         resolved: ResolvedModel,
         options: SessionOptions,
@@ -102,6 +105,7 @@ impl AgentSession {
             None => prompt::build_system_prompt_with_model(
                 &soul,
                 &memory,
+                &kstore,
                 &skills,
                 &config,
                 &resolved.model,
@@ -115,6 +119,7 @@ impl AgentSession {
             config,
             soul,
             memory,
+            kstore,
             skills,
             mcp,
             messages,
@@ -249,6 +254,7 @@ impl AgentSession {
             None => prompt::build_system_prompt_with_model(
                 &self.soul,
                 &self.memory,
+                &self.kstore,
                 &self.skills,
                 &self.config,
                 &self.resolved.model,
@@ -296,6 +302,7 @@ impl AgentSession {
             let refreshed = prompt::build_system_prompt_with_model(
                 &self.soul,
                 &self.memory,
+                &self.kstore,
                 &self.skills,
                 &self.config,
                 &self.resolved.model,
@@ -451,6 +458,7 @@ impl AgentSession {
                         &tc.function.name,
                         &tc_args,
                         &mut self.memory,
+                        &mut self.kstore,
                         &mut self.mcp,
                         &self.config.allowed_paths(),
                         self.config.allow_unsandboxed_exec(),
@@ -516,6 +524,7 @@ async fn dispatch_tool(
     name: &str,
     args: &Value,
     memory: &mut MemoryStore,
+    kstore: &mut KnowledgeStore,
     mcp: &mut McpManager,
     allowed_paths: &[PathBuf],
     allow_unsandboxed_exec: bool,
@@ -528,9 +537,10 @@ async fn dispatch_tool(
         "search_files",
         "list_directory",
         "memory",
+        "knowledge",
     ];
     if built_in_names.contains(&name) {
-        tools::dispatch(name, args, memory, allowed_paths, allow_unsandboxed_exec)
+        tools::dispatch(name, args, memory, kstore, allowed_paths, allow_unsandboxed_exec)
     } else if name.contains(':') {
         match mcp.dispatch(name, args).await {
             Some(Ok(result)) => result,

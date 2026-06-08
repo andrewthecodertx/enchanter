@@ -185,6 +185,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             let layers = crate::prompt::build_prompt_layers(
                 &app.agent.soul,
                 &app.agent.memory,
+                &app.agent.kstore,
                 &app.agent.skills,
                 &app.agent.config,
                 &app.agent.resolved.model,
@@ -215,6 +216,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             let layers = crate::prompt::build_prompt_layers(
                 &app.agent.soul,
                 &app.agent.memory,
+                &app.agent.kstore,
                 &app.agent.skills,
                 &app.agent.config,
                 &app.agent.resolved.model,

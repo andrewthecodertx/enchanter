@@ -27,6 +27,7 @@
 pub mod inspect;
 
 use crate::config::Config;
+use crate::kstore::KnowledgeStore;
 use crate::memory::MemoryStore;
 use crate::skills::SkillsIndex;
 use crate::soul::Soul;
@@ -37,21 +38,23 @@ use chrono::Local;
 pub fn build_system_prompt(
     soul: &Soul,
     memory: &MemoryStore,
+    kstore: &KnowledgeStore,
     skills: &SkillsIndex,
     config: &Config,
 ) -> String {
-    build_system_prompt_with_model(soul, memory, skills, config, &config.model_id())
+    build_system_prompt_with_model(soul, memory, kstore, skills, config, &config.model_id())
 }
 
 /// Build system prompt with an explicit model name (used after /model switching).
 pub fn build_system_prompt_with_model(
     soul: &Soul,
     memory: &MemoryStore,
+    kstore: &KnowledgeStore,
     skills: &SkillsIndex,
     config: &Config,
     model: &str,
 ) -> String {
-    build_prompt_layers(soul, memory, skills, config, model).assemble()
+    build_prompt_layers(soul, memory, kstore, skills, config, model).assemble()
 }
 
 /// Build structured prompt layers for inspection (diff & budget).
@@ -61,6 +64,7 @@ pub fn build_system_prompt_with_model(
 pub fn build_prompt_layers(
     soul: &Soul,
     memory: &MemoryStore,
+    kstore: &KnowledgeStore,
     skills: &SkillsIndex,
     config: &Config,
     model: &str,
@@ -108,6 +112,15 @@ pub fn build_prompt_layers(
              GitHub, etc.). Use them when relevant.",
         ),
     });
+
+    // KNOWLEDGE — structured key-value facts, much more compact than narrative memory
+    let knowledge_block = kstore.format_for_prompt();
+    if !knowledge_block.is_empty() {
+        layers.push(PromptLayer {
+            name: "KNOWLEDGE".to_string(),
+            content: knowledge_block,
+        });
+    }
 
     // VOLATILE
     let memory_block = memory.format_for_prompt();
@@ -174,6 +187,9 @@ mod tests {
     use crate::soul::Soul;
     use std::path::PathBuf;
 
+    use super::*;
+    use crate::kstore::KnowledgeStore;
+
     #[test]
     fn prompt_contains_soul() {
         let soul = Soul {
@@ -181,10 +197,11 @@ mod tests {
             source: PathBuf::from("<test>"),
         };
         let memory = MemoryStore::default();
+        let kstore = KnowledgeStore::default();
         let skills = SkillsIndex::default();
         let config = Config::default();
 
-        let prompt = build_system_prompt(&soul, &memory, &skills, &config);
+        let prompt = build_system_prompt(&soul, &memory, &kstore, &skills, &config);
         assert!(prompt.contains("I am Enchanter."));
         assert!(prompt.contains("ENVIRONMENT"));
     }
@@ -200,10 +217,11 @@ mod tests {
             user_entries: vec!["User is Andrew".to_string()],
             summary: None,
         };
+        let kstore = KnowledgeStore::default();
         let skills = SkillsIndex::default();
         let config = Config::default();
 
-        let prompt = build_system_prompt(&soul, &memory, &skills, &config);
+        let prompt = build_system_prompt(&soul, &memory, &kstore, &skills, &config);
         assert!(prompt.contains("project uses rust"));
         assert!(prompt.contains("Andrew"));
     }
@@ -215,10 +233,11 @@ mod tests {
             source: PathBuf::from("<test>"),
         };
         let memory = MemoryStore::default();
+        let kstore = KnowledgeStore::default();
         let skills = SkillsIndex::default();
         let config = Config::default();
 
-        let prompt = build_system_prompt_with_model(&soul, &memory, &skills, &config, "qwen3");
+        let prompt = build_system_prompt_with_model(&soul, &memory, &kstore, &skills, &config, "qwen3");
         assert!(prompt.contains("Model: qwen3"));
     }
 
@@ -229,10 +248,11 @@ mod tests {
             source: PathBuf::from("<test>"),
         };
         let memory = MemoryStore::default();
+        let kstore = KnowledgeStore::default();
         let skills = SkillsIndex::default();
         let config = Config::default();
 
-        let layers = build_prompt_layers(&soul, &memory, &skills, &config, "test-model");
+        let layers = build_prompt_layers(&soul, &memory, &kstore, &skills, &config, "test-model");
         let names: Vec<&str> = layers.layers.iter().map(|l| l.name.as_str()).collect();
         assert!(names.contains(&"SOUL"));
         assert!(names.contains(&"CONTEXT"));
@@ -240,6 +260,8 @@ mod tests {
         assert!(names.contains(&"SESSION"));
         // No VOLATILE when memory is empty
         assert!(!names.contains(&"VOLATILE"));
+        // No KNOWLEDGE when kstore is empty
+        assert!(!names.contains(&"KNOWLEDGE"));
     }
 
     #[test]
@@ -253,12 +275,33 @@ mod tests {
             user_entries: vec![],
             summary: None,
         };
+        let kstore = KnowledgeStore::default();
         let skills = SkillsIndex::default();
         let config = Config::default();
 
-        let layers = build_prompt_layers(&soul, &memory, &skills, &config, "test-model");
+        let layers = build_prompt_layers(&soul, &memory, &kstore, &skills, &config, "test-model");
         let names: Vec<&str> = layers.layers.iter().map(|l| l.name.as_str()).collect();
         assert!(names.contains(&"VOLATILE"));
+    }
+
+    #[test]
+    fn build_prompt_layers_includes_knowledge() {
+        let soul = Soul {
+            content: "Test SOUL.".to_string(),
+            source: PathBuf::from("<test>"),
+        };
+        let memory = MemoryStore::default();
+        let mut kstore = KnowledgeStore::default();
+        kstore.store("project.rust_version", "1.85", crate::kstore::Category::Environment, crate::kstore::Source::Observed);
+        let skills = SkillsIndex::default();
+        let config = Config::default();
+
+        let layers = build_prompt_layers(&soul, &memory, &kstore, &skills, &config, "test-model");
+        let names: Vec<&str> = layers.layers.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains(&"KNOWLEDGE"));
+        // Verify the knowledge content is in the assembled prompt
+        let assembled = layers.assemble();
+        assert!(assembled.contains("project.rust_version: 1.85"));
     }
 
     #[test]
@@ -272,11 +315,12 @@ mod tests {
             user_entries: vec!["user pref".to_string()],
             summary: None,
         };
+        let kstore = KnowledgeStore::default();
         let skills = SkillsIndex::default();
         let config = Config::default();
 
-        let old_prompt = build_system_prompt(&soul, &memory, &skills, &config);
-        let layers = build_prompt_layers(&soul, &memory, &skills, &config, &config.model_id());
+        let old_prompt = build_system_prompt(&soul, &memory, &kstore, &skills, &config);
+        let layers = build_prompt_layers(&soul, &memory, &kstore, &skills, &config, &config.model_id());
         let new_prompt = layers.assemble();
 
         // Both should produce identical output

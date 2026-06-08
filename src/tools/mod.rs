@@ -39,6 +39,7 @@
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
+use crate::kstore::KnowledgeStore;
 use crate::memory::MemoryStore;
 
 /// Emit the "running unsandboxed" warning at most once per process.
@@ -272,6 +273,44 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 "required": ["action"]
             }),
         },
+        ToolDef {
+            name: "knowledge",
+            description: "Read and modify a structured knowledge store that persists across sessions. \
+                Unlike memory (narrative text), knowledge stores discrete key-value facts \
+                that can be looked up without re-asking the LLM. \
+                Use 'get' to look up a fact by key, 'store' to save a fact, \
+                'search' to find entries by key prefix, 'list' to see all entries, \
+                or 'forget' to remove a stale entry. \
+                Keys use dot-namespace (e.g., project.rust_version, user.email). \
+                Categories: environment, project, preference, decision, fact.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "store", "search", "list", "forget"],
+                        "description": "The knowledge operation to perform"
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "Key for the fact (dot-namespaced, e.g., project.rust_version). Required for get, store, and forget."
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Value for the fact. Required for store."
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Category for the fact: environment, project, preference, decision, or fact. Defaults to fact."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Key prefix to search for. Required for search."
+                    }
+                },
+                "required": ["action"]
+            }),
+        },
     ]
 }
 
@@ -294,6 +333,7 @@ pub fn tools_json() -> Vec<Value> {
 
 /// Dispatch a built-in tool call by name. Returns the result as a string.
 /// The memory tool requires a mutable reference to the MemoryStore.
+/// The knowledge tool requires a mutable reference to the KnowledgeStore.
 ///
 /// The dispatch pattern (match on tool name string → route to handler function)
 /// follows the pattern used by all three reference projects:
@@ -310,6 +350,7 @@ pub fn dispatch(
     name: &str,
     args: &Value,
     memory: &mut MemoryStore,
+    kstore: &mut KnowledgeStore,
     allowed_paths: &[PathBuf],
     allow_unsandboxed_exec: bool,
 ) -> String {
@@ -321,6 +362,7 @@ pub fn dispatch(
         "search_files" => tool_search_files(args, allowed_paths),
         "list_directory" => tool_list_directory(args, allowed_paths),
         "memory" => tool_memory(args, memory),
+        "knowledge" => tool_knowledge(args, kstore),
         _ => format!("Unknown tool: {}", name),
     }
 }
@@ -821,6 +863,109 @@ fn tool_memory(args: &Value, memory: &mut MemoryStore) -> String {
     }
 }
 
+fn tool_knowledge(args: &Value, kstore: &mut KnowledgeStore) -> String {
+    use crate::kstore::Category;
+    use std::str::FromStr;
+
+    let action = match args.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => return "Error: missing required parameter 'action'".to_string(),
+    };
+
+    match action {
+        "get" => {
+            let key = match args.get("key").and_then(|v| v.as_str()) {
+                Some(k) => k,
+                None => return "Error: 'get' requires 'key' parameter".to_string(),
+            };
+            match kstore.get(key) {
+                Some(entry) => format!(
+                    "{} = {} (category: {}, source: {}, updated: {})",
+                    entry.key, entry.value, entry.category.as_str(),
+                    match entry.source {
+                        crate::kstore::Source::Observed => "observed",
+                        crate::kstore::Source::Told => "told",
+                        crate::kstore::Source::Inferred => "inferred",
+                    },
+                    entry.updated_at
+                ),
+                None => format!("No entry found for key '{}'.", key),
+            }
+        }
+        "store" => {
+            let key = match args.get("key").and_then(|v| v.as_str()) {
+                Some(k) => k,
+                None => return "Error: 'store' requires 'key' parameter".to_string(),
+            };
+            let value = match args.get("value").and_then(|v| v.as_str()) {
+                Some(v) => v,
+                None => return "Error: 'store' requires 'value' parameter".to_string(),
+            };
+            let category_str = args
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("fact");
+            let category = match Category::from_str(category_str) {
+                Ok(c) => c,
+                Err(e) => return format!("Error: {}", e),
+            };
+            kstore.store(key, value, category, crate::kstore::Source::Observed);
+            match kstore.save() {
+                Ok(()) => format!("Stored: {} = {}", key, value),
+                Err(e) => format!("Stored in memory but failed to persist: {}", e),
+            }
+        }
+        "search" => {
+            let query = match args.get("query").and_then(|v| v.as_str()) {
+                Some(q) => q,
+                None => return "Error: 'search' requires 'query' parameter".to_string(),
+            };
+            let results = kstore.search(query);
+            if results.is_empty() {
+                format!("No entries found matching prefix '{}'.", query)
+            } else {
+                let mut out = format!("Found {} entries:\n", results.len());
+                for entry in &results {
+                    out.push_str(&format!("  {} = {}\n", entry.key, entry.value));
+                }
+                out
+            }
+        }
+        "list" => {
+            if kstore.entries.is_empty() {
+                return "(no knowledge entries)".to_string();
+            }
+            let groups = kstore.list_by_category();
+            let mut out = String::new();
+            for (category, entries) in &groups {
+                out.push_str(&format!("[{}]\n", category));
+                for entry in entries {
+                    out.push_str(&format!("  {} = {}\n", entry.key, entry.value));
+                }
+            }
+            out
+        }
+        "forget" => {
+            let key = match args.get("key").and_then(|v| v.as_str()) {
+                Some(k) => k,
+                None => return "Error: 'forget' requires 'key' parameter".to_string(),
+            };
+            if kstore.forget(key) {
+                match kstore.save() {
+                    Ok(()) => format!("Forgot: {}", key),
+                    Err(e) => format!("Removed from memory but failed to persist: {}", e),
+                }
+            } else {
+                format!("No entry found for key '{}'.", key)
+            }
+        }
+        _ => format!(
+            "Unknown knowledge action: '{}'. Use get, store, search, list, or forget.",
+            action
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,13 +978,13 @@ mod tests {
 
     #[test]
     fn tool_definitions_count() {
-        assert_eq!(tool_definitions().len(), 7);
+        assert_eq!(tool_definitions().len(), 8);
     }
 
     #[test]
     fn tools_json_format() {
         let tools = tools_json();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         for tool in &tools {
             assert_eq!(tool["type"], "function");
             assert!(tool["function"]["name"].is_string());
@@ -850,14 +995,14 @@ mod tests {
     #[test]
     fn dispatch_unknown_tool() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("nonexistent", &json!({}), &mut mem, &allowed(), true);
+        let result = dispatch("nonexistent", &json!({}), &mut mem, &mut KnowledgeStore::default(), &allowed(), true);
         assert!(result.contains("Unknown tool"));
     }
 
     #[test]
     fn dispatch_missing_required_param() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("exec_command", &json!({}), &mut mem, &allowed(), true);
+        let result = dispatch("exec_command", &json!({}), &mut mem, &mut KnowledgeStore::default(), &allowed(), true);
         assert!(result.contains("missing required"));
     }
 
@@ -871,6 +1016,7 @@ mod tests {
             "write_file",
             &json!({"path": path, "content": "hello world"}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -880,6 +1026,7 @@ mod tests {
             "read_file",
             &json!({"path": path}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -895,6 +1042,7 @@ mod tests {
             "list_directory",
             &json!({"path": "/tmp"}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -917,6 +1065,7 @@ mod tests {
             "write_file",
             &json!({"path": &path, "content": "fn main() {\n    println!(\"hello\");\n}\n"}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -930,6 +1079,7 @@ mod tests {
                 "new_string": "println!(\"world\")"
             }),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -940,6 +1090,7 @@ mod tests {
             "read_file",
             &json!({"path": &path}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -960,6 +1111,7 @@ mod tests {
             "write_file",
             &json!({"path": &path, "content": "foo\nbar\nfoo\n"}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -972,6 +1124,7 @@ mod tests {
                 "new_string": "baz"
             }),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -990,6 +1143,7 @@ mod tests {
             "write_file",
             &json!({"path": &path, "content": "foo\nbar\nfoo\n"}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -1003,6 +1157,7 @@ mod tests {
                 "replace_all": true
             }),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -1022,6 +1177,7 @@ mod tests {
                 "target": "files"
             }),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -1038,6 +1194,7 @@ mod tests {
                 "content": "project uses rust 1.85"
             }),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );
@@ -1047,6 +1204,7 @@ mod tests {
             "memory",
             &json!({"action": "list"}),
             &mut mem,
+            &mut KnowledgeStore::default(),
             &allowed(),
             true,
         );

@@ -66,6 +66,7 @@ mod daemon {
 }
 
 mod home;
+mod kstore;
 mod mcp;
 mod memory;
 mod overlay;

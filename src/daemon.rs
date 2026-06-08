@@ -97,7 +97,7 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     };
 
     // Initialize agent session
-    eprintln!("Loading config, soul, memory, skills...");
+    eprintln!("Loading config, soul, memory, knowledge, skills...");
     let overlay = std::env::current_dir()
         .ok()
         .as_ref()
@@ -106,6 +106,7 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     let config = crate::overlay::load_config(overlay.as_ref()).context("loading config")?;
     let soul = crate::overlay::load_soul(overlay.as_ref()).context("loading soul")?;
     let memory = crate::overlay::load_memories(overlay.as_ref()).context("loading memory")?;
+    let kstore = crate::kstore::KnowledgeStore::load().context("loading knowledge store")?;
     let skills = crate::overlay::discover_skills(overlay.as_ref()).context("discovering skills")?;
 
     let resolved = config.resolve_default();
@@ -113,6 +114,7 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
         config,
         soul,
         memory,
+        kstore,
         skills,
         resolved,
         SessionOptions::default(), // streaming + tools enabled, no system override
@@ -273,6 +275,11 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
                     .add_memory(format!("session_summary\n{}", fallback));
             }
         }
+    }
+
+    // Save knowledge store on exit
+    if let Err(e) = agent.kstore.save() {
+        eprintln!("Warning: Failed to save knowledge store: {}", e);
     }
 
     Ok(())
