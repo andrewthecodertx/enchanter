@@ -29,7 +29,7 @@ Then configure a provider in `config.yaml`. A few examples:
 # Ollama (local, no API key needed)
 model:
   default: qwen3
-  base_url: http://localhost:11434/v1
+  base_url: http://localhost:11434/v1/chat/completions
 
 # OpenAI
 model:
@@ -39,7 +39,7 @@ model:
 # OpenRouter
 model:
   default: anthropic/claude-sonnet-4
-  base_url: https://openrouter.ai/api/v1
+  base_url: https://openrouter.ai/api/v1/chat/completions
   api_key: sk-or-...
 ```
 
@@ -48,7 +48,7 @@ You can also use environment variables instead of the config file:
 ```bash
 export ENCHANTER_MODEL=gpt-4.1-mini
 export ENCHANTER_API_KEY=sk-...
-export ENCHANTER_BASE_URL=https://api.openai.com/v1
+export ENCHANTER_BASE_URL=https://api.openai.com/v1/chat/completions
 ```
 
 Or point the whole data directory elsewhere:
@@ -65,10 +65,10 @@ Define multiple providers in `config.yaml` and switch between them mid-session:
 providers:
   ollama:
     model: qwen3
-    base_url: http://localhost:11434/v1
+    base_url: http://localhost:11434/v1/chat/completions
   openrouter:
     model: anthropic/claude-sonnet-4
-    base_url: https://openrouter.ai/api/v1
+    base_url: https://openrouter.ai/api/v1/chat/completions
     api_key: sk-or-...
 ```
 

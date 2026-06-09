@@ -213,7 +213,7 @@ impl LlmClient {
             .expect("reqwest client builder should not fail with these settings");
         Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: base_url.to_string(),
             api_key: api_key.map(|s| s.to_string()),
             model: model.to_string(),
         }
@@ -243,7 +243,7 @@ impl LlmClient {
     where
         F: FnMut(&str),
     {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = self.base_url.clone();
 
         let request = ChatRequest {
             model: &self.model,
@@ -395,7 +395,7 @@ impl LlmClient {
 
     /// Non-streaming chat.
     pub async fn chat(&self, messages: &[Message], tools: Option<&Value>) -> Result<ChatResult> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = self.base_url.clone();
 
         let request = ChatRequest {
             model: &self.model,

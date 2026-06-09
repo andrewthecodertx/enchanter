@@ -321,7 +321,7 @@ impl Config {
             .clone()
             .or_else(|| std::env::var("ENCHANTER_BASE_URL").ok())
             .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+            .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string())
     }
 
     /// API key: config > ENCHANTER_API_KEY > OPENAI_API_KEY. None for local providers.
@@ -349,7 +349,7 @@ impl Config {
             .or_else(|| self.model.base_url.clone())
             .or_else(|| std::env::var("ENCHANTER_BASE_URL").ok())
             .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
         let api_key = provider
             .api_key
             .clone()
@@ -510,6 +510,6 @@ mod tests {
         let c = Config::default();
         let resolved = c.resolve_default();
         assert_eq!(resolved.model, "gpt-4.1-mini");
-        assert_eq!(resolved.base_url, "https://api.openai.com/v1");
+        assert_eq!(resolved.base_url, "https://api.openai.com/v1/chat/completions");
     }
 }
