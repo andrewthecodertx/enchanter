@@ -491,6 +491,50 @@ turns are summarized into a single compact message. The most recent
 optional — without them, no compaction occurs and the full conversation is
 always sent.
 
+## Provider compatibility
+
+Enchanter sends tools (function calling) using the OpenAI `tools` format.
+Most OpenAI-compatible providers support this, but not all.
+
+### Tool calling support
+
+| Provider | Tools work? | Notes |
+|----------|:-----------:|-------|
+| OpenAI | ✅ | Full support on all current models |
+| OpenRouter | ✅ | Passes tools through to the underlying model — support depends on the model |
+| Ollama | ✅ | Support depends on the model (e.g., qwen3, llama3.3, mistral work) |
+| Groq | ✅ | Support depends on the model |
+| DeepSeek | ✅ | Full support |
+| Mistral | ✅ | Full support |
+| LM Studio | ✅ | Proxy for local models; support depends on the model |
+| **Perplexity** | ❌ | No tool calling support on any model or endpoint |
+
+### No-tool mode
+
+If your provider doesn't support tools, Enchanter still works — it just can't
+use built-in tools or MCP servers. You have two options:
+
+1. **Disable tools entirely** — useful for pure Q&A or search-augmented models:
+   ```bash
+   enchanter --no-tools -p "What causes tides?"
+   ```
+2. **Use a different provider** — switch to one that supports tools when you need
+   file access, shell execution, or MCP integrations.
+
+### Perplexity specifics
+
+Perplexity has two endpoints, neither of which supports OpenAI-style tool calling:
+
+- **`/chat/completions`** — their Sonar/search endpoint. Returns web-grounded
+  answers with citations. Rejects the `tools` parameter with
+  *"Tool calling is not supported for this model"*.
+- **`/v1/agent`** — a different API format that is **not** OpenAI-compatible.
+  It expects a different request schema and rejects standard OpenAI tool
+  definitions.
+
+Perplexity works fine for web-augmented Q&A with `--no-tools`. For agent-style
+workflows with tools, use a different provider.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
