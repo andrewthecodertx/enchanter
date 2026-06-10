@@ -146,8 +146,7 @@ fn draw_skills_pane(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let items: Vec<ListItem> = app
-        .agent
-        .skills
+        .cached_skills
         .skills
         .iter()
         .map(|skill| {
@@ -158,7 +157,7 @@ fn draw_skills_pane(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let title = format!(" SKILLS ({}) ", app.agent.skills.skills.len());
+    let title = format!(" SKILLS ({}) ", app.cached_skills.skills.len());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
@@ -186,17 +185,17 @@ fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
         colors::BORDER_IDLE
     };
 
-    let total = app.agent.memory.user_entries.len() + app.agent.memory.memory_entries.len();
+    let total = app.cached_memory.user_entries.len() + app.cached_memory.memory_entries.len();
     let title = format!(" MEMORY ({}) ", total);
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if !app.agent.memory.user_entries.is_empty() {
+    if !app.cached_memory.user_entries.is_empty() {
         lines.push(Line::from(Span::styled(
             "── USER ──",
             Style::default().fg(colors::USER),
         )));
-        for (i, entry) in app.agent.memory.user_entries.iter().enumerate() {
+        for (i, entry) in app.cached_memory.user_entries.iter().enumerate() {
             let truncated: String = entry.chars().take(28).collect();
             let is_selected = focused && app.memory_selected == i;
             let style = if is_selected {
@@ -210,14 +209,14 @@ fn draw_memory_pane(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    if !app.agent.memory.memory_entries.is_empty() {
+    if !app.cached_memory.memory_entries.is_empty() {
         lines.push(Line::from(Span::styled(
             "── NOTES ──",
             Style::default().fg(colors::ACCENT),
         )));
-        for (i, entry) in app.agent.memory.memory_entries.iter().enumerate() {
+        for (i, entry) in app.cached_memory.memory_entries.iter().enumerate() {
             let truncated: String = entry.chars().take(28).collect();
-            let global_idx = app.agent.memory.user_entries.len() + i;
+            let global_idx = app.cached_memory.user_entries.len() + i;
             let is_selected = focused && app.memory_selected == global_idx;
             let style = if is_selected {
                 Style::default()

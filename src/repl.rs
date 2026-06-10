@@ -260,9 +260,9 @@ fn truncate_line(s: &str, max: usize) -> String {
 // ── Main REPL loop ──
 
 pub async fn run_repl(
-    agent: &mut AgentSession,
+    agent: AgentSession,
     status: SharedStatus,
-) -> Result<()> {
+) -> Result<AgentSession> {
     let mut chat = ChatBuffer::new();
     let mut input = InputLine::new();
     let mut scroll_offset: usize = 0;
@@ -307,22 +307,47 @@ pub async fn run_repl(
         redraw(&mut stdout, &chat, scroll_offset, &input, &s)?;
     }
 
-    // Event receiver (set during streaming, None when idle)
+    // Agent is stored in Option — None while spawned on a background task
+    let mut agent: Option<AgentSession> = Some(agent);
+    // Event receiver + join handle during streaming
     let mut event_rx: Option<UnboundedReceiver<Event>> = None;
+    let mut agent_handle: Option<tokio::task::JoinHandle<Result<AgentSession>>> = None;
 
     loop {
         if let Some(rx) = &mut event_rx {
             // ── Streaming: drain events, update chat & status ──
             drain_events(rx, &mut chat, &status);
 
-            // Back to connecting after tools finish
+            // Check if streaming finished (agent loop sent Done or Error)
             if event_rx.is_some() {
                 let s = status.lock().unwrap();
                 if matches!(s.phase, AgentPhase::Idle) {
                     event_rx = None;
-                    // Update context tokens now that the turn is complete
-                    drop(s);
-                    sync_context_tokens(agent, &status);
+                    // Recover the agent from the spawned task
+                    if let Some(handle) = agent_handle.take() {
+                        match handle.await {
+                            Ok(Ok(returned_agent)) => {
+                                agent = Some(returned_agent);
+                                sync_context_tokens(agent.as_ref().unwrap(), &status);
+                            }
+                            Ok(Err(e)) => {
+                                chat.push(format!("✗ agent error: {}", e));
+                                // Agent is consumed by the task on error — we need to bail
+                                // or reconstruct. For now, log and set idle.
+                                {
+                                    let mut s = status.lock().unwrap();
+                                    s.phase = AgentPhase::Idle;
+                                }
+                            }
+                            Err(e) => {
+                                chat.push(format!("✗ task join error: {}", e));
+                                {
+                                    let mut s = status.lock().unwrap();
+                                    s.phase = AgentPhase::Idle;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -338,37 +363,51 @@ pub async fn run_repl(
             }
 
             // Check for terminal events (Ctrl+C to cancel, scroll)
-            if event_rx.is_some() {
-                if event::poll(Duration::from_millis(0))? {
-                    if let CrosstermEvent::Key(key) = event::read()? {
-                        match (key.modifiers, key.code) {
-                            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                                chat.push("── cancelled ──".to_string());
-                                {
-                                    let mut s = status.lock().unwrap();
-                                    s.phase = AgentPhase::Idle;
+            if event_rx.is_none() {
+                // Streaming finished in this iteration — fall through to idle
+                continue;
+            }
+            if event::poll(Duration::from_millis(0))? {
+                if let CrosstermEvent::Key(key) = event::read()? {
+                    match (key.modifiers, key.code) {
+                        (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                            chat.push("── cancelled ──".to_string());
+                            {
+                                let mut s = status.lock().unwrap();
+                                s.phase = AgentPhase::Idle;
+                            }
+                            event_rx = None;
+                            // Recover the agent even on cancel
+                            if let Some(handle) = agent_handle.take() {
+                                match handle.await {
+                                    Ok(Ok(returned_agent)) => {
+                                        agent = Some(returned_agent);
+                                        sync_context_tokens(agent.as_ref().unwrap(), &status);
+                                    }
+                                    _ => {
+                                        // Agent task failed or was cancelled — can't recover
+                                    }
                                 }
-                                event_rx = None;
+                            }
+                            auto_scroll = true;
+                        }
+                        (KeyModifiers::NONE, KeyCode::Up) => {
+                            auto_scroll = false;
+                            scroll_offset = scroll_offset.saturating_sub(1);
+                        }
+                        (KeyModifiers::NONE, KeyCode::Down) => {
+                            scroll_offset += 1;
+                            let max = max_scroll(&chat);
+                            if scroll_offset >= max {
+                                scroll_offset = max;
                                 auto_scroll = true;
                             }
-                            (KeyModifiers::NONE, KeyCode::Up) => {
-                                auto_scroll = false;
-                                scroll_offset = scroll_offset.saturating_sub(1);
-                            }
-                            (KeyModifiers::NONE, KeyCode::Down) => {
-                                scroll_offset += 1;
-                                let max = max_scroll(&chat);
-                                if scroll_offset >= max {
-                                    scroll_offset = max;
-                                    auto_scroll = true;
-                                }
-                            }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
             }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         } else {
             // ── Idle: wait for user input ──
             {
@@ -379,7 +418,8 @@ pub async fn run_repl(
             if event::poll(Duration::from_millis(200))? {
                 let ev = event::read()?;
                 if let CrosstermEvent::Key(key) = ev {
-                    let action = handle_idle_key(key, &mut input, &mut chat, &mut scroll_offset, &mut auto_scroll, agent, &status);
+                    let the_agent = agent.take().expect("agent must be Some when idle");
+                    let action = handle_idle_key(key, &mut input, &mut chat, &mut scroll_offset, &mut auto_scroll, the_agent, &status);
 
                     // Recalculate scroll after any chat changes
                     if auto_scroll {
@@ -387,11 +427,12 @@ pub async fn run_repl(
                     }
 
                     match action {
-                        IdleAction::Continue => {
+                        IdleAction::Continue { agent: returned } => {
+                            agent = Some(returned);
                             let s = status.lock().unwrap();
                             redraw(&mut stdout, &chat, scroll_offset, &input, &s)?;
                         }
-                        IdleAction::Send(msg) => {
+                        IdleAction::Send { msg, agent: the_agent } => {
                             chat.push(format!("⟩ {}", msg));
                             auto_scroll = true;
                             scroll_offset = calc_auto_scroll(&chat);
@@ -409,8 +450,10 @@ pub async fn run_repl(
                                 redraw(&mut stdout, &chat, scroll_offset, &input, &s)?;
                             }
 
-                            match agent.chat_events(&msg).await {
-                                Ok((_result, rx)) => {
+                            // Spawn the agent loop so events stream in real time
+                            match the_agent.chat_events_spawned(&msg) {
+                                Ok((handle, rx)) => {
+                                    agent_handle = Some(handle);
                                     event_rx = Some(rx);
                                 }
                                 Err(e) => {
@@ -420,10 +463,16 @@ pub async fn run_repl(
                                         s.phase = AgentPhase::Idle;
                                     }
                                     auto_scroll = true;
+                                    // Agent was consumed — we can't recover it.
+                                    // This is an error case; the agent is gone.
                                 }
                             }
                         }
-                        IdleAction::Quit => break,
+                        IdleAction::Quit(mut agent) => {
+                            // Shutdown MCP before dropping
+                            agent.shutdown_mcp().await;
+                            break;
+                        }
                     }
                 } else if let CrosstermEvent::Resize(_, _) = &ev {
                     // Redraw on resize
@@ -436,7 +485,15 @@ pub async fn run_repl(
     terminal::disable_raw_mode()?;
     execute!(stdout, LeaveAlternateScreen)?;
 
-    Ok(())
+    // Return the agent so the caller can do exit summary, etc.
+    // It's possible agent is still in a spawned task if we somehow exited
+    // without recovering it — in that case, try to recover from the handle.
+    let agent = agent.unwrap_or_else(|| {
+        // Agent was consumed by a spawned task but we exited the loop.
+        // This shouldn't normally happen, but handle it gracefully.
+        panic!("agent was not recovered from spawned task on exit");
+    });
+    Ok(agent)
 }
 
 // ── Event draining during streaming ──
@@ -522,9 +579,9 @@ fn drain_events(rx: &mut UnboundedReceiver<Event>, chat: &mut ChatBuffer, status
 // ── Idle key handling ──
 
 enum IdleAction {
-    Continue,
-    Send(String),
-    Quit,
+    Continue { agent: AgentSession },
+    Send { msg: String, agent: AgentSession },
+    Quit(AgentSession),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -534,7 +591,7 @@ fn handle_idle_key(
     chat: &mut ChatBuffer,
     scroll_offset: &mut usize,
     auto_scroll: &mut bool,
-    agent: &mut AgentSession,
+    mut agent: AgentSession,
     status: &SharedStatus,
 ) -> IdleAction {
     match (key.modifiers, key.code) {
@@ -543,65 +600,65 @@ fn handle_idle_key(
                 let msg = input.take();
                 // Slash commands
                 if msg.starts_with('/') {
-                    if handle_slash_command(&msg, agent, chat, status) {
-                        return IdleAction::Quit;
+                    if handle_slash_command(&msg, &mut agent, chat, status) {
+                        return IdleAction::Quit(agent);
                     }
                     *auto_scroll = true;
-                    return IdleAction::Continue;
+                    return IdleAction::Continue { agent };
                 }
-                IdleAction::Send(msg)
+                IdleAction::Send { msg, agent }
             } else {
-                IdleAction::Continue
+                IdleAction::Continue { agent }
             }
         }
         (_, KeyCode::Char(c)) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             input.insert(c);
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Backspace) => {
             input.backspace();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Delete) => {
             input.delete();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Left) => {
             input.move_left();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Right) => {
             input.move_right();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
             input.move_home();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
             input.move_end();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
             input.clear();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Home) => {
             input.move_home();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::End) => {
             input.move_end();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Esc) => {
             input.clear();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Up) => {
             *auto_scroll = false;
             *scroll_offset = scroll_offset.saturating_sub(3);
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::Down) => {
             *scroll_offset += 3;
@@ -610,14 +667,14 @@ fn handle_idle_key(
                 *scroll_offset = max;
                 *auto_scroll = true;
             }
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::PageUp) => {
             *auto_scroll = false;
             let (_, height) = terminal_size();
             let jump = chat_rows(height) as usize;
             *scroll_offset = scroll_offset.saturating_sub(jump);
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::NONE, KeyCode::PageDown) => {
             let (_, height) = terminal_size();
@@ -628,14 +685,14 @@ fn handle_idle_key(
                 *scroll_offset = max;
                 *auto_scroll = true;
             }
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             input.clear();
-            IdleAction::Continue
+            IdleAction::Continue { agent }
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('d')) => IdleAction::Quit,
-        _ => IdleAction::Continue,
+        (KeyModifiers::CONTROL, KeyCode::Char('d')) => IdleAction::Quit(agent),
+        _ => IdleAction::Continue { agent },
     }
 }
 

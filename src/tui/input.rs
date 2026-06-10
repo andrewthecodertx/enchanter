@@ -168,7 +168,7 @@ fn handle_input_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRe
 }
 
 fn handle_skills_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleResult {
-    let count = app.agent.skills.skills.len();
+    let count = app.cached_skills.skills.len();
     match (key.modifiers, key.code) {
         (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
             if app.skills_selected > 0 {
@@ -183,7 +183,7 @@ fn handle_skills_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleR
             HandleResult::Continue
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
-            if let Some(skill) = app.agent.skills.skills.get(app.skills_selected) {
+            if let Some(skill) = app.cached_skills.skills.get(app.skills_selected) {
                 let cat = skill.category.as_deref().unwrap_or("other");
                 app.chat_lines.push(ChatLine::System(format!(
                     "[{}] {} — {}",
@@ -210,7 +210,7 @@ fn handle_skills_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleR
 }
 
 fn handle_memory_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleResult {
-    let total = app.agent.memory.user_entries.len() + app.agent.memory.memory_entries.len();
+    let total = app.cached_memory.user_entries.len() + app.cached_memory.memory_entries.len();
     match (key.modifiers, key.code) {
         (KeyModifiers::NONE, KeyCode::Up) | (KeyModifiers::NONE, KeyCode::Char('k')) => {
             if app.memory_selected > 0 {
@@ -225,16 +225,14 @@ fn handle_memory_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleR
             HandleResult::Continue
         }
         (KeyModifiers::NONE, KeyCode::Enter) => {
-            let user_count = app.agent.memory.user_entries.len();
+            let user_count = app.cached_memory.user_entries.len();
             let entry = if app.memory_selected < user_count {
-                app.agent
-                    .memory
+                app.cached_memory
                     .user_entries
                     .get(app.memory_selected)
                     .map(|s| s.as_str())
             } else {
-                app.agent
-                    .memory
+                app.cached_memory
                     .memory_entries
                     .get(app.memory_selected - user_count)
                     .map(|s| s.as_str())

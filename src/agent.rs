@@ -204,6 +204,51 @@ impl AgentSession {
     /// Returns the final ChatResult and the receiving end of the event channel.
     /// The caller should read events from the receiver and handle them (print,
     /// send over socket, etc.). Event::Done signals the end.
+    /// Start a chat and immediately return the event receiver, spawning the
+    /// agent loop on a background task so events stream in real time.
+    /// Returns the JoinHandle (which yields the AgentSession back when done)
+    /// and the event receiver.
+    pub fn chat_events_spawned(
+        mut self,
+        user_prompt: &str,
+    ) -> Result<(tokio::task::JoinHandle<Result<AgentSession>>, mpsc::UnboundedReceiver<Event>)> {
+        let user_msg = Message::user(user_prompt);
+        self.session.append(&user_msg)?;
+        self.messages.push(user_msg);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = self.run_agent_loop_events(&tx).await {
+                let _ = tx.send(Event::Error { message: e.to_string() });
+            }
+            Ok(self)
+        });
+        Ok((handle, rx))
+    }
+
+    /// Start a retry and immediately return the event receiver, spawning the
+    /// agent loop on a background task.
+    pub fn retry_events_spawned(
+        mut self,
+    ) -> Result<(tokio::task::JoinHandle<Result<AgentSession>>, mpsc::UnboundedReceiver<Event>)> {
+        let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
+        if let Some(idx) = last_user_idx
+            && idx + 1 < self.messages.len()
+        {
+            self.messages.truncate(idx + 1);
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            if let Err(e) = self.run_agent_loop_events(&tx).await {
+                let _ = tx.send(Event::Error { message: e.to_string() });
+            }
+            Ok(self)
+        });
+        Ok((handle, rx))
+    }
+
+    /// Start a chat, blocking until the entire agent loop completes.
+    /// All events are buffered in the returned receiver — no real-time streaming.
     pub async fn chat_events(
         &mut self,
         user_prompt: &str,

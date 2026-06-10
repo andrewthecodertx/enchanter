@@ -2,6 +2,10 @@
 //!
 //! Activated via `enchanter tui` subcommand. Provides a multi-pane, keyboard-driven
 //! interface similar to lazygit, with panes for skills, memory, chat, and input.
+//!
+//! The agent is stored in `Option<AgentSession>` so it can be moved into a spawned
+//! tokio task for real-time streaming. When idle, the agent is `Some`; during
+//! streaming, it's `None` and the JoinHandle tracks the background task.
 
 pub mod app;
 pub mod commands;
@@ -71,9 +75,9 @@ async fn run_app(
     ));
 
     // Start MCP servers
-    app.agent.start_mcp().await;
+    app.agent.as_mut().expect("agent present at init").start_mcp().await;
 
-    // Streaming event receiver — None when idle, Some when streaming
+    // Event receiver + join handle during streaming
     let mut event_rx: Option<UnboundedReceiver<Event>> = None;
     let mut running = true;
 
@@ -82,9 +86,8 @@ async fn run_app(
         terminal.draw(|f| render::draw(f, &app))?;
 
         if let Some(rx) = &mut event_rx {
-            // Streaming mode: drain events from the channel, check terminal keys
+            // ── Streaming mode: drain events from the channel ──
             loop {
-                // Check for LLM events (non-blocking)
                 match rx.try_recv() {
                     Ok(event) => {
                         match event {
@@ -92,17 +95,15 @@ async fn run_app(
                                 app.finalize_stream();
                                 app.streaming = false;
                                 app.turn += 1;
-                                app.context_tokens = app.agent.estimated_context_tokens();
-                                app.refresh_info();
+                                app.chat_auto_scroll = true;
                                 event_rx = None;
-                                // Run memory management after each turn
-                                manage_memory(&mut app).await;
                                 break;
                             }
                             Event::Error { message } => {
                                 app.finalize_stream();
                                 app.chat_lines.push(ChatLine::Error(message));
                                 app.streaming = false;
+                                app.chat_auto_scroll = true;
                                 event_rx = None;
                                 break;
                             }
@@ -112,22 +113,51 @@ async fn run_app(
                         }
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                        // No more events ready — give the LLM a moment and check keys
+                        // No more events ready — break out of drain loop
                         break;
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         // Channel closed — streaming ended without Done
                         app.finalize_stream();
                         app.streaming = false;
+                        app.chat_auto_scroll = true;
                         event_rx = None;
-                        // Run memory management
-                        manage_memory(&mut app).await;
                         break;
                     }
                 }
             }
 
-            // If we're still streaming, check for terminal events
+            // If streaming finished, recover the agent from the spawned task
+            if event_rx.is_none() {
+                if let Some(handle) = app.agent_handle.take() {
+                    match handle.await {
+                        Ok(Ok(returned_agent)) => {
+                            app.return_agent(returned_agent);
+
+                            // Run memory management after recovering agent
+                            {
+                                let mem_config = app.get_agent().config.memory_config().clone();
+                                let result = {
+                                    let agent = app.get_agent_mut();
+                                    let client = &agent.client;
+                                    agent.memory.manage(client, &mem_config).await
+                                };
+                                if let Err(e) = result {
+                                    app.chat_lines.push(ChatLine::System(format!("Memory management: {}", e)));
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            app.chat_lines.push(ChatLine::Error(format!("Agent error: {}", e)));
+                        }
+                        Err(e) => {
+                            app.chat_lines.push(ChatLine::Error(format!("Task join error: {}", e)));
+                        }
+                    }
+                }
+            }
+
+            // If we're still streaming, check for terminal key events
             if event_rx.is_some() {
                 if event::poll(Duration::from_millis(0))? {
                     let key_event = event::read()?;
@@ -139,7 +169,19 @@ async fn run_app(
                             app.finalize_stream();
                             app.chat_lines.push(ChatLine::System("Cancelled.".into()));
                             app.streaming = false;
+                            app.chat_auto_scroll = true;
                             event_rx = None;
+                            // Try to recover agent even on cancel
+                            if let Some(handle) = app.agent_handle.take() {
+                                match handle.await {
+                                    Ok(Ok(returned_agent)) => {
+                                        app.return_agent(returned_agent);
+                                    }
+                                    _ => {
+                                        // Agent task failed or was cancelled
+                                    }
+                                }
+                            }
                         }
                         StreamingAction::CycleFocus => {
                             app.focus = app.focus.next();
@@ -154,7 +196,7 @@ async fn run_app(
                 tokio::time::sleep(Duration::from_millis(16)).await;
             }
         } else {
-            // Idle mode: wait for user input
+            // ── Idle mode: wait for user input ──
             if event::poll(Duration::from_millis(100))? {
                 let event = event::read()?;
                 match input::handle_key(&mut app, event) {
@@ -174,45 +216,40 @@ async fn run_app(
     }
 
     // Shutdown: stop MCP servers
-    app.agent.shutdown_mcp().await;
+    if let Some(agent) = app.agent.as_mut() {
+        agent.shutdown_mcp().await;
+    }
 
     // Session summary on exit (like the REPL does)
-    if app.agent.config.summarize_on_exit() && crate::summary::should_summarize(&app.agent.messages)
-    {
-        eprintln!("  Generating session summary...");
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            crate::summary::generate_session_summary(&app.agent.client, &app.agent.messages),
-        )
-        .await
-        {
-            Ok(Ok(summary_text)) if !summary_text.is_empty() => {
-                if let Err(e) = app
-                    .agent
-                    .memory
-                    .add_memory(format!("session_summary\n{}", summary_text))
-                {
-                    eprintln!("  Failed to save session summary: {}", e);
-                } else {
-                    eprintln!("  Session summary saved to memory.");
+    if let Some(agent) = app.agent.as_ref() {
+        if agent.config.summarize_on_exit() && crate::summary::should_summarize(&agent.messages) {
+            eprintln!("  Generating session summary...");
+            let client = &agent.client;
+            let messages = &agent.messages;
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                crate::summary::generate_session_summary(client, messages),
+            )
+            .await
+            {
+                Ok(Ok(summary_text)) if !summary_text.is_empty() => {
+                    if let Err(e) = app.get_agent_mut().memory.add_memory(format!("session_summary\n{}", summary_text)) {
+                        eprintln!("  Failed to save session summary: {}", e);
+                    } else {
+                        eprintln!("  Session summary saved to memory.");
+                    }
                 }
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                let fallback = crate::summary::fallback_summary(&app.agent.messages);
-                let _ = app
-                    .agent
-                    .memory
-                    .add_memory(format!("session_summary\n{}", fallback));
-                eprintln!("  Summary generation failed: {}", e);
-            }
-            Err(_) => {
-                let fallback = crate::summary::fallback_summary(&app.agent.messages);
-                let _ = app
-                    .agent
-                    .memory
-                    .add_memory(format!("session_summary\n{}", fallback));
-                eprintln!("  Summary timed out, using fallback.");
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let fallback = crate::summary::fallback_summary(messages);
+                    let _ = app.get_agent_mut().memory.add_memory(format!("session_summary\n{}", fallback));
+                    eprintln!("  Summary generation failed: {}", e);
+                }
+                Err(_) => {
+                    let fallback = crate::summary::fallback_summary(messages);
+                    let _ = app.get_agent_mut().memory.add_memory(format!("session_summary\n{}", fallback));
+                    eprintln!("  Summary timed out, using fallback.");
+                }
             }
         }
     }
@@ -222,11 +259,11 @@ async fn run_app(
 
 /// Handle a user message (chat or slash command). Returns Some(event_rx) if streaming started.
 async fn handle_user_message(app: &mut App, msg: String) -> Option<UnboundedReceiver<Event>> {
-    // Handle slash commands that don't require async
+    // Handle slash commands that don't require spawning
     if msg.starts_with('/') {
         match commands::handle_command(app, &msg) {
             CommandResult::Done => None,
-            CommandResult::Quit => None, // handled in main loop
+            CommandResult::Quit => None,
             CommandResult::SendMessage(msg) => {
                 if msg == "/retry" {
                     handle_retry(app).await
@@ -240,53 +277,53 @@ async fn handle_user_message(app: &mut App, msg: String) -> Option<UnboundedRece
     }
 }
 
-/// Start a chat with streaming. Returns the event receiver.
+/// Start a chat with real-time streaming. Spawns the agent loop on a background task.
 async fn handle_chat(app: &mut App, msg: String) -> Option<UnboundedReceiver<Event>> {
     app.chat_lines.push(ChatLine::User(msg.clone()));
     app.chat_auto_scroll = true;
     app.streaming = true;
     app.current_stream_text.clear();
 
-    match app.agent.chat_events(&msg).await {
-        Ok((_chat_result, event_rx)) => Some(event_rx),
+    // Take the agent out of App to move it into the spawned task
+    let the_agent = app.take_agent();
+
+    let result = the_agent.chat_events_spawned(&msg);
+    match result {
+        Ok((handle, rx)) => {
+            app.agent_handle = Some(handle);
+            Some(rx)
+        }
         Err(e) => {
-            app.chat_lines
-                .push(ChatLine::Error(format!("Error: {}", e)));
+            // chat_events_spawned failed — the agent was consumed by the method
+            // on error. We can't recover it. Show the error and mark streaming as done.
+            app.chat_lines.push(ChatLine::Error(format!("Error: {}", e)));
             app.streaming = false;
             None
         }
     }
 }
 
-/// Start a retry with streaming. Returns the event receiver.
+/// Start a retry with real-time streaming. Same pattern as handle_chat.
 async fn handle_retry(app: &mut App) -> Option<UnboundedReceiver<Event>> {
     app.chat_lines.push(ChatLine::System("Retrying...".into()));
     app.chat_auto_scroll = true;
     app.streaming = true;
     app.current_stream_text.clear();
 
-    match app.agent.retry_events().await {
-        Ok((_chat_result, event_rx)) => Some(event_rx),
+    let the_agent = app.take_agent();
+
+    let result = the_agent.retry_events_spawned();
+    match result {
+        Ok((handle, rx)) => {
+            app.agent_handle = Some(handle);
+            Some(rx)
+        }
         Err(e) => {
-            app.chat_lines
-                .push(ChatLine::Error(format!("Retry error: {}", e)));
+            // retry_events_spawned failed — agent was consumed. Can't recover.
+            app.chat_lines.push(ChatLine::Error(format!("Retry error: {}", e)));
             app.streaming = false;
             None
         }
-    }
-}
-
-/// Run memory management (cap + summarize) after a chat turn completes.
-async fn manage_memory(app: &mut App) {
-    let mem_config = app.agent.config.memory_config().clone();
-    if let Err(e) = app
-        .agent
-        .memory
-        .manage(&app.agent.client, &mem_config)
-        .await
-    {
-        app.chat_lines
-            .push(ChatLine::System(format!("Memory management: {}", e)));
     }
 }
 

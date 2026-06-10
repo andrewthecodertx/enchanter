@@ -377,7 +377,7 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     let shared_status = crate::status_bar::new_shared_status();
-    let result = crate::repl::run_repl(&mut agent, shared_status).await;
+    let mut agent = crate::repl::run_repl(agent, shared_status).await?;
     agent.shutdown_mcp().await;
 
     // Exit summary
@@ -465,7 +465,7 @@ pub async fn run(args: Args) -> Result<()> {
         duration_secs: session_start.elapsed().as_secs(),
     });
 
-    result
+    Ok(())
 }
 
 /// Handle daemon management commands (Unix only).

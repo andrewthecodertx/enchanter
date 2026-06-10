@@ -17,7 +17,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
     match line.trim() {
         "/exit" | "/quit" | "/bye" => CommandResult::Quit,
         "/clear" => {
-            if let Err(e) = app.agent.clear() {
+            if let Err(e) = app.get_agent_mut().clear() {
                 app.chat_lines
                     .push(crate::tui::app::ChatLine::Error(format!(
                         "Failed to clear: {}",
@@ -29,7 +29,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                     "Conversation cleared.".into(),
                 ));
                 app.turn = 0;
-                app.context_tokens = app.agent.estimated_context_tokens();
+                app.context_tokens = app.get_agent().estimated_context_tokens();
             }
             CommandResult::Done
         }
@@ -40,8 +40,8 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             CommandResult::Done
         }
         "/ctx" | "/context" => {
-            let tokens = app.agent.estimated_context_tokens();
-            let budget = crate::status_bar::model_context_size(&app.agent.resolved.model);
+            let tokens = app.get_agent().estimated_context_tokens();
+            let budget = crate::status_bar::model_context_size(&app.get_agent().resolved.model);
             let msg = if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 format!("Context: ~{} / {} ({}%)",
@@ -51,7 +51,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             } else {
                 format!("Context: ~{} tokens (budget unknown for {})",
                     crate::status_bar::fmt_tokens(tokens),
-                    app.agent.resolved.model)
+                    app.get_agent().resolved.model)
             };
             app.chat_lines.push(crate::tui::app::ChatLine::System(msg));
             CommandResult::Done
@@ -60,7 +60,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             app.chat_lines
                 .push(crate::tui::app::ChatLine::System(format!(
                     "SOUL.md:\n{}",
-                    app.agent.soul.content
+                    app.get_agent().soul.content
                 )));
             CommandResult::Done
         }
@@ -68,7 +68,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             app.chat_lines
                 .push(crate::tui::app::ChatLine::System(format!(
                     "Memory:\n{}",
-                    app.agent.memory.format_for_prompt()
+                    app.get_agent().memory.format_for_prompt()
                 )));
             CommandResult::Done
         }
@@ -76,7 +76,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             app.chat_lines
                 .push(crate::tui::app::ChatLine::System(format!(
                     "Skills:\n{}",
-                    app.agent.skills.format_index_for_prompt()
+                    app.get_agent().skills.format_index_for_prompt()
                 )));
             CommandResult::Done
         }
@@ -96,27 +96,27 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                 builtins.len(),
                 builtins.join("\n")
             );
-            let servers = app.agent.mcp.server_names();
+            let servers = app.get_agent().mcp.server_names();
             if !servers.is_empty() {
                 msg.push_str("\n\nMCP tools:");
                 for server_name in &servers {
                     msg.push_str(&format!("\n  [{}]", server_name));
                 }
             }
-            let total = crate::tools::tool_definitions().len() + app.agent.mcp.total_tool_count();
+            let total = crate::tools::tool_definitions().len() + app.get_agent().mcp.total_tool_count();
             msg.push_str(&format!("\n\nTotal: {} tools", total));
             app.chat_lines.push(crate::tui::app::ChatLine::System(msg));
             CommandResult::Done
         }
         "/config" => {
-            let info = app.agent.info();
+            let info = app.get_agent().info();
             let key_status = if info.api_key_set {
                 "configured"
             } else {
                 "not set"
             };
-            let tokens = app.agent.estimated_context_tokens();
-            let budget = crate::status_bar::model_context_size(&app.agent.resolved.model);
+            let tokens = app.get_agent().estimated_context_tokens();
+            let budget = crate::status_bar::model_context_size(&app.get_agent().resolved.model);
             let ctx_line = if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 format!("  Context:  ~{} / {} ({}%)",
@@ -138,7 +138,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
         }
         "/prompt" => {
             let prompt_text = app
-                .agent
+                .get_agent()
                 .messages
                 .first()
                 .map(|m| m.content.as_deref().unwrap_or(""))
@@ -236,7 +236,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                     "Usage: /model <name>".into(),
                 ));
             } else {
-                match app.agent.switch_model(&name) {
+                match app.get_agent_mut().switch_model(&name) {
                     Ok(label) => {
                         app.chat_lines
                             .push(crate::tui::app::ChatLine::System(format!(
@@ -244,8 +244,8 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                                 label
                             )));
                         app.refresh_info();
-                        app.context_budget = crate::status_bar::model_context_size(&app.agent.resolved.model);
-                        app.context_tokens = app.agent.estimated_context_tokens();
+                        app.context_budget = crate::status_bar::model_context_size(&app.get_agent().resolved.model);
+                        app.context_tokens = app.get_agent().estimated_context_tokens();
                     }
                     Err(e) => {
                         app.chat_lines
@@ -260,14 +260,14 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
         }
         s if s.starts_with("/prompt diff") => {
             let layers = crate::prompt::build_prompt_layers(
-                &app.agent.soul,
-                &app.agent.memory,
-                &app.agent.kstore,
-                &app.agent.skills,
-                &app.agent.config,
-                &app.agent.resolved.model,
+                &app.get_agent().soul,
+                &app.get_agent().memory,
+                &app.get_agent().kstore,
+                &app.get_agent().skills,
+                &app.get_agent().config,
+                &app.get_agent().resolved.model,
             );
-            if let Some(prev) = &app.agent.previous_prompt_layers {
+            if let Some(prev) = &app.get_agent().previous_prompt_layers {
                 let diff = layers.diff(prev);
                 app.chat_lines
                     .push(crate::tui::app::ChatLine::System(format!(
@@ -286,17 +286,17 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                         names.join("\n")
                     )));
             }
-            app.agent.previous_prompt_layers = Some(layers);
+            app.get_agent_mut().previous_prompt_layers = Some(layers);
             CommandResult::Done
         }
         s if s.starts_with("/prompt budget") => {
             let layers = crate::prompt::build_prompt_layers(
-                &app.agent.soul,
-                &app.agent.memory,
-                &app.agent.kstore,
-                &app.agent.skills,
-                &app.agent.config,
-                &app.agent.resolved.model,
+                &app.get_agent().soul,
+                &app.get_agent().memory,
+                &app.get_agent().kstore,
+                &app.get_agent().skills,
+                &app.get_agent().config,
+                &app.get_agent().resolved.model,
             );
             let report = layers.budget();
             app.chat_lines
@@ -311,11 +311,11 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             CommandResult::SendMessage("/retry".into())
         }
         "/undo" => {
-            if app.agent.undo() {
+            if app.get_agent_mut().undo() {
                 app.chat_lines.push(crate::tui::app::ChatLine::System(
                     "Undid last exchange.".into(),
                 ));
-                app.context_tokens = app.agent.estimated_context_tokens();
+                app.context_tokens = app.get_agent().estimated_context_tokens();
             } else {
                 app.chat_lines
                     .push(crate::tui::app::ChatLine::Error("Nothing to undo".into()));
