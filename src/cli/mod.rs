@@ -122,9 +122,6 @@ pub enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
-    /// Launch the terminal user interface (TUI).
-    #[cfg(feature = "tui")]
-    Tui,
 }
 
 #[derive(Subcommand, Debug)]
@@ -163,10 +160,6 @@ pub async fn run(args: Args) -> Result<()> {
     let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     if let Some(cmd) = &args.command {
-        #[cfg(feature = "tui")]
-        if let Commands::Tui = cmd {
-            return run_tui(&args, config, soul, memory, kstore, skills).await;
-        }
         return handle_command(cmd, &config, &soul, &memory, &kstore, &skills);
     }
 
@@ -538,54 +531,6 @@ async fn handle_daemon_command(action: &DaemonAction, args: &Args) -> Result<()>
     }
 }
 
-/// Launch the TUI.
-#[cfg(feature = "tui")]
-async fn run_tui(
-    args: &Args,
-    config: Config,
-    soul: crate::soul::Soul,
-    memory: crate::memory::MemoryStore,
-    kstore: crate::kstore::KnowledgeStore,
-    skills: crate::skills::SkillsIndex,
-) -> Result<()> {
-    let resolved = if let Some(model_flag) = &args.model {
-        config.resolve_provider(model_flag).unwrap_or_else(|| {
-            let default = config.resolve_default();
-            ResolvedModel {
-                model: model_flag.clone(),
-                base_url: default.base_url,
-                api_key: default.api_key,
-            }
-        })
-    } else {
-        config.resolve_default()
-    };
-
-    let mut agent = AgentSession::new(
-        config,
-        soul,
-        memory,
-        kstore,
-        skills,
-        resolved,
-        SessionOptions {
-            no_stream: false, // streaming in TUI
-            no_tools: args.no_tools,
-            system_override: args.system.clone(),
-        },
-    )?;
-
-    agent.session.append(&agent.messages[0])?;
-
-    // Cap + summarize memory if needed
-    let mem_config = agent.config.memory_config().clone();
-    if let Err(e) = agent.memory.manage(&agent.client, &mem_config).await {
-        eprintln!("{} memory management: {}", "Warning:".yellow(), e);
-    }
-
-    crate::tui::run(agent).await
-}
-
 fn handle_command(
     cmd: &Commands,
     config: &Config,
@@ -827,11 +772,6 @@ fn handle_command(
         },
         #[cfg(unix)]
         Commands::Daemon { .. } => {
-            // Handled in run() before this
-            unreachable!()
-        }
-        #[cfg(feature = "tui")]
-        Commands::Tui => {
             // Handled in run() before this
             unreachable!()
         }

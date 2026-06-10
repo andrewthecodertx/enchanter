@@ -414,7 +414,7 @@ impl AgentSession {
         self.messages = apply_compaction(&self.messages, split, &summary);
 
         // Surface it the same way streaming output is surfaced: as an event for
-        // channel consumers (daemon, TUI), and as a direct stderr notice for the
+        // channel consumers (daemon), and as a direct stderr notice for the
         // REPL/inline path, which prints rather than consuming events.
         activity_log::log(activity_log::ActivityEvent::Compacted {
             removed_messages: removed,

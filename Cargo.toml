@@ -1,6 +1,6 @@
 [package]
 name = "enchanter"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 description = "A focused AI agent harness"
 license = "MIT"
@@ -23,8 +23,6 @@ regex = "1"
 glob = "0.3"
 uuid = { version = "1", features = ["v4"] }
 similar = "2"
-ratatui = { version = "0.30", optional = true }
-ratatui-crossterm = { version = "0.1", optional = true }
 crossterm = "0.29"
 
 [target.'cfg(unix)'.dependencies]
@@ -35,10 +33,6 @@ ctrlc = "3"
 # dependency — keeps non-Linux builds clean.
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
-
-[features]
-default = ["tui"]
-tui = ["dep:ratatui", "dep:ratatui-crossterm"]
 
 [dev-dependencies]
 tempfile = "3"

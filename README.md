@@ -130,67 +130,6 @@ enchanter --record session.jsonl
 enchanter --record session.jsonl --record-redact
 ```
 
-### TUI mode
-
-```bash
-# Launch the terminal UI (multi-pane, keyboard-driven)
-enchanter tui
-```
-
-The TUI is a multi-pane interface with a sidebar (skills + memory), main chat area, and input bar. A header shows the model, provider, and session info; a footer shows tool/skill counts and quick key hints.
-
-**Focus and navigation:**
-
-| Key             | Action                                |
-|-----------------|---------------------------------------|
-| `Tab`           | Cycle focus forward through panes     |
-| `Shift+Tab`     | Cycle focus backward                  |
-| `1`–`4`         | Jump to Skills / Memory / Chat / Input|
-| `/`             | Jump to input pane and start a command|
-| `Esc`           | Return focus to input pane            |
-
-**Input bar:**
-
-| Key                   | Action                                |
-|-----------------------|---------------------------------------|
-| `Enter`               | Send message (multiline off) / newline (multiline on) |
-| `Ctrl+Enter`          | Newline (multiline off) / send (multiline on) |
-| `Ctrl+M`              | Toggle multiline mode                 |
-| `Ctrl+A` / `Home`     | Move cursor to start                  |
-| `Ctrl+E` / `End`      | Move cursor to end                    |
-| `Ctrl+U`              | Clear input line                      |
-| `←`/`→`              | Move cursor                           |
-| `Backspace` / `Delete` | Delete character                      |
-
-**Sidebar panes (Skills / Memory):**
-
-| Key              | Action                                |
-|------------------|---------------------------------------|
-| `↑`/`↓` or `j/k` | Navigate items                         |
-| `Enter`          | Show details in chat                   |
-| `?`              | Show help in chat                      |
-
-**Chat pane:**
-
-| Key              | Action                                |
-|------------------|---------------------------------------|
-| `↑`/`↓` or `j/k` | Scroll up/down one line               |
-| `PageUp`/`PageDown` | Scroll by page                       |
-| `End`            | Jump to bottom / re-enable auto-scroll|
-| `?`              | Show help in chat                      |
-
-**During streaming:**
-
-| Key             | Action                                |
-|-----------------|---------------------------------------|
-| `Ctrl+C`        | Cancel streaming response             |
-| `Ctrl+Q`        | Quit                                   |
-| `Tab`/`Shift+Tab` | Cycle focus (even while streaming)   |
-
-All REPL slash commands work in the TUI (`/help`, `/clear`, `/model`, `/undo`, `/retry`, etc.). On exit, the TUI generates a session summary to memory just like the REPL.
-
-The TUI is an optional feature (enabled by default). Build without it: `cargo build --no-default-features`.
-
 ### Inside the REPL
 
 | Command            | What it does                                       |
@@ -492,7 +431,7 @@ turns are summarized into a single compact message. The most recent
 optional — without them, no compaction occurs and the full conversation is
 always sent.
 
-The status bar (REPL and TUI) shows real-time context usage:
+The status bar shows real-time context usage:
 `ctx:35% 28k/128k` — the percentage and estimated token count relative to
 the model's context window. Use `/ctx` to see the same information in the
 chat. Models with known context sizes show the budget; unknown models show

@@ -83,8 +83,6 @@ mod soul;
 mod status_bar;
 mod summary;
 mod tools;
-#[cfg(feature = "tui")]
-mod tui;
 
 use anyhow::Result;
 use clap::Parser;
