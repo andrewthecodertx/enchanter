@@ -32,6 +32,14 @@ use crate::agent::AgentSession;
 use crate::protocol::Event;
 use crate::status_bar::{self, AgentPhase, SharedStatus};
 
+/// Update context token estimate in the shared status from the agent's messages.
+fn sync_context_tokens(agent: &AgentSession, status: &SharedStatus) {
+    let tokens = agent.estimated_context_tokens();
+    if let Ok(mut s) = status.lock() {
+        s.context_tokens = tokens;
+    }
+}
+
 // ── Input line ──
 
 struct InputLine {
@@ -260,10 +268,12 @@ pub async fn run_repl(
     let mut scroll_offset: usize = 0;
     let mut auto_scroll = true;
 
-    // Set model name in status
+    // Set model name and context budget in status
     {
         let mut s = status.lock().unwrap();
         s.model_short = shorten_model(&agent.resolved.model);
+        s.context_budget = status_bar::model_context_size(&agent.resolved.model);
+        s.context_tokens = agent.estimated_context_tokens();
     }
 
     // Banner
@@ -310,6 +320,9 @@ pub async fn run_repl(
                 let s = status.lock().unwrap();
                 if matches!(s.phase, AgentPhase::Idle) {
                     event_rx = None;
+                    // Update context tokens now that the turn is complete
+                    drop(s);
+                    sync_context_tokens(agent, &status);
                 }
             }
 
@@ -644,6 +657,7 @@ fn handle_slash_command(
             chat.push("  /model NAME  Switch provider/model".to_string());
             chat.push("  /retry       Retry last exchange".to_string());
             chat.push("  /undo        Undo last exchange".to_string());
+            chat.push("  /ctx         Show context token usage".to_string());
             chat.push("  /config      Show current config".to_string());
             chat.push("  /tools       Show available tools".to_string());
             chat.push("  /log         Show recent activity log".to_string());
@@ -656,10 +670,13 @@ fn handle_slash_command(
                 chat.push(format!("✗ clear failed: {}", e));
             } else {
                 chat.push("── conversation cleared ──".to_string());
+                sync_context_tokens(agent, status);
             }
         }
         "/config" => {
             let info = agent.info();
+            let tokens = agent.estimated_context_tokens();
+            let budget = status_bar::model_context_size(&agent.resolved.model);
             chat.push(format!("  model:    {}", info.model));
             chat.push(format!("  base_url: {}", info.base_url));
             chat.push(format!("  api_key:  {}", if info.api_key_set { "set" } else { "none" }));
@@ -667,6 +684,13 @@ fn handle_slash_command(
                 info.max_turns.map_or("unlimited".to_string(), |n| n.to_string()),
                 info.soft_limit.map_or("n/a".to_string(), |n| n.to_string())
             ));
+            if let Some(b) = budget {
+                let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
+                chat.push(format!("  context:  ~{} / {} ({}%)",
+                    status_bar::fmt_tokens(tokens), status_bar::fmt_tokens(b), pct));
+            } else {
+                chat.push(format!("  context:  ~{} tokens", status_bar::fmt_tokens(tokens)));
+            }
         }
         "/memory" => {
             chat.push(agent.memory.format_for_prompt());
@@ -694,9 +718,25 @@ fn handle_slash_command(
                 }
             }
         }
+        "/ctx" | "/context" => {
+            let tokens = agent.estimated_context_tokens();
+            let budget = status_bar::model_context_size(&agent.resolved.model);
+            if let Some(b) = budget {
+                let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
+                chat.push(format!("── context: ~{} / {} tokens ({}%) ──",
+                    status_bar::fmt_tokens(tokens),
+                    status_bar::fmt_tokens(b),
+                    pct));
+            } else {
+                chat.push(format!("── context: ~{} tokens (budget unknown for {}) ──",
+                    status_bar::fmt_tokens(tokens),
+                    agent.resolved.model));
+            }
+        }
         "/undo" => {
             if agent.undo() {
                 chat.push("── undid last exchange ──".to_string());
+                sync_context_tokens(agent, status);
             } else {
                 chat.push("✗ nothing to undo".to_string());
             }
@@ -750,6 +790,9 @@ fn handle_slash_command(
                             chat.push(format!("✓ switched to {}", label));
                             let mut s = status.lock().unwrap();
                             s.model_short = shorten_model(&agent.resolved.model);
+                            s.context_budget = status_bar::model_context_size(&agent.resolved.model);
+                            drop(s);
+                            sync_context_tokens(agent, &status);
                         }
                         Err(e) => chat.push(format!("✗ {}", e)),
                     }

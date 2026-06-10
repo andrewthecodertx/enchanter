@@ -183,6 +183,12 @@ impl AgentSession {
         }
     }
 
+    /// Estimate the total token footprint of the current message window.
+    /// Includes the system prompt and all conversation history.
+    pub fn estimated_context_tokens(&self) -> u64 {
+        estimate_messages_tokens(&self.messages)
+    }
+
     /// Run one agent loop: call model, handle tool_calls, repeat until done or max_turns.
     /// Returns the final text response and the number of tool calls made.
     pub async fn chat(&mut self, user_prompt: &str) -> Result<ChatResult> {
@@ -646,7 +652,7 @@ fn estimate_message_tokens(msg: &Message) -> u64 {
 }
 
 /// Estimate the total token footprint of a message window.
-fn estimate_messages_tokens(messages: &[Message]) -> u64 {
+pub fn estimate_messages_tokens(messages: &[Message]) -> u64 {
     messages.iter().map(estimate_message_tokens).sum()
 }
 

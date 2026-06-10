@@ -197,6 +197,7 @@ The TUI is an optional feature (enabled by default). Build without it: `cargo bu
 |--------------------|-----------------------------------------------------|
 | `/help`            | Show available commands                             |
 | `/clear`           | Reset conversation history                           |
+| `/ctx`             | Show context token usage and budget                   |
 | `/soul`            | Show SOUL.md content                                |
 | `/memory`          | Show loaded memory                                   |
 | `/skills`          | List discovered skills                               |
@@ -207,7 +208,7 @@ The TUI is an optional feature (enabled by default). Build without it: `cargo bu
 | `/prompt budget`   | Show token/character budget per prompt layer           |
 | `/retry`           | Re-send the last user message                         |
 | `/undo`            | Remove last exchange from history                     |
-| `/config`           | Show resolved configuration                           |
+| `/config`           | Show resolved configuration (includes context usage)  |
 | `/sessions`        | List session history                                  |
 | `/exit`, `/quit`, `/bye` | Quit (also Ctrl+D for clean exit)             |
 
@@ -490,6 +491,12 @@ turns are summarized into a single compact message. The most recent
 `keep_last_turns` messages are always preserved verbatim. Both values are
 optional — without them, no compaction occurs and the full conversation is
 always sent.
+
+The status bar (REPL and TUI) shows real-time context usage:
+`ctx:35% 28k/128k` — the percentage and estimated token count relative to
+the model's context window. Use `/ctx` to see the same information in the
+chat. Models with known context sizes show the budget; unknown models show
+only the estimated count.
 
 ## Provider compatibility
 

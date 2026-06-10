@@ -62,7 +62,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .replace("https://openrouter.ai/api/v1", "openrouter")
         .replace("https://api.groq.com/openai/v1", "groq");
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" ⟡ ", Style::default().fg(colors::ACCENT2)),
         Span::styled(
             "Enchanter",
@@ -78,8 +78,35 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(short_session, Style::default().fg(colors::DIM)),
         Span::raw(" │ turn "),
         Span::styled(format!("{}", app.turn), Style::default().fg(Color::White)),
-    ]);
+    ];
 
+    // Context token usage
+    if app.context_tokens > 0 {
+        spans.push(Span::raw(" │ "));
+        if let Some(budget) = app.context_budget {
+            let pct = ((app.context_tokens as f64 / budget as f64) * 100.0) as u8;
+            let ctx_color = if pct > 80 {
+                Color::Red
+            } else if pct > 60 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            spans.push(Span::styled(
+                format!("ctx:{}% {}/{}", pct,
+                    crate::status_bar::fmt_tokens(app.context_tokens),
+                    crate::status_bar::fmt_tokens(budget)),
+                Style::default().fg(ctx_color),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!("ctx:{}", crate::status_bar::fmt_tokens(app.context_tokens)),
+                Style::default().fg(Color::Green),
+            ));
+        }
+    }
+
+    let line = Line::from(spans);
     let header = Paragraph::new(line).style(Style::default().bg(colors::HEADER_BG));
     f.render_widget(header, area);
 }

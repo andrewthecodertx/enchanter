@@ -92,6 +92,7 @@ async fn run_app(
                                 app.finalize_stream();
                                 app.streaming = false;
                                 app.turn += 1;
+                                app.context_tokens = app.agent.estimated_context_tokens();
                                 app.refresh_info();
                                 event_rx = None;
                                 // Run memory management after each turn

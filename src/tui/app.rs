@@ -126,6 +126,10 @@ pub struct App {
     // Status
     pub error_message: Option<String>,
     pub turn: usize,
+    /// Estimated context tokens (system prompt + conversation history).
+    pub context_tokens: u64,
+    /// Context window size for the current model (None if unknown).
+    pub context_budget: Option<u64>,
     /// When true, chat auto-scrolls to bottom (set on new messages, cleared on manual scroll).
     pub chat_auto_scroll: bool,
 }
@@ -133,6 +137,8 @@ pub struct App {
 impl App {
     pub fn new(agent: AgentSession) -> Self {
         let info = agent.info();
+        let context_tokens = agent.estimated_context_tokens();
+        let context_budget = crate::status_bar::model_context_size(&agent.resolved.model);
         Self {
             agent,
             info,
@@ -147,6 +153,8 @@ impl App {
             current_stream_text: String::new(),
             error_message: None,
             turn: 0,
+            context_tokens,
+            context_budget,
             chat_auto_scroll: true,
         }
     }
@@ -180,6 +188,7 @@ impl App {
                     "Compacted {} earlier message(s) to stay within the context budget (~{} tokens).",
                     removed_messages, budget_tokens
                 )));
+                self.context_tokens = self.agent.estimated_context_tokens();
                 self.chat_auto_scroll = true;
             }
             Event::Done => {

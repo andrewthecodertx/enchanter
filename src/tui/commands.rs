@@ -29,13 +29,31 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                     "Conversation cleared.".into(),
                 ));
                 app.turn = 0;
+                app.context_tokens = app.agent.estimated_context_tokens();
             }
             CommandResult::Done
         }
         "/help" => {
             app.chat_lines.push(crate::tui::app::ChatLine::System(
-                "Commands: /help /clear /soul /memory /skills /tools /config /prompt /prompt diff /prompt budget /model <name> /retry /undo /sessions /log /exit".into(),
+                "Commands: /help /clear /ctx /soul /memory /skills /tools /config /prompt /prompt diff /prompt budget /model <name> /retry /undo /sessions /log /exit".into(),
             ));
+            CommandResult::Done
+        }
+        "/ctx" | "/context" => {
+            let tokens = app.agent.estimated_context_tokens();
+            let budget = crate::status_bar::model_context_size(&app.agent.resolved.model);
+            let msg = if let Some(b) = budget {
+                let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
+                format!("Context: ~{} / {} ({}%)",
+                    crate::status_bar::fmt_tokens(tokens),
+                    crate::status_bar::fmt_tokens(b),
+                    pct)
+            } else {
+                format!("Context: ~{} tokens (budget unknown for {})",
+                    crate::status_bar::fmt_tokens(tokens),
+                    app.agent.resolved.model)
+            };
+            app.chat_lines.push(crate::tui::app::ChatLine::System(msg));
             CommandResult::Done
         }
         "/soul" => {
@@ -97,12 +115,24 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
             } else {
                 "not set"
             };
+            let tokens = app.agent.estimated_context_tokens();
+            let budget = crate::status_bar::model_context_size(&app.agent.resolved.model);
+            let ctx_line = if let Some(b) = budget {
+                let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
+                format!("  Context:  ~{} / {} ({}%)",
+                    crate::status_bar::fmt_tokens(tokens),
+                    crate::status_bar::fmt_tokens(b),
+                    pct)
+            } else {
+                format!("  Context:  ~{} tokens", crate::status_bar::fmt_tokens(tokens))
+            };
             app.chat_lines.push(crate::tui::app::ChatLine::System(
-                format!("Config:\n  Model: {}\n  Base URL: {}\n  API key: {}\n  Max turns: {} (soft: {})\n  Tools: {} ({} MCP)\n  Skills: {}",
+                format!("Config:\n  Model: {}\n  Base URL: {}\n  API key: {}\n  Max turns: {} (soft: {})\n  Tools: {} ({} MCP)\n  Skills: {}\n{}",
                     info.model, info.base_url, key_status,
                     info.max_turns.map_or("unlimited".to_string(), |n| n.to_string()),
                     info.soft_limit.map_or("n/a".to_string(), |n| n.to_string()),
-                    info.tool_count, info.mcp_tool_count, info.skill_count),
+                    info.tool_count, info.mcp_tool_count, info.skill_count,
+                    ctx_line),
             ));
             CommandResult::Done
         }
@@ -214,6 +244,8 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                                 label
                             )));
                         app.refresh_info();
+                        app.context_budget = crate::status_bar::model_context_size(&app.agent.resolved.model);
+                        app.context_tokens = app.agent.estimated_context_tokens();
                     }
                     Err(e) => {
                         app.chat_lines
@@ -283,6 +315,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                 app.chat_lines.push(crate::tui::app::ChatLine::System(
                     "Undid last exchange.".into(),
                 ));
+                app.context_tokens = app.agent.estimated_context_tokens();
             } else {
                 app.chat_lines
                     .push(crate::tui::app::ChatLine::Error("Nothing to undo".into()));
