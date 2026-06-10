@@ -369,8 +369,7 @@ pub async fn run(args: Args) -> Result<()> {
         return result.map(|_| ());
     }
 
-    let shared_status = crate::status_bar::new_shared_status();
-    let mut agent = crate::repl::run_repl(agent, shared_status).await?;
+    let mut agent = crate::repl::run_repl(agent).await?;
     agent.shutdown_mcp().await;
 
     // Exit summary
