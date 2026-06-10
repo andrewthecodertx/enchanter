@@ -3,6 +3,9 @@
 //! Prints output line-by-line, reads input via stdin. No raw mode, no
 //! alternate screen, no crossterm event polling. Streaming events from
 //! the agent are printed as they arrive.
+//!
+//! A status bar is pinned to the bottom row of the terminal using ANSI
+//! escape sequences. It shows context token usage, model, and session ID.
 
 use std::io::{self, Write};
 
@@ -11,6 +14,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::agent::AgentSession;
 use crate::protocol::Event;
+use crate::status_bar;
 
 /// Action from parsing user input.
 enum Action {
@@ -30,16 +34,22 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
         .replace("https://openrouter.ai/api/v1", "openrouter")
         .replace("https://api.groq.com/openai/v1", "groq");
 
+    // Draw initial status bar
+    let session_id = info.session_id.clone();
+
     println!();
-    println!("⟡ Enchanter v{}  session={}", env!("CARGO_PKG_VERSION"), &info.session_id[..8.min(info.session_id.len())]);
+    println!("⟡ Enchanter v{}  session={}", env!("CARGO_PKG_VERSION"), &session_id[..8.min(session_id.len())]);
     println!("  model={} | provider={} | tools={} | /help for commands", info.model, short_url, info.tool_count);
     println!();
 
     // Agent is stored in Option — None while a spawned task has it
     let mut agent: Option<AgentSession> = Some(agent);
 
+    // Draw status bar before first prompt
+    draw_status_bar(agent.as_ref().unwrap());
+
     loop {
-        // Print prompt
+        // Print prompt (status bar is already visible)
         print!("⟩ ");
         io::stdout().flush()?;
 
@@ -47,12 +57,15 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
         let mut input = String::new();
         if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
             // EOF (Ctrl+D)
+            status_bar::clear_bar();
             println!();
             break;
         }
         let input = input.trim();
 
         if input.is_empty() {
+            // Redraw bar (user pressed enter on blank line)
+            draw_status_bar(agent.as_ref().unwrap());
             continue;
         }
 
@@ -64,7 +77,9 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
                 _ => {
                     // Slash commands that operate on &mut AgentSession
                     let a = agent.as_mut().expect("agent must be Some when idle");
+                    status_bar::clear_bar();
                     handle_slash_command(input, a);
+                    draw_status_bar(a);
                     continue;
                 }
             }
@@ -73,17 +88,22 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
         };
 
         match action {
-            Action::Quit => break,
+            Action::Quit => {
+                status_bar::clear_bar();
+                break;
+            }
             Action::Retry => {
                 let a = agent.take().expect("agent must be Some when idle");
+                status_bar::clear_bar();
                 match a.retry_events_spawned() {
                     Ok((handle, mut rx)) => {
                         stream_events(&mut rx).await;
                         match handle.await {
-                            Ok(Ok(returned_agent)) => agent = Some(returned_agent),
+                            Ok(Ok(returned_agent)) => {
+                                agent = Some(returned_agent);
+                            }
                             Ok(Err(e)) => {
                                 eprintln!("✗ agent error: {}", e);
-                                // Agent is consumed by the task on error — can't recover
                             }
                             Err(e) => {
                                 eprintln!("✗ task join error: {}", e);
@@ -92,22 +112,22 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
                     }
                     Err(e) => {
                         eprintln!("✗ {}", e);
-                        // Agent was consumed by retry_events_spawned even on error,
-                        // but if we got an Err, the agent wasn't actually consumed
-                        // (the error happened before spawning). Let's check.
-                        // Actually, retry_events_spawned takes self by value,
-                        // so we've already lost the agent. This is a problem.
-                        // But in practice this should be rare (truncation failure).
                     }
+                }
+                if let Some(a) = agent.as_ref() {
+                    draw_status_bar(a);
                 }
             }
             Action::Send(msg) => {
                 let a = agent.take().expect("agent must be Some when idle");
+                status_bar::clear_bar();
                 match a.chat_events_spawned(&msg) {
                     Ok((handle, mut rx)) => {
                         stream_events(&mut rx).await;
                         match handle.await {
-                            Ok(Ok(returned_agent)) => agent = Some(returned_agent),
+                            Ok(Ok(returned_agent)) => {
+                                agent = Some(returned_agent);
+                            }
                             Ok(Err(e)) => {
                                 eprintln!("✗ agent error: {}", e);
                             }
@@ -118,12 +138,10 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
                     }
                     Err(e) => {
                         eprintln!("✗ {}", e);
-                        // Same issue — agent consumed on error.
-                        // chat_events_spawned takes self by value.
-                        // If it errors before spawning, agent is dropped.
-                        // In practice, the only error path is session.append,
-                        // which should be rare.
                     }
+                }
+                if let Some(a) = agent.as_ref() {
+                    draw_status_bar(a);
                 }
             }
         }
@@ -136,8 +154,20 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
     Ok(agent)
 }
 
+/// Draw the status bar using the current agent state.
+fn draw_status_bar(agent: &AgentSession) {
+    let tokens = agent.estimated_context_tokens();
+    let model = &agent.resolved.model;
+    let budget = status_bar::model_context_size(model);
+    let session_id = agent.session.id().to_string();
+    status_bar::draw_bar(model, tokens, budget, &session_id);
+}
+
 /// Drain and print streaming events from the agent.
+/// Clears the status bar before first output and redraws after completion.
 async fn stream_events(rx: &mut UnboundedReceiver<Event>) {
+    // Bar is already cleared by the caller before calling this
+
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(300), rx.recv()).await {
             Ok(Some(event)) => match event {
@@ -225,13 +255,13 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
             println!("  max:      {} (soft: {})",
                 info.max_turns.map_or("unlimited".to_string(), |n| n.to_string()),
                 info.soft_limit.map_or("n/a".to_string(), |n| n.to_string()));
-            let budget = crate::status_bar::model_context_size(&agent.resolved.model);
+            let budget = status_bar::model_context_size(&agent.resolved.model);
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 println!("  context:  ~{} / {} ({}%)",
-                    crate::status_bar::fmt_tokens(tokens), crate::status_bar::fmt_tokens(b), pct);
+                    status_bar::fmt_tokens(tokens), status_bar::fmt_tokens(b), pct);
             } else {
-                println!("  context:  ~{} tokens", crate::status_bar::fmt_tokens(tokens));
+                println!("  context:  ~{} tokens", status_bar::fmt_tokens(tokens));
             }
         }
         "/memory" => {
@@ -262,16 +292,16 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
         }
         "/ctx" | "/context" => {
             let tokens = agent.estimated_context_tokens();
-            let budget = crate::status_bar::model_context_size(&agent.resolved.model);
+            let budget = status_bar::model_context_size(&agent.resolved.model);
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 println!("── context: ~{} / {} tokens ({}%) ──",
-                    crate::status_bar::fmt_tokens(tokens),
-                    crate::status_bar::fmt_tokens(b),
+                    status_bar::fmt_tokens(tokens),
+                    status_bar::fmt_tokens(b),
                     pct);
             } else {
                 println!("── context: ~{} tokens (budget unknown for {}) ──",
-                    crate::status_bar::fmt_tokens(tokens),
+                    status_bar::fmt_tokens(tokens),
                     agent.resolved.model);
             }
         }
