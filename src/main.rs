@@ -74,11 +74,13 @@ mod overlay;
 mod prompt;
 mod protocol;
 mod recorder;
+mod repl;
 mod replay;
 mod sandbox;
 mod session;
 mod skills;
 mod soul;
+mod status_bar;
 mod summary;
 mod tools;
 #[cfg(feature = "tui")]
