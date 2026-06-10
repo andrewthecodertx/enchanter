@@ -117,7 +117,7 @@ fn handle_input_keys(app: &mut App, key: crossterm::event::KeyEvent) -> HandleRe
             app.chat_auto_scroll = true;
             HandleResult::Continue
         }
-        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+        (_, KeyCode::Char(c)) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.input.insert(c);
             HandleResult::Continue
         }

@@ -529,7 +529,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "enchanter"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "chrono",

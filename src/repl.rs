@@ -554,7 +554,7 @@ fn handle_idle_key(
                 IdleAction::Continue
             }
         }
-        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+        (_, KeyCode::Char(c)) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             input.insert(c);
             IdleAction::Continue
         }
