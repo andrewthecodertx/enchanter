@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
+use crate::activity_log::{self, ActivityEvent, ApiCallGuard, ToolCallGuard};
 use crate::api::{LlmClient, Message};
 use crate::config::{Config, ResolvedModel};
 use crate::kstore::KnowledgeStore;
@@ -364,6 +365,10 @@ impl AgentSession {
         // Surface it the same way streaming output is surfaced: as an event for
         // channel consumers (daemon, TUI), and as a direct stderr notice for the
         // REPL/inline path, which prints rather than consuming events.
+        activity_log::log(activity_log::ActivityEvent::Compacted {
+            removed_messages: removed,
+            budget_tokens: max_tokens,
+        });
         match sink {
             EventSink::Channel(_) => sink.send(Event::Compacted {
                 removed_messages: removed,
@@ -387,6 +392,7 @@ impl AgentSession {
         let tools_payload = self.tools_payload();
         let mut total_tool_calls = 0;
         let mut soft_limit_triggered = false;
+        let tool_count = tools_payload.as_ref().and_then(|v| v.as_array()).map(|a| a.len());
 
         // Safety cap to prevent runaway loops from bugs (e.g., tool calling itself forever).
         // Only enforced when max_turns is unlimited.
@@ -394,8 +400,15 @@ impl AgentSession {
 
         let effective_limit = max_turns.unwrap_or(SAFETY_CAP);
         let mut turn: u32 = 0;
+        let _loop_start = std::time::Instant::now();
 
         loop {
+            let turn_start = std::time::Instant::now();
+            activity_log::log(ActivityEvent::TurnStart {
+                turn,
+                max_turns,
+            });
+
             if let Some(limit) = max_turns {
                 let turns_remaining = limit.saturating_sub(turn);
 
@@ -415,10 +428,18 @@ impl AgentSession {
                 self.compact_if_needed(&sink).await;
             }
 
+            // Log API call *before* we make it — if we hang here, the log will show it.
+            let api_guard = ApiCallGuard::new(
+                self.resolved.model.clone(),
+                self.messages.len(),
+                tool_count,
+                !self.no_stream,
+            );
+
             let result = if self.no_stream {
                 self.client
                     .chat(&self.messages, tools_payload.as_ref())
-                    .await?
+                    .await
             } else {
                 match &sink {
                     EventSink::Channel(tx) => {
@@ -428,15 +449,26 @@ impl AgentSession {
                                     text: token.to_string(),
                                 });
                             })
-                            .await?
+                            .await
                     }
                     EventSink::Silent => {
                         self.client
                             .chat_stream(&self.messages, tools_payload.as_ref())
-                            .await?
+                            .await
                     }
                 }
             };
+
+            match result {
+                Ok(ref cr) => {
+                    api_guard.end(cr.has_tool_calls(), cr.content.as_deref().map(|s| s.len()));
+                }
+                Err(e) => {
+                    api_guard.fail(e.to_string());
+                    return Err(e);
+                }
+            };
+            let result = result.unwrap();
 
             if result.has_tool_calls() {
                 let tool_calls = result.tool_calls.unwrap();
@@ -466,6 +498,12 @@ impl AgentSession {
                 for tc in &tool_calls {
                     let tc_args: Value =
                         serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                    // Log tool call *before* dispatch — if it hangs, the log shows exactly which one.
+                    let tool_guard = ToolCallGuard::new(
+                        tc.function.name.clone(),
+                        &tc.function.arguments,
+                        turn,
+                    );
                     let output = dispatch_tool(
                         &tc.function.name,
                         &tc_args,
@@ -476,6 +514,7 @@ impl AgentSession {
                         self.config.allow_unsandboxed_exec(),
                     )
                     .await;
+                    tool_guard.end(&output, None);
                     sink.send(Event::ToolResult {
                         id: tc.id.clone(),
                         content: output.clone(),
@@ -496,12 +535,25 @@ impl AgentSession {
                 if let Some(ref text) = content {
                     self.session.append(&Message::assistant(text))?;
                 }
+
+                activity_log::log(ActivityEvent::TurnEnd {
+                    turn,
+                    tool_calls: total_tool_calls,
+                    duration_ms: turn_start.elapsed().as_millis() as u64,
+                });
+
                 sink.send(Event::Done);
                 return Ok(ChatResult {
                     response: content,
                     tool_calls: total_tool_calls,
                 });
             }
+
+            activity_log::log(ActivityEvent::TurnEnd {
+                turn,
+                tool_calls: total_tool_calls,
+                duration_ms: turn_start.elapsed().as_millis() as u64,
+            });
 
             turn += 1;
             if turn >= effective_limit {
@@ -513,6 +565,10 @@ impl AgentSession {
             Some(n) => format!("{}", n),
             None => "unlimited (safety cap)".to_string(),
         };
+        activity_log::log(ActivityEvent::MaxTurnsReached {
+            turn,
+            limit: limit_display.clone(),
+        });
         sink.send(Event::Error {
             message: format!("Max agent turns reached ({}).", limit_display),
         });

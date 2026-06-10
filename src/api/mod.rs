@@ -286,9 +286,17 @@ impl LlmClient {
         loop {
             if done { break; }
 
-            let chunk_opt = tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next())
-                .await
-                .context("stream timed out — no data received for 120s")?;
+            let chunk_opt = match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
+                Ok(opt) => opt,
+                Err(_) => {
+                    // Timeout — log it before bailing so the user can see where the hang was.
+                    crate::activity_log::log(crate::activity_log::ActivityEvent::StreamTimeout {
+                        model: self.model.clone(),
+                        elapsed_secs: STREAM_CHUNK_TIMEOUT.as_secs(),
+                    });
+                    anyhow::bail!("stream timed out — no data received for {}s", STREAM_CHUNK_TIMEOUT.as_secs());
+                }
+            };
 
             let chunk = match chunk_opt {
                 Some(c) => c.context("reading stream chunk")?,

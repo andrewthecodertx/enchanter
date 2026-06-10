@@ -23,6 +23,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 
 use crate::agent::{AgentSession, SessionInfo, SessionOptions};
+use crate::activity_log::{self, ActivityEvent};
 use crate::config::{Config, ResolvedModel};
 use crate::recorder::Recorder;
 use crate::session::Session;
@@ -275,6 +276,33 @@ pub async fn run(args: Args) -> Result<()> {
     // Initialize system prompt in session
     agent.session.append(&agent.messages[0])?;
 
+    // Log session start
+    activity_log::log(ActivityEvent::SessionStart {
+        session_id: agent.session.id().to_string(),
+        model: agent.resolved.model.clone(),
+    });
+    let session_start = std::time::Instant::now();
+
+    // Install Ctrl+C handler so session-end gets logged even on interrupt.
+    // Without this, a SIGINT during streaming kills the process with no cleanup,
+    // and the activity log won't show where the hang was.
+    #[cfg(unix)]
+    {
+        let sid = agent.session.id().to_string();
+        let start = session_start;
+        ctrlc::set_handler(move || {
+            activity_log::log(ActivityEvent::SessionEnd {
+                session_id: sid.clone(),
+                total_turns: 0,
+                total_tool_calls: 0,
+                duration_secs: start.elapsed().as_secs(),
+            });
+            // Activity log flushes on every write, so the event is durable.
+            // Exit without running destructors (faster, avoids blocking).
+            std::process::exit(130); // 128 + SIGINT(2)
+        })?;
+    }
+
     // Cap + summarize memory if needed
     let mem_config = agent.config.memory_config().clone();
     if let Err(e) = agent.memory.manage(&agent.client, &mem_config).await {
@@ -339,6 +367,12 @@ pub async fn run(args: Args) -> Result<()> {
             println!("{}", text);
         }
         agent.shutdown_mcp().await;
+        activity_log::log(ActivityEvent::SessionEnd {
+            session_id: agent.session.id().to_string(),
+            total_turns: 0,
+            total_tool_calls: 0,
+            duration_secs: session_start.elapsed().as_secs(),
+        });
         return result.map(|_| ());
     }
 
@@ -421,6 +455,14 @@ pub async fn run(args: Args) -> Result<()> {
     if let Err(e) = agent.kstore.save() {
         eprintln!("{} Failed to save knowledge store: {}", "Warning:".yellow(), e);
     }
+
+    // Log session end
+    activity_log::log(ActivityEvent::SessionEnd {
+        session_id: agent.session.id().to_string(),
+        total_turns: 0, // turns tracked per-turn in activity log
+        total_tool_calls: 0,
+        duration_secs: session_start.elapsed().as_secs(),
+    });
 
     result
 }
@@ -910,6 +952,47 @@ async fn run_repl(
                         }
                         "/tools" => {
                             print_tools(&agent.mcp);
+                            continue;
+                        }
+                        "/log" => {
+                            let log_path = crate::home::enchanter_home().join("logs/activity.jsonl");
+                            if !log_path.exists() {
+                                println!("No activity log found at {}", log_path.display());
+                            } else {
+                                match std::fs::read_to_string(&log_path) {
+                                    Ok(contents) => {
+                                        let lines: Vec<&str> = contents.lines().rev().take(30).collect();
+                                        let reversed: Vec<&str> = lines.into_iter().rev().collect();
+                                        println!("{}", "═══ RECENT ACTIVITY LOG ═══".bright_cyan());
+                                        for line in &reversed {
+                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                                let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("?");
+                                                let evt_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                                                let summary = match evt_type {
+                                                    "api_call_start" => format!("API → model={}", v.get("model").and_then(|m| m.as_str()).unwrap_or("?")),
+                                                    "api_call_end" => format!("API ✓ {}ms, tool_calls={}", v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0), v.get("has_tool_calls").and_then(|b| b.as_bool()).unwrap_or(false)),
+                                                    "api_call_error" => format!("API ✗ {}ms: {}", v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0), v.get("error").and_then(|e| e.as_str()).unwrap_or("?")),
+                                                    "stream_timeout" => format!("STREAM TIMEOUT after {}s", v.get("elapsed_secs").and_then(|s| s.as_u64()).unwrap_or(0)),
+                                                    "tool_call_start" => format!("TOOL → {} {}", v.get("name").and_then(|n| n.as_str()).unwrap_or("?"), v.get("arguments").and_then(|a| a.as_str()).unwrap_or("").chars().take(80).collect::<String>()),
+                                                    "tool_call_end" => format!("TOOL ✓ {} {}ms", v.get("name").and_then(|n| n.as_str()).unwrap_or("?"), v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0)),
+                                                    "tool_call_error" => format!("TOOL ✗ {}: {}", v.get("name").and_then(|n| n.as_str()).unwrap_or("?"), v.get("error").and_then(|e| e.as_str()).unwrap_or("?")),
+                                                    "turn_start" => format!("TURN {} start", v.get("turn").and_then(|t| t.as_u64()).unwrap_or(0)),
+                                                    "turn_end" => format!("TURN {} end, {}ms, {} tool_calls", v.get("turn").and_then(|t| t.as_u64()).unwrap_or(0), v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0), v.get("tool_calls").and_then(|t| t.as_u64()).unwrap_or(0)),
+                                                    "session_start" => format!("SESSION START model={}", v.get("model").and_then(|m| m.as_str()).unwrap_or("?")),
+                                                    "session_end" => format!("SESSION END {}s", v.get("duration_secs").and_then(|s| s.as_u64()).unwrap_or(0)),
+                                                    "max_turns_reached" => format!("MAX TURNS turn={} limit={}", v.get("turn").and_then(|t| t.as_u64()).unwrap_or(0), v.get("limit").and_then(|l| l.as_str()).unwrap_or("?")),
+                                                    "compacted" => format!("COMPACTION removed={} msgs", v.get("removed_messages").and_then(|r| r.as_u64()).unwrap_or(0)),
+                                                    _ => evt_type.to_string(),
+                                                };
+                                                println!("  {} {}", ts.dimmed(), summary);
+                                            }
+                                        }
+                                        println!();
+                                        println!("  {} {}", "↳".dimmed(), format!("({} bytes, {} lines)", std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0), contents.lines().count()).dimmed());
+                                    }
+                                    Err(e) => println!("{} Cannot read log: {}", "Error:".red(), e),
+                                }
+                            }
                             continue;
                         }
                         "/sessions" => {

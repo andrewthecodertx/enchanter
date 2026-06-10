@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 
-const HOME_SUBDIRS: &[&str] = &["memories", "knowledge", "skills"];
+const HOME_SUBDIRS: &[&str] = &["memories", "knowledge", "skills", "logs"];
 
 const SCAFFOLD_FILES: &[(&str, &str)] = &[
     ("SOUL.md", include_str!("scaffold/SOUL.md")),

@@ -34,7 +34,7 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
         }
         "/help" => {
             app.chat_lines.push(crate::tui::app::ChatLine::System(
-                "Commands: /help /clear /soul /memory /skills /tools /config /prompt /prompt diff /prompt budget /model <name> /retry /undo /sessions /exit".into(),
+                "Commands: /help /clear /soul /memory /skills /tools /config /prompt /prompt diff /prompt budget /model <name> /retry /undo /sessions /log /exit".into(),
             ));
             CommandResult::Done
         }
@@ -152,6 +152,49 @@ pub fn handle_command(app: &mut App, line: &str) -> CommandResult {
                             "Could not list sessions: {}",
                             e
                         )));
+                }
+            }
+            CommandResult::Done
+        }
+        "/log" => {
+            let log_path = crate::home::enchanter_home().join("logs/activity.jsonl");
+            if !log_path.exists() {
+                app.chat_lines.push(crate::tui::app::ChatLine::System(
+                    format!("No activity log found at {}", log_path.display()),
+                ));
+            } else {
+                match std::fs::read_to_string(&log_path) {
+                    Ok(contents) => {
+                        let lines: Vec<&str> = contents.lines().rev().take(30).collect();
+                        let reversed: Vec<&str> = lines.into_iter().rev().collect();
+                        let mut msg = String::from("Recent activity log:\n");
+                        for line in &reversed {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("?");
+                                let evt_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                                let summary = match evt_type {
+                                    "api_call_start" => format!("API → model={}", v.get("model").and_then(|m| m.as_str()).unwrap_or("?")),
+                                    "api_call_end" => format!("API ✓ {}ms", v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0)),
+                                    "api_call_error" => format!("API ✗ {}ms: {}", v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0), v.get("error").and_then(|e| e.as_str()).unwrap_or("?")),
+                                    "stream_timeout" => format!("STREAM TIMEOUT {}s", v.get("elapsed_secs").and_then(|s| s.as_u64()).unwrap_or(0)),
+                                    "tool_call_start" => format!("TOOL → {}", v.get("name").and_then(|n| n.as_str()).unwrap_or("?")),
+                                    "tool_call_end" => format!("TOOL ✓ {}ms", v.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0)),
+                                    "tool_call_error" => format!("TOOL ✗ {}", v.get("error").and_then(|e| e.as_str()).unwrap_or("?")),
+                                    "turn_start" | "turn_end" => continue,
+                                    "session_start" => format!("SESSION START model={}", v.get("model").and_then(|m| m.as_str()).unwrap_or("?")),
+                                    "session_end" => format!("SESSION END {}s", v.get("duration_secs").and_then(|s| s.as_u64()).unwrap_or(0)),
+                                    _ => evt_type.to_string(),
+                                };
+                                msg.push_str(&format!("  {} {}\n", ts, summary));
+                            }
+                        }
+                        app.chat_lines.push(crate::tui::app::ChatLine::System(msg));
+                    }
+                    Err(e) => {
+                        app.chat_lines.push(crate::tui::app::ChatLine::Error(
+                            format!("Cannot read log: {}", e),
+                        ));
+                    }
                 }
             }
             CommandResult::Done
