@@ -4,8 +4,8 @@
 //! alternate screen, no crossterm event polling. Streaming events from
 //! the agent are printed as they arrive.
 //!
-//! A status bar is pinned to the bottom row of the terminal using ANSI
-//! escape sequences. It shows context token usage, model, and session ID.
+//! A status bar line is printed above each prompt using reverse-video
+//! styling. It shows context token usage, model, and session ID.
 
 use std::io::{self, Write};
 
@@ -34,7 +34,6 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
         .replace("https://openrouter.ai/api/v1", "openrouter")
         .replace("https://api.groq.com/openai/v1", "groq");
 
-    // Draw initial status bar
     let session_id = info.session_id.clone();
 
     println!();
@@ -45,11 +44,11 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
     // Agent is stored in Option — None while a spawned task has it
     let mut agent: Option<AgentSession> = Some(agent);
 
-    // Draw status bar before first prompt
-    draw_status_bar(agent.as_ref().unwrap());
-
     loop {
-        // Print prompt (status bar is already visible)
+        // Print status bar line above the prompt
+        draw_status_bar(agent.as_ref().unwrap());
+
+        // Print prompt
         print!("⟩ ");
         io::stdout().flush()?;
 
@@ -57,15 +56,13 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
         let mut input = String::new();
         if io::stdin().read_line(&mut input).unwrap_or(0) == 0 {
             // EOF (Ctrl+D)
-            status_bar::clear_bar();
             println!();
             break;
         }
         let input = input.trim();
 
         if input.is_empty() {
-            // Redraw bar (user pressed enter on blank line)
-            draw_status_bar(agent.as_ref().unwrap());
+            // Empty line — loop will redraw bar above next prompt
             continue;
         }
 
@@ -77,9 +74,7 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
                 _ => {
                     // Slash commands that operate on &mut AgentSession
                     let a = agent.as_mut().expect("agent must be Some when idle");
-                    status_bar::clear_bar();
                     handle_slash_command(input, a);
-                    draw_status_bar(a);
                     continue;
                 }
             }
@@ -89,12 +84,10 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
 
         match action {
             Action::Quit => {
-                status_bar::clear_bar();
                 break;
             }
             Action::Retry => {
                 let a = agent.take().expect("agent must be Some when idle");
-                status_bar::clear_bar();
                 match a.retry_events_spawned() {
                     Ok((handle, mut rx)) => {
                         stream_events(&mut rx).await;
@@ -114,13 +107,9 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
                         eprintln!("✗ {}", e);
                     }
                 }
-                if let Some(a) = agent.as_ref() {
-                    draw_status_bar(a);
-                }
             }
             Action::Send(msg) => {
                 let a = agent.take().expect("agent must be Some when idle");
-                status_bar::clear_bar();
                 match a.chat_events_spawned(&msg) {
                     Ok((handle, mut rx)) => {
                         stream_events(&mut rx).await;
@@ -140,9 +129,6 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
                         eprintln!("✗ {}", e);
                     }
                 }
-                if let Some(a) = agent.as_ref() {
-                    draw_status_bar(a);
-                }
             }
         }
     }
@@ -154,20 +140,17 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
     Ok(agent)
 }
 
-/// Draw the status bar using the current agent state.
+/// Print the status bar line above the prompt.
 fn draw_status_bar(agent: &AgentSession) {
     let tokens = agent.estimated_context_tokens();
     let model = &agent.resolved.model;
     let budget = status_bar::model_context_size(model);
     let session_id = agent.session.id().to_string();
-    status_bar::draw_bar(model, tokens, budget, &session_id);
+    status_bar::print_bar(model, tokens, budget, &session_id);
 }
 
 /// Drain and print streaming events from the agent.
-/// Clears the status bar before first output and redraws after completion.
 async fn stream_events(rx: &mut UnboundedReceiver<Event>) {
-    // Bar is already cleared by the caller before calling this
-
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(300), rx.recv()).await {
             Ok(Some(event)) => match event {
