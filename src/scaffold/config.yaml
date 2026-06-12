@@ -56,7 +56,7 @@ agent:
   #   keep_last_turns: 20               # Always keep this many most-recent messages verbatim
 
 # MCP servers — extend Enchanter with external tool servers
-# Tools from MCP servers are namespaced as server_name:tool_name
+# Tools from MCP servers are namespaced as server_name__tool_name
 # Supports stdio (local process) and http (remote server) transports
 # mcp:
 #   servers:

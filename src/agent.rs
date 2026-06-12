@@ -669,7 +669,7 @@ async fn dispatch_tool(
     ];
     if built_in_names.contains(&name) {
         tools::dispatch(name, args, memory, kstore, allowed_paths, allow_unsandboxed_exec)
-    } else if name.contains(':') {
+    } else if name.contains("__") {
         match mcp.dispatch(name, args).await {
             Some(Ok(result)) => result,
             Some(Err(e)) => format!("MCP error: {}", e),

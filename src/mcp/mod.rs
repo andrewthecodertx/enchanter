@@ -661,12 +661,15 @@ impl McpManager {
     }
 
     /// Get all MCP tool definitions merged with built-in format.
-    /// MCP tools are prefixed as "server_name:tool_name".
+    /// MCP tools are prefixed as "server_name__tool_name".
     pub fn all_tools_json(&self) -> Vec<Value> {
         let mut tools = Vec::new();
         for server in &self.servers {
             for mcp_tool in &server.tools {
-                let prefixed_name = format!("{}:{}", server.name, mcp_tool.name);
+                // NB: Double underscore separator must not appear in server names.
+                // MCP tool names may contain single underscores (e.g., generate_blog_image),
+                // but split_once("__") correctly handles that since it splits on the first match only.
+                let prefixed_name = format!("{}__{}", server.name, mcp_tool.name);
                 tools.push(json!({
                     "type": "function",
                     "function": {
@@ -684,7 +687,7 @@ impl McpManager {
     /// For stdio servers, auto-restarts on crash (up to MAX_RESTARTS).
     /// Returns None if the tool name doesn't match any MCP server.
     pub async fn dispatch(&mut self, full_name: &str, arguments: &Value) -> Option<Result<String>> {
-        let (server_name, tool_name) = full_name.split_once(':')?;
+        let (server_name, tool_name) = full_name.split_once("__")?;
         let server_idx = self.servers.iter().position(|s| s.name == server_name)?;
 
         // Check if stdio server has exited — attempt restart
