@@ -49,6 +49,8 @@ pub struct SessionOptions {
     pub no_stream: bool,
     pub no_tools: bool,
     pub system_override: Option<String>,
+    /// Optional session name prefix (e.g. "enchanter_tui") for named sessions.
+    pub session_name: Option<String>,
 }
 
 /// Result of a single chat turn.
@@ -89,6 +91,7 @@ impl AgentSession {
             no_stream,
             no_tools,
             system_override,
+            session_name,
         } = options;
         let client = LlmClient::new(
             &resolved.base_url,
@@ -99,7 +102,10 @@ impl AgentSession {
         if !no_tools && !config.mcp.servers.is_empty() {
             // MCP startup is async, handled by `start_mcp()` later.
         }
-        let session = Session::new(&resolved.model)?;
+        let session = match &session_name {
+            Some(name) => Session::new_named(&resolved.model, name)?,
+            None => Session::new(&resolved.model)?,
+        };
 
         let system_prompt = match &system_override {
             Some(s) => s.clone(),

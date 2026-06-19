@@ -52,6 +52,52 @@ impl Focus {
             Focus::Input => "input",
         }
     }
+
+    /// Spatial navigation matching the visual layout:
+    ///
+    /// ```text
+    /// ┌──────────┬─────────────┐
+    /// │ Models   │             │
+    /// │ Sessions │   Chat      │
+    /// │ Skills   │             │
+    /// ├──────────┴─────────────┤
+    /// │ Input                  │
+    /// └────────────────────────┘
+    /// ```
+    pub fn move_left(self) -> Self {
+        match self {
+            Focus::Chat => Focus::Skills,
+            Focus::Input => Focus::Models,
+            other => other,
+        }
+    }
+
+    pub fn move_right(self) -> Self {
+        match self {
+            Focus::Models | Focus::Sessions | Focus::Skills => Focus::Chat,
+            Focus::Input => Focus::Chat,
+            other => other,
+        }
+    }
+
+    pub fn move_up(self) -> Self {
+        match self {
+            Focus::Sessions => Focus::Models,
+            Focus::Skills => Focus::Sessions,
+            Focus::Input => Focus::Skills,
+            other => other,
+        }
+    }
+
+    pub fn move_down(self) -> Self {
+        match self {
+            Focus::Models => Focus::Sessions,
+            Focus::Sessions => Focus::Skills,
+            Focus::Skills => Focus::Input,
+            Focus::Chat => Focus::Input,
+            other => other,
+        }
+    }
 }
 
 /// Model entry for the models pane.
@@ -112,6 +158,8 @@ pub struct TuiState {
     pub history_index: Option<usize>,
     pub status_message: String,
     pub is_streaming: bool,
+    /// When true, the user requested quit while streaming — break after agent recovers.
+    pub pending_quit: bool,
     pub tokens: u64,
     pub model_name: String,
     pub session_id: String,
@@ -145,6 +193,7 @@ impl TuiState {
             history_index: None,
             status_message: String::new(),
             is_streaming: false,
+            pending_quit: false,
             tokens,
             model_name,
             session_id,

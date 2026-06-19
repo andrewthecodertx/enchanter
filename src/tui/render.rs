@@ -31,12 +31,16 @@ pub fn render(frame: &mut Frame, state: &mut TuiState) {
     let area = frame.area();
 
     // Layout: sidebar | main, then input, then status bar at bottom.
+    // Input area grows with content (min 3 lines for border+1, up to 40% of screen).
+    let input_lines = state.input_buffer.lines().count().max(1) as u16;
+    let input_height = (input_lines + 2).min(area.height / 5).max(3);
+
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),      // sidebar + chat
-            Constraint::Length(3),    // input
-            Constraint::Length(1),    // status bar
+            Constraint::Min(5),           // sidebar + chat
+            Constraint::Length(input_height), // input (grows with multi-line content)
+            Constraint::Length(1),        // status bar
         ])
         .split(area);
 
@@ -338,25 +342,80 @@ fn render_input(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         .title(title)
         .border_style(border_style);
 
-    // Build the input line with a visible cursor.
-    let input_style = Style::default();
+    // Build multi-line input text with prompt symbol on first line.
     let prompt_span = Span::styled(format!("{} ", prompt_symbol), Style::default().fg(ACCENT));
-    let content_span = Span::styled(&state.input_buffer, input_style);
 
-    let line = Line::from(vec![prompt_span, content_span]);
+    // Split input buffer into lines for rendering. The first line gets the
+    // prompt prefix; subsequent lines get a 2-space indent to align.
+    let mut lines: Vec<Line> = Vec::new();
+    let buffer_lines: Vec<&str> = state.input_buffer.lines().collect();
 
-    let paragraph = Paragraph::new(line)
-        .block(block);
+    if buffer_lines.is_empty() {
+        // Empty input — single line with just the prompt.
+        lines.push(Line::from(vec![prompt_span]));
+    } else {
+        for (i, line_text) in buffer_lines.iter().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![prompt_span.clone(), Span::raw(*line_text)]));
+            } else {
+                // Indent continuation lines to align under the text (2 spaces = prompt width).
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::raw(*line_text),
+                ]));
+            }
+        }
+        // If the buffer ends with \n, add an empty line so the cursor can sit there.
+        if state.input_buffer.ends_with('\n') {
+            lines.push(Line::from(vec![Span::raw("  ")]));
+        }
+    }
+
+    let text = Text::from(lines);
+    let paragraph = Paragraph::new(text).block(block);
 
     frame.render_widget(paragraph, area);
 
-    // Place the cursor at the right position.
+    // Place the cursor at the right position for multi-line input.
     if focused {
-        // Cursor x = border (1) + prompt symbol (2) + cursor position
-        let cursor_x = area.x + 1 + 2 + state.input_cursor as u16;
-        let cursor_y = area.y + 1;
-        frame.set_cursor_position((cursor_x, cursor_y));
+        // Calculate which line and column the cursor is on.
+        let (cursor_row, cursor_col) = cursor_row_col(&state.input_buffer, state.input_cursor);
+
+        // Cursor x = border(1) + prefix(2) + column within line.
+        // Every line has a 2-cell prefix: "⟩ " on the first line, "  " on continuations.
+        let cursor_x = area.x + 1 + 2 + cursor_col as u16;
+        let cursor_y = area.y + 1 + cursor_row as u16;
+
+        // Clamp cursor to visible area.
+        let max_y = area.y + area.height.saturating_sub(1);
+        let clamped_y = cursor_y.min(max_y);
+
+        frame.set_cursor_position((cursor_x, clamped_y));
     }
+}
+
+/// Given a buffer and a byte offset cursor position, return (row, col)
+/// where row is the line index (0-based) and col is the character offset
+/// within that line (0-based).
+pub fn cursor_row_col(buffer: &str, cursor: usize) -> (usize, usize) {
+    let mut row = 0;
+    let mut col = 0;
+    let mut byte_idx = 0;
+
+    for ch in buffer.chars() {
+        if byte_idx >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+        byte_idx += ch.len_utf8();
+    }
+
+    (row, col)
 }
 
 fn render_status_bar(frame: &mut Frame, state: &TuiState, area: Rect) {

@@ -267,6 +267,7 @@ pub async fn run(args: Args) -> Result<()> {
             no_stream: args.no_stream,
             no_tools: args.no_tools,
             system_override: args.system.clone(),
+            session_name: if args.tui { Some("enchanter_tui".to_string()) } else { None },
         },
     )?;
 

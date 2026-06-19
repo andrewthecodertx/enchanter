@@ -76,14 +76,23 @@ fn sessions_dir() -> PathBuf {
 impl Session {
     /// Start a new session in the default sessions directory.
     pub fn new(model: &str) -> Result<Self> {
-        Self::new_in_dir(model, &sessions_dir())
+        Self::new_in_dir(model, &sessions_dir(), None)
+    }
+
+    /// Start a new session with a custom ID prefix (e.g. "enchanter_tui").
+    pub fn new_named(model: &str, name: &str) -> Result<Self> {
+        Self::new_in_dir(model, &sessions_dir(), Some(name))
     }
 
     /// Start a new session, creating the JSONL file in the given directory.
-    pub fn new_in_dir(model: &str, dir: &std::path::Path) -> Result<Self> {
+    /// If `name` is provided, the session ID is `{name}_{uuid}`; otherwise it's a bare UUID.
+    pub fn new_in_dir(model: &str, dir: &std::path::Path, name: Option<&str>) -> Result<Self> {
         std::fs::create_dir_all(dir).context("creating sessions directory")?;
 
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = match name {
+            Some(n) => format!("{}_{}", n, uuid::Uuid::new_v4()),
+            None => uuid::Uuid::new_v4().to_string(),
+        };
         let path = dir.join(format!("{}.jsonl", id));
         let file = OpenOptions::new()
             .create(true)
@@ -357,7 +366,7 @@ mod tests {
     #[test]
     fn session_records_messages() {
         let (_dir, sdir) = setup_test_sessions_dir();
-        let mut session = Session::new_in_dir("test-model", &sdir).unwrap();
+        let mut session = Session::new_in_dir("test-model", &sdir, None).unwrap();
 
         let system = Message::system("You are helpful.");
         let user = Message::user("hello");
@@ -373,7 +382,7 @@ mod tests {
     #[test]
     fn session_roundtrip() {
         let (_dir, sdir) = setup_test_sessions_dir();
-        let mut session = Session::new_in_dir("test-model-rt", &sdir).unwrap();
+        let mut session = Session::new_in_dir("test-model-rt", &sdir, None).unwrap();
 
         let system = Message::system("You are a test.");
         let user = Message::user("what is 2+2?");
@@ -395,7 +404,7 @@ mod tests {
     #[test]
     fn session_records_tool_calls() {
         let (_dir, sdir) = setup_test_sessions_dir();
-        let mut session = Session::new_in_dir("test-model-tc", &sdir).unwrap();
+        let mut session = Session::new_in_dir("test-model-tc", &sdir, None).unwrap();
 
         let system = Message::system("You are helpful.");
         let user = Message::user("list files");
@@ -430,7 +439,7 @@ mod tests {
     #[test]
     fn list_sessions_finds_created_session() {
         let (_dir, sdir) = setup_test_sessions_dir();
-        let mut session = Session::new_in_dir("test-model-list", &sdir).unwrap();
+        let mut session = Session::new_in_dir("test-model-list", &sdir, None).unwrap();
         let user = Message::user("hello");
         session.append(&user).unwrap();
 
