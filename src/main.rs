@@ -83,6 +83,7 @@ mod soul;
 mod status_bar;
 mod summary;
 mod tools;
+mod tui;
 
 use anyhow::Result;
 use clap::Parser;

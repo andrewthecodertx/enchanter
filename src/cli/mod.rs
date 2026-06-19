@@ -58,6 +58,10 @@ pub struct Args {
     #[arg(long)]
     pub no_tools: bool,
 
+    /// Launch the full-screen TUI instead of the line-oriented REPL.
+    #[arg(long)]
+    pub tui: bool,
+
     /// Run inline without connecting to the daemon (bypass daemon auto-start).
     #[cfg(unix)]
     #[arg(long)]
@@ -369,7 +373,11 @@ pub async fn run(args: Args) -> Result<()> {
         return result.map(|_| ());
     }
 
-    let mut agent = crate::repl::run_repl(agent).await?;
+    let mut agent = if args.tui {
+        crate::tui::run_tui(agent).await?
+    } else {
+        crate::repl::run_repl(agent).await?
+    };
     agent.shutdown_mcp().await;
 
     // Exit summary
