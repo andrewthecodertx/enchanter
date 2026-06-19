@@ -490,11 +490,12 @@ fn handle_chat_key(key: KeyEvent, state: &mut TuiState) -> LoopAction {
             LoopAction::Continue
         }
         KeyCode::Home => {
+            state.auto_scroll = false;
             state.chat_scroll = 0;
             LoopAction::Continue
         }
         KeyCode::End => {
-            state.chat_scroll = state.chat_lines.len();
+            state.scroll_to_bottom();
             LoopAction::Continue
         }
         _ => LoopAction::Continue,

@@ -235,18 +235,34 @@ fn render_chat(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         .border_style(border_style);
 
     let lines = build_chat_lines(state);
+    let total_rows = lines.len();
+    let visible_rows = area.height.saturating_sub(2) as usize;
+
+    // Store for scroll clamping in scroll methods.
+    state.chat_total_rows = total_rows;
+    state.chat_visible_rows = visible_rows;
+
+    // Clamp scroll: if auto_scroll, snap to bottom; otherwise clamp to max.
+    let scroll = if state.auto_scroll {
+        total_rows.saturating_sub(visible_rows)
+    } else {
+        let max = total_rows.saturating_sub(visible_rows);
+        state.chat_scroll.min(max)
+    };
+    state.chat_scroll = scroll;
+
     let text = Text::from(lines);
 
     let paragraph = Paragraph::new(text)
         .block(block)
         .wrap(Wrap { trim: false })
-        .scroll((state.chat_scroll as u16, 0));
+        .scroll((scroll as u16, 0));
 
     frame.render_widget(paragraph, area);
 }
 
-fn build_chat_lines(state: &TuiState) -> Vec<Line> {
-    let mut lines: Vec<Line> = Vec::new();
+fn build_chat_lines(state: &TuiState) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     for entry in &state.chat_lines {
         match entry {
@@ -255,7 +271,7 @@ fn build_chat_lines(state: &TuiState) -> Vec<Line> {
                     Span::styled("You", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 ]));
                 for line in text.lines() {
-                    lines.push(Line::from(Span::raw(line)));
+                    lines.push(Line::from(Span::raw(line.to_string())));
                 }
                 lines.push(Line::raw(""));
             }
@@ -264,25 +280,25 @@ fn build_chat_lines(state: &TuiState) -> Vec<Line> {
                     Span::styled("Assistant", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
                 ]));
                 for line in text.lines() {
-                    lines.push(Line::from(Span::raw(line)));
+                    lines.push(Line::from(Span::raw(line.to_string())));
                 }
                 lines.push(Line::raw(""));
             }
             ChatLine::ToolCall(name) => {
                 lines.push(Line::from(vec![
                     Span::styled("  ⟩ ", Style::default().fg(YELLOW)),
-                    Span::styled(name, Style::default().fg(YELLOW)),
+                    Span::styled(name.clone(), Style::default().fg(YELLOW)),
                 ]));
             }
             ChatLine::ToolResult(name, content) => {
                 lines.push(Line::from(vec![
                     Span::styled("│ ", Style::default().fg(DIM)),
-                    Span::styled(name, Style::default().fg(DIM)),
+                    Span::styled(name.clone(), Style::default().fg(DIM)),
                 ]));
                 for line in content.lines().take(5) {
                     lines.push(Line::from(vec![
                         Span::styled("│ ", Style::default().fg(DIM)),
-                        Span::raw(line),
+                        Span::raw(line.to_string()),
                     ]));
                 }
                 let total = content.lines().count();
@@ -294,11 +310,11 @@ fn build_chat_lines(state: &TuiState) -> Vec<Line> {
                 }
             }
             ChatLine::System(text) => {
-                lines.push(Line::from(Span::styled(text, Style::default().fg(DIM))));
+                lines.push(Line::from(Span::styled(text.clone(), Style::default().fg(DIM))));
             }
             ChatLine::Compacted(text) => {
                 lines.push(Line::from(Span::styled(
-                    text,
+                    text.clone(),
                     Style::default().fg(YELLOW),
                 )));
             }

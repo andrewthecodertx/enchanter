@@ -151,7 +151,15 @@ pub struct TuiState {
     pub sessions: Vec<SessionEntry>,
     pub skills: Vec<Skill>,
     pub chat_lines: Vec<ChatLine>,
+    /// Scroll offset (visual rows from the top of chat content).
     pub chat_scroll: usize,
+    /// When true, chat auto-scrolls to show newest content. Disabled on manual scroll,
+    /// re-enabled when new content arrives or user presses End.
+    pub auto_scroll: bool,
+    /// Total rendered rows in the chat (set during render for scroll clamping).
+    pub chat_total_rows: usize,
+    /// Visible rows in the chat area (set during render for scroll clamping).
+    pub chat_visible_rows: usize,
     pub input_buffer: String,
     pub input_cursor: usize,
     pub input_history: Vec<String>,
@@ -187,6 +195,9 @@ impl TuiState {
             skills,
             chat_lines: Vec::new(),
             chat_scroll: 0,
+            auto_scroll: true,
+            chat_total_rows: 0,
+            chat_visible_rows: 0,
             input_buffer: String::new(),
             input_cursor: 0,
             input_history: Vec::new(),
@@ -212,14 +223,31 @@ impl TuiState {
         crate::status_bar::model_context_size(&self.model_name)
     }
 
-    /// Scroll chat up by n lines.
+    /// Scroll chat toward older messages (content moves down).
     pub fn scroll_chat_up(&mut self, n: usize) {
-        self.chat_scroll = self.chat_scroll.saturating_add(n);
+        self.auto_scroll = false;
+        self.chat_scroll = self.chat_scroll.saturating_sub(n);
     }
 
-    /// Scroll chat down by n lines.
+    /// Scroll chat toward newer messages (content moves up).
     pub fn scroll_chat_down(&mut self, n: usize) {
-        self.chat_scroll = self.chat_scroll.saturating_sub(n);
+        let max = self.max_scroll();
+        self.chat_scroll = (self.chat_scroll + n).min(max);
+        // Re-enable auto-scroll if we hit the bottom.
+        if self.chat_scroll >= max {
+            self.auto_scroll = true;
+        }
+    }
+
+    /// Jump to bottom (newest content).
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_scroll = true;
+        self.chat_scroll = self.max_scroll();
+    }
+
+    /// Maximum scroll offset — content rows minus visible rows (clamped to 0).
+    fn max_scroll(&self) -> usize {
+        self.chat_total_rows.saturating_sub(self.chat_visible_rows)
     }
 
     /// Update token count after a turn.
@@ -227,16 +255,23 @@ impl TuiState {
         self.tokens = agent.estimated_context_tokens();
     }
 
-    /// Push a chat line and auto-scroll to bottom.
+    /// Push a chat line. If auto_scroll is enabled, jumps to bottom.
     pub fn push_chat_line(&mut self, line: ChatLine) {
         self.chat_lines.push(line);
-        self.chat_scroll = 0;
+        if self.auto_scroll {
+            // chat_scroll will be clamped to max during render after row count updates.
+            // Set it high so render clamps it to bottom.
+            self.chat_scroll = usize::MAX;
+        }
     }
 
     /// Append text to the last assistant line (for streaming).
     pub fn append_to_last_assistant(&mut self, text: &str) {
         if let Some(ChatLine::Assistant(content)) = self.chat_lines.last_mut() {
             content.push_str(text);
+            if self.auto_scroll {
+                self.chat_scroll = usize::MAX;
+            }
         } else {
             self.push_chat_line(ChatLine::Assistant(text.to_string()));
         }
