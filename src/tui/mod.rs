@@ -20,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, KeyEventKind, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags};
+use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, KeyEventKind, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
 use crossterm::cursor::{Show, Hide};
@@ -41,6 +41,7 @@ pub async fn run_tui(agent: AgentSession) -> Result<AgentSession> {
         stdout(),
         EnterAlternateScreen,
         Hide,
+        EnableMouseCapture,
         // Kitty keyboard protocol: disambiguate escape codes so we get
         // accurate modifier info (Shift+Enter, Alt+Enter, etc.).
         // Not all terminals support this — those that don't will just ignore it.
@@ -98,7 +99,7 @@ pub async fn run_tui(agent: AgentSession) -> Result<AgentSession> {
     .await;
 
     // Cleanup terminal.
-    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+    let _ = execute!(stdout(), PopKeyboardEnhancementFlags, DisableMouseCapture);
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, Show)?;
     terminal.flush()?;
@@ -144,6 +145,11 @@ async fn run_event_loop(
         // Render the current state.
         terminal.draw(|frame| render::render(frame, state))?;
 
+        // Animate the spinner while streaming (even before first token).
+        if state.is_streaming {
+            state.spinner_frame = (state.spinner_frame + 1) % 4;
+        }
+
         // Check if the agent task has finished — recover the agent.
         if state.is_streaming && agent_handle.is_some() {
             // Try to poll the join handle without blocking.
@@ -151,6 +157,7 @@ async fn run_event_loop(
                 Ok(join_res) => {
                     *agent_handle = None;
                     state.is_streaming = false;
+                    state.has_first_content = false;
                     match join_res {
                         Ok(Ok(returned_agent)) => {
                             *agent_slot = Some(returned_agent);
@@ -187,19 +194,38 @@ async fn run_event_loop(
             }
         }
 
-        // Poll for events.
+        // Poll for events. The timeout ensures the spinner animates even when
+        // no events arrive (e.g., waiting for first LLM token).
+        let poll_timeout = if state.is_streaming {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(30)
+        };
         tokio::select! {
             biased;
 
-            // Terminal events (keyboard, resize) from dedicated thread.
+            // Timeout — re-render to animate the spinner.
+            _ = tokio::time::sleep(poll_timeout) => {
+                // Just loop to re-render with next spinner frame.
+            }
+
+            // Terminal events (keyboard, mouse, resize) from dedicated thread.
             ev = key_rx.recv() => {
-                if let Some(CrosstermEvent::Key(key)) = ev {
-                    let action = handle_key(key, state, agent_slot, agent_handle, event_tx).await?;
-                    if action == LoopAction::Quit {
-                        break;
+                match ev {
+                    Some(CrosstermEvent::Key(key)) => {
+                        let action = handle_key(key, state, agent_slot, agent_handle, event_tx).await?;
+                        if action == LoopAction::Quit {
+                            break;
+                        }
                     }
+                    Some(CrosstermEvent::Mouse(mouse)) => {
+                        handle_mouse(mouse, state);
+                    }
+                    Some(CrosstermEvent::Resize(_, _)) => {
+                        // Re-render on next iteration.
+                    }
+                    _ => {}
                 }
-                // Resize and other events: just re-render on next iteration.
             }
 
             // Agent streaming events.
@@ -253,6 +279,29 @@ async fn handle_key(
             }
             return Ok(LoopAction::Quit);
         }
+        // Ctrl+Arrow — spatial pane navigation.
+        // Ctrl+Left = move left, Ctrl+Right = move right,
+        // Ctrl+Up = move up, Ctrl+Down = move down.
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.focus = state.focus.move_left();
+            state.reset_list_cursor();
+            return Ok(LoopAction::Continue);
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.focus = state.focus.move_right();
+            state.reset_list_cursor();
+            return Ok(LoopAction::Continue);
+        }
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.focus = state.focus.move_up();
+            state.reset_list_cursor();
+            return Ok(LoopAction::Continue);
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.focus = state.focus.move_down();
+            state.reset_list_cursor();
+            return Ok(LoopAction::Continue);
+        }
         KeyCode::Tab => {
             state.focus = state.focus.next();
             state.reset_list_cursor();
@@ -263,34 +312,24 @@ async fn handle_key(
             state.reset_list_cursor();
             return Ok(LoopAction::Continue);
         }
-        // Shift+H/J/K/L — spatial pane navigation.
+        // Ctrl+H/J/K/L — spatial pane navigation (vim-style).
         // H = left, J = down, K = up, L = right.
-        // Handle both uppercase char (kitty protocol) and lowercase+SHIFT
-        // (terminals without kitty enhancement).
-        KeyCode::Char('H') | KeyCode::Char('h')
-            if key.modifiers.contains(KeyModifiers::SHIFT) =>
-        {
+        KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.focus = state.focus.move_left();
             state.reset_list_cursor();
             return Ok(LoopAction::Continue);
         }
-        KeyCode::Char('J') | KeyCode::Char('j')
-            if key.modifiers.contains(KeyModifiers::SHIFT) =>
-        {
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.focus = state.focus.move_down();
             state.reset_list_cursor();
             return Ok(LoopAction::Continue);
         }
-        KeyCode::Char('K') | KeyCode::Char('k')
-            if key.modifiers.contains(KeyModifiers::SHIFT) =>
-        {
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.focus = state.focus.move_up();
             state.reset_list_cursor();
             return Ok(LoopAction::Continue);
         }
-        KeyCode::Char('L') | KeyCode::Char('l')
-            if key.modifiers.contains(KeyModifiers::SHIFT) =>
-        {
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             state.focus = state.focus.move_right();
             state.reset_list_cursor();
             return Ok(LoopAction::Continue);
@@ -305,6 +344,55 @@ async fn handle_key(
         Focus::Models => Ok(handle_list_key(key, state, agent_slot).await),
         Focus::Sessions => Ok(handle_list_key(key, state, agent_slot).await),
         Focus::Skills => Ok(handle_list_key(key, state, agent_slot).await),
+    }
+}
+
+/// Handle a mouse event — click to focus a pane, and in sidebar lists,
+/// set the cursor to the clicked row.
+fn handle_mouse(mouse: MouseEvent, state: &mut TuiState) {
+    match mouse.kind {
+        MouseEventKind::Down(_) => {
+            // Left-click (and middle/right-click) to focus a pane.
+            if let Some(target_focus) = state.pane_areas.hit_test(mouse.column, mouse.row) {
+                state.focus = target_focus;
+                // For sidebar list panes, also set the cursor to the clicked item.
+                if matches!(target_focus, Focus::Models | Focus::Sessions | Focus::Skills) {
+                    if let Some(index) = state.pane_areas.list_index_for_click(
+                        target_focus,
+                        mouse.row,
+                    ) {
+                        let len = match target_focus {
+                            Focus::Models => state.models.len(),
+                            Focus::Sessions => state.sessions.len(),
+                            Focus::Skills => state.skills.len(),
+                            _ => 0,
+                        };
+                        if index < len {
+                            state.list_cursor = index;
+                        }
+                    }
+                }
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            // Mouse wheel up — scroll within the focused pane.
+            match state.focus {
+                Focus::Chat => state.scroll_chat_up(3),
+                Focus::Models | Focus::Sessions | Focus::Skills => state.list_up(),
+                _ => {}
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            // Mouse wheel down — scroll within the focused pane.
+            match state.focus {
+                Focus::Chat => state.scroll_chat_down(3),
+                Focus::Models | Focus::Sessions | Focus::Skills => {
+                    state.list_down(state.current_list_len());
+                }
+                _ => {}
+            }
+        }
+        _ => {}
     }
 }
 
@@ -353,6 +441,7 @@ async fn handle_input_key(
 
             state.push_chat_line(ChatLine::User(text.clone()));
             state.is_streaming = true;
+            state.has_first_content = false;
             state.status_message.clear();
 
             match agent.chat_events_spawned(&text) {
@@ -542,7 +631,12 @@ async fn handle_list_key(
                 Focus::Sessions => {
                     // TODO: session resume — needs loading logic.
                     if let Some(entry) = state.selected_session() {
-                        state.status_message = format!("Session {} selected (resume not yet implemented)", &entry.id[..8.min(entry.id.len())]);
+                        let display = if let Some(uuid_part) = entry.id.strip_prefix("enchanter_tui_") {
+                            format!("tui:{}", &uuid_part[..8.min(uuid_part.len())])
+                        } else {
+                            entry.id[..8.min(entry.id.len())].to_string()
+                        };
+                        state.status_message = format!("Session {} selected (resume not yet implemented)", display);
                     }
                     LoopAction::Continue
                 }
@@ -679,9 +773,11 @@ async fn handle_slash_command(
 fn handle_agent_event(ev: Event, state: &mut TuiState) {
     match ev {
         Event::Content { text } => {
+            state.has_first_content = true;
             state.append_to_last_assistant(&text);
         }
         Event::ToolCall { name, .. } => {
+            state.has_first_content = true;
             state.push_chat_line(ChatLine::ToolCall(name));
         }
         Event::ToolResult { content, .. } => {

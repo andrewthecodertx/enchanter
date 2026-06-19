@@ -17,7 +17,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::tui::state::{ChatLine, Focus, TuiState};
+use crate::tui::state::{ChatLine, Focus, PaneAreas, TuiState};
 
 /// Theme colors — dark terminal aesthetic matching the existing status bar.
 const ACCENT: Color = Color::Cyan;
@@ -64,6 +64,25 @@ pub fn render(frame: &mut Frame, state: &mut TuiState) {
     render_chat(frame, state, chat_area);
     render_input(frame, state, input_area);
     render_status_bar(frame, state, status_area);
+
+    // Store sidebar sub-pane areas for mouse hit-testing.
+    // We need to re-split the sidebar to get individual pane areas.
+    let sidebar_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(35),
+            Constraint::Percentage(35),
+            Constraint::Percentage(30),
+        ])
+        .split(sidebar_area);
+
+    state.pane_areas = PaneAreas {
+        models: sidebar_layout[0],
+        sessions: sidebar_layout[1],
+        skills: sidebar_layout[2],
+        chat: chat_area,
+        input: input_area,
+    };
 }
 
 fn render_sidebar(frame: &mut Frame, state: &mut TuiState, area: Rect) {
@@ -149,11 +168,28 @@ fn render_sessions_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         .iter()
         .take(20)
         .map(|s| {
-            let short_id = &s.id[..8.min(s.id.len())];
+            // Strip known prefixes to get a meaningful display name.
+            // For "enchanter_tui_{uuid}", show date + short UUID.
+            // For bare UUIDs, show short UUID + date.
+            let display_name: String = if let Some(uuid_part) = s.id.strip_prefix("enchanter_tui_") {
+                let short = &uuid_part[..8.min(uuid_part.len())];
+                format!("tui:{}", short)
+            } else {
+                s.id[..8.min(s.id.len())].to_string()
+            };
+            let date_str = s.started_at.as_ref()
+                .and_then(|t| {
+                    // Extract just the date portion from RFC3339.
+                    t.split('T').next()
+                })
+                .map(|d| d.to_string())
+                .unwrap_or_default();
             let msgs = format!("{}m", s.message_count);
             ListItem::new(Line::from(vec![
-                Span::styled(short_id, Style::default().fg(if focused { Color::White } else { DIM })),
-                Span::raw("  "),
+                Span::styled(display_name, Style::default().fg(if focused { Color::White } else { DIM })),
+                Span::raw(" "),
+                Span::styled(date_str, Style::default().fg(DIM)),
+                Span::raw(" "),
                 Span::styled(msgs, Style::default().fg(DIM)),
             ]))
         })
@@ -221,12 +257,23 @@ fn render_chat(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         Style::default().fg(DIM)
     };
 
-    let title = if state.is_streaming {
-        "│ Chat ◀ streaming… │"
+    let title: String = if state.is_streaming {
+        if state.has_first_content {
+            "│ Chat ◀ streaming… │".to_string()
+        } else {
+            // Thinking — waiting for first token. Show animated spinner.
+            let spinner = match state.spinner_frame {
+                0 => "⠋",
+                1 => "⠙",
+                2 => "⠹",
+                _ => "⠸",
+            };
+            format!("│ Chat ◀ {} thinking… │", spinner)
+        }
     } else if focused {
-        "│ Chat ◀ │"
+        "│ Chat ◀ │".to_string()
     } else {
-        "│ Chat │"
+        "│ Chat │".to_string()
     };
 
     let block = Block::default()
@@ -346,7 +393,9 @@ fn render_input(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         Style::default().fg(DIM)
     };
 
-    let prompt_symbol = if state.is_streaming { "…" } else { "⟩" };
+    let prompt_symbol = if state.is_streaming {
+        if state.has_first_content { "…" } else { "⠋" }
+    } else { "⟩" };
     let title = if focused {
         format!("│ {} Input ◀ │", prompt_symbol)
     } else {
@@ -453,7 +502,11 @@ fn render_status_bar(frame: &mut Frame, state: &TuiState, area: Rect) {
         None => format!("{} tokens", crate::status_bar::fmt_tokens(state.tokens)),
     };
 
-    let short_id = &state.session_id[..8.min(state.session_id.len())];
+    let short_id = if let Some(uuid_part) = state.session_id.strip_prefix("enchanter_tui_") {
+        &uuid_part[..8.min(uuid_part.len())]
+    } else {
+        &state.session_id[..8.min(state.session_id.len())]
+    };
     let short_model = state.model_name.rsplit_once('/')
         .map(|(_, m)| m.to_string())
         .unwrap_or_else(|| state.model_name.clone());
@@ -465,6 +518,29 @@ fn render_status_bar(frame: &mut Frame, state: &TuiState, area: Rect) {
         let bar = Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled(&state.status_message, Style::default().fg(YELLOW)),
+        ]);
+        let paragraph = Paragraph::new(bar).style(Style::default().bg(Color::Black));
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    // While streaming but before first content, show a thinking spinner.
+    if state.is_streaming && !state.has_first_content {
+        let spinner = match state.spinner_frame {
+            0 => "⠋",
+            1 => "⠙",
+            2 => "⠹",
+            _ => "⠸",
+        };
+        let bar = Line::from(vec![
+            Span::styled(format!(" {} thinking… ", spinner), Style::default().fg(YELLOW)),
+            Span::styled("│ ", Style::default().fg(DIM)),
+            Span::styled(&short_model, Style::default()),
+            Span::styled(" │ ", Style::default().fg(DIM)),
+            Span::styled(short_id, Style::default().fg(DIM)),
+            Span::styled(" │ ", Style::default().fg(DIM)),
+            Span::styled(format!("[{}]", focus_label), Style::default().fg(ACCENT)),
+            Span::raw(" "),
         ]);
         let paragraph = Paragraph::new(bar).style(Style::default().bg(Color::Black));
         frame.render_widget(paragraph, area);

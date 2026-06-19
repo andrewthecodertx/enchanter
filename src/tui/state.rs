@@ -6,9 +6,72 @@
 
 use std::collections::HashMap;
 
+use ratatui::layout::Rect;
+
 use crate::agent::AgentSession;
 use crate::session::SessionMeta;
 use crate::skills::Skill;
+
+/// Rectangular areas for each pane, stored during render so mouse clicks
+/// can hit-test against them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PaneAreas {
+    pub models: Rect,
+    pub sessions: Rect,
+    pub skills: Rect,
+    pub chat: Rect,
+    pub input: Rect,
+}
+
+impl PaneAreas {
+    /// Find which pane contains the given (column, row) coordinate.
+    /// Returns None if the click is outside all panes (e.g. on the status bar).
+    pub fn hit_test(&self, col: u16, row: u16) -> Option<Focus> {
+        let point = (col, row);
+        if self.models.contains_point(point) {
+            Some(Focus::Models)
+        } else if self.sessions.contains_point(point) {
+            Some(Focus::Sessions)
+        } else if self.skills.contains_point(point) {
+            Some(Focus::Skills)
+        } else if self.chat.contains_point(point) {
+            Some(Focus::Chat)
+        } else if self.input.contains_point(point) {
+            Some(Focus::Input)
+        } else {
+            None
+        }
+    }
+
+    /// Compute the list item index for a click within a sidebar pane.
+    /// Returns None if the click is on the border or outside the list area.
+    pub fn list_index_for_click(&self, focus: Focus, row: u16) -> Option<usize> {
+        let pane = match focus {
+            Focus::Models => self.models,
+            Focus::Sessions => self.sessions,
+            Focus::Skills => self.skills,
+            _ => return None,
+        };
+        // List items start 1 row below the pane top (inside the border).
+        // The bottom border is the last row of the pane.
+        if row <= pane.y || row >= pane.y + pane.height {
+            return None;
+        }
+        let index = (row - pane.y - 1) as usize;
+        Some(index)
+    }
+}
+
+/// Extension trait — ratatui's Rect doesn't have contains_point.
+trait RectContains {
+    fn contains_point(&self, point: (u16, u16)) -> bool;
+}
+
+impl RectContains for Rect {
+    fn contains_point(&self, (col, row): (u16, u16)) -> bool {
+        col >= self.x && col < self.x + self.width && row >= self.y && row < self.y + self.height
+    }
+}
 
 /// Which pane is focused for keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +238,13 @@ pub struct TuiState {
     pub list_cursor: usize,
     /// Provider names from config (for model switching).
     pub provider_names: Vec<String>,
+    /// Pane areas stored during render for mouse hit-testing.
+    pub pane_areas: PaneAreas,
+    /// Animation frame for the thinking spinner (0-3, cycles).
+    pub spinner_frame: u8,
+    /// True once we receive the first content/tool event during streaming.
+    /// Used to distinguish "thinking" (waiting for first token) from "streaming" (actively receiving).
+    pub has_first_content: bool,
 }
 
 impl TuiState {
@@ -210,6 +280,9 @@ impl TuiState {
             session_id,
             list_cursor: 0,
             provider_names,
+            pane_areas: PaneAreas::default(),
+            spinner_frame: 0,
+            has_first_content: false,
         }
     }
 
@@ -361,5 +434,88 @@ pub fn build_session_list() -> Vec<SessionEntry> {
             })
             .collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn areas() -> PaneAreas {
+        PaneAreas {
+            models: Rect::new(0, 0, 24, 10),
+            sessions: Rect::new(0, 10, 24, 10),
+            skills: Rect::new(0, 20, 24, 10),
+            chat: Rect::new(24, 0, 60, 30),
+            input: Rect::new(0, 30, 84, 5),
+        }
+    }
+
+    #[test]
+    fn test_hit_test_models() {
+        let a = areas();
+        assert_eq!(a.hit_test(1, 1), Some(Focus::Models));
+        assert_eq!(a.hit_test(23, 9), Some(Focus::Models));
+    }
+
+    #[test]
+    fn test_hit_test_sessions() {
+        let a = areas();
+        assert_eq!(a.hit_test(1, 11), Some(Focus::Sessions));
+        assert_eq!(a.hit_test(1, 19), Some(Focus::Sessions));
+    }
+
+    #[test]
+    fn test_hit_test_skills() {
+        let a = areas();
+        assert_eq!(a.hit_test(1, 21), Some(Focus::Skills));
+    }
+
+    #[test]
+    fn test_hit_test_chat() {
+        let a = areas();
+        assert_eq!(a.hit_test(25, 5), Some(Focus::Chat));
+        assert_eq!(a.hit_test(83, 29), Some(Focus::Chat));
+    }
+
+    #[test]
+    fn test_hit_test_input() {
+        let a = areas();
+        assert_eq!(a.hit_test(0, 31), Some(Focus::Input));
+    }
+
+    #[test]
+    fn test_hit_test_outside() {
+        let a = areas();
+        // Status bar area (below input)
+        assert_eq!(a.hit_test(0, 36), None);
+        // Outside all panes
+        assert_eq!(a.hit_test(100, 100), None);
+    }
+
+    #[test]
+    fn test_list_index_for_click() {
+        let a = areas();
+        // First item in models pane (row 1 = first item, row 0 = border)
+        assert_eq!(a.list_index_for_click(Focus::Models, 1), Some(0));
+        assert_eq!(a.list_index_for_click(Focus::Models, 5), Some(4));
+        // On the top border (row 0)
+        assert_eq!(a.list_index_for_click(Focus::Models, 0), None);
+        // On the bottom border (row 9 = models.y + models.height - 1)
+        assert_eq!(a.list_index_for_click(Focus::Models, 10), None);
+    }
+
+    #[test]
+    fn test_list_index_for_click_sessions() {
+        let a = areas();
+        assert_eq!(a.list_index_for_click(Focus::Sessions, 11), Some(0));
+        assert_eq!(a.list_index_for_click(Focus::Sessions, 13), Some(2));
+    }
+
+    #[test]
+    fn test_list_index_for_click_non_sidebar() {
+        let a = areas();
+        assert_eq!(a.list_index_for_click(Focus::Chat, 5), None);
+        assert_eq!(a.list_index_for_click(Focus::Input, 5), None);
     }
 }
