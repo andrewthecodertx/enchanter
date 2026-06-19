@@ -518,4 +518,362 @@ mod tests {
         assert_eq!(a.list_index_for_click(Focus::Chat, 5), None);
         assert_eq!(a.list_index_for_click(Focus::Input, 5), None);
     }
+
+    // ─── Focus navigation ───
+    // Tab cycles through all 5 panes and wraps.
+    #[test]
+    fn test_focus_next_cycles() {
+        assert_eq!(Focus::Models.next(), Focus::Sessions);
+        assert_eq!(Focus::Sessions.next(), Focus::Skills);
+        assert_eq!(Focus::Skills.next(), Focus::Chat);
+        assert_eq!(Focus::Chat.next(), Focus::Input);
+        assert_eq!(Focus::Input.next(), Focus::Models);
+    }
+
+    #[test]
+    fn test_focus_prev_cycles() {
+        assert_eq!(Focus::Models.prev(), Focus::Input);
+        assert_eq!(Focus::Sessions.prev(), Focus::Models);
+        assert_eq!(Focus::Skills.prev(), Focus::Sessions);
+        assert_eq!(Focus::Chat.prev(), Focus::Skills);
+        assert_eq!(Focus::Input.prev(), Focus::Chat);
+    }
+
+    // Spatial nav matches the visual layout:
+    //   ┌──────────┬─────────────┐
+    //   │ Models   │             │
+    //   │ Sessions │   Chat      │
+    //   │ Skills   │             │
+    //   ├──────────┴─────────────┤
+    //   │ Input                  │
+    //   └────────────────────────┘
+    #[test]
+    fn test_focus_spatial_left() {
+        // From the right column → nearest left pane.
+        assert_eq!(Focus::Chat.move_left(), Focus::Skills);
+        assert_eq!(Focus::Input.move_left(), Focus::Models);
+        // Already on left column — no change.
+        assert_eq!(Focus::Models.move_left(), Focus::Models);
+        assert_eq!(Focus::Sessions.move_left(), Focus::Sessions);
+        assert_eq!(Focus::Skills.move_left(), Focus::Skills);
+    }
+
+    #[test]
+    fn test_focus_spatial_right() {
+        // From the left column → Chat (right column top).
+        assert_eq!(Focus::Models.move_right(), Focus::Chat);
+        assert_eq!(Focus::Sessions.move_right(), Focus::Chat);
+        assert_eq!(Focus::Skills.move_right(), Focus::Chat);
+        // From bottom row → Chat.
+        assert_eq!(Focus::Input.move_right(), Focus::Chat);
+        // Already on right column — no change.
+        assert_eq!(Focus::Chat.move_right(), Focus::Chat);
+    }
+
+    #[test]
+    fn test_focus_spatial_up() {
+        // Sidebar vertical nav.
+        assert_eq!(Focus::Sessions.move_up(), Focus::Models);
+        assert_eq!(Focus::Skills.move_up(), Focus::Sessions);
+        // From bottom row → Skills (closest sidebar pane).
+        assert_eq!(Focus::Input.move_up(), Focus::Skills);
+        // Already at top — no change.
+        assert_eq!(Focus::Models.move_up(), Focus::Models);
+        assert_eq!(Focus::Chat.move_up(), Focus::Chat);
+    }
+
+    #[test]
+    fn test_focus_spatial_down() {
+        // Sidebar vertical nav.
+        assert_eq!(Focus::Models.move_down(), Focus::Sessions);
+        assert_eq!(Focus::Sessions.move_down(), Focus::Skills);
+        assert_eq!(Focus::Skills.move_down(), Focus::Input);
+        // From chat → input.
+        assert_eq!(Focus::Chat.move_down(), Focus::Input);
+        // Already at bottom — no change.
+        assert_eq!(Focus::Input.move_down(), Focus::Input);
+    }
+
+    // ─── Chat scroll + auto_scroll state machine ───
+    // TuiState without requiring AgentSession. We set only the fields
+    // the scroll methods access.
+    fn scroll_state(total: usize, visible: usize) -> TuiState {
+        let mut s = empty_state();
+        s.chat_total_rows = total;
+        s.chat_visible_rows = visible;
+        s
+    }
+
+    // Build a TuiState without needing a real AgentSession — just set the
+    // fields the scroll/list logic touches.
+    fn empty_state() -> TuiState {
+        TuiState {
+            focus: Focus::Input,
+            models: Vec::new(),
+            model_context: HashMap::new(),
+            sessions: Vec::new(),
+            skills: Vec::new(),
+            chat_lines: Vec::new(),
+            chat_scroll: 0,
+            auto_scroll: true,
+            chat_total_rows: 0,
+            chat_visible_rows: 0,
+            input_buffer: String::new(),
+            input_cursor: 0,
+            input_history: Vec::new(),
+            history_index: None,
+            status_message: String::new(),
+            is_streaming: false,
+            pending_quit: false,
+            tokens: 0,
+            model_name: String::new(),
+            session_id: String::new(),
+            list_cursor: 0,
+            provider_names: Vec::new(),
+            pane_areas: PaneAreas::default(),
+            spinner_frame: 0,
+            has_first_content: false,
+        }
+    }
+
+    #[test]
+    fn test_scroll_up_disables_auto_scroll() {
+        let mut s = scroll_state(100, 10);
+        assert!(s.auto_scroll);
+        s.scroll_chat_up(5);
+        assert!(!s.auto_scroll);
+        // Scroll position decreased.
+        assert_eq!(s.chat_scroll, 0); // 0 - 5 saturates to 0
+    }
+
+    #[test]
+    fn test_scroll_up_from_nonzero() {
+        let mut s = scroll_state(100, 10);
+        s.auto_scroll = false;
+        s.chat_scroll = 20;
+        s.scroll_chat_up(5);
+        assert_eq!(s.chat_scroll, 15);
+        assert!(!s.auto_scroll);
+    }
+
+    #[test]
+    fn test_scroll_down_to_bottom_reenables_auto_scroll() {
+        let mut s = scroll_state(100, 10);
+        // max_scroll = 90
+        s.auto_scroll = false;
+        s.chat_scroll = 85;
+        s.scroll_chat_down(5);
+        // 85 + 5 = 90 == max → auto_scroll re-enabled
+        assert_eq!(s.chat_scroll, 90);
+        assert!(s.auto_scroll);
+    }
+
+    #[test]
+    fn test_scroll_down_not_to_bottom_stays_manual() {
+        let mut s = scroll_state(100, 10);
+        s.auto_scroll = false;
+        s.chat_scroll = 50;
+        s.scroll_chat_down(5);
+        assert_eq!(s.chat_scroll, 55);
+        assert!(!s.auto_scroll);
+    }
+
+    #[test]
+    fn test_scroll_down_clamped_at_max() {
+        let mut s = scroll_state(100, 10);
+        // max = 90. Already at 90, try to scroll more.
+        s.chat_scroll = 90;
+        s.scroll_chat_down(20);
+        assert_eq!(s.chat_scroll, 90);
+    }
+
+    #[test]
+    fn test_scroll_to_bottom() {
+        let mut s = scroll_state(100, 10);
+        s.auto_scroll = false;
+        s.chat_scroll = 0;
+        s.scroll_to_bottom();
+        assert!(s.auto_scroll);
+        assert_eq!(s.chat_scroll, 90);
+    }
+
+    #[test]
+    fn test_scroll_when_content_fits_visible_area() {
+        // total == visible → max_scroll = 0, no scrolling possible.
+        let mut s = scroll_state(10, 10);
+        s.scroll_chat_up(5);
+        assert_eq!(s.chat_scroll, 0);
+        assert!(!s.auto_scroll);
+        s.scroll_to_bottom();
+        assert_eq!(s.chat_scroll, 0);
+    }
+
+    #[test]
+    fn test_scroll_when_less_content_than_visible() {
+        // total < visible → max_scroll = 0 (saturating_sub).
+        let mut s = scroll_state(5, 10);
+        s.scroll_chat_up(3);
+        assert_eq!(s.chat_scroll, 0);
+    }
+
+    // ─── push_chat_line + auto_scroll interaction ───
+
+    #[test]
+    fn test_push_chat_line_with_auto_scroll() {
+        let mut s = scroll_state(0, 0);
+        s.push_chat_line(ChatLine::User("hello".to_string()));
+        // auto_scroll is true �� chat_scroll set to MAX (clamped during render).
+        assert_eq!(s.chat_scroll, usize::MAX);
+        assert_eq!(s.chat_lines.len(), 1);
+    }
+
+    #[test]
+    fn test_push_chat_line_without_auto_scroll() {
+        let mut s = scroll_state(50, 10);
+        s.auto_scroll = false;
+        s.chat_scroll = 20;
+        s.push_chat_line(ChatLine::User("hello".to_string()));
+        // auto_scroll disabled → scroll position unchanged.
+        assert_eq!(s.chat_scroll, 20);
+    }
+
+    // ─── append_to_last_assistant (streaming) ───
+
+    #[test]
+    fn test_append_to_last_assistant_existing() {
+        let mut s = empty_state();
+        s.push_chat_line(ChatLine::Assistant("Hello".to_string()));
+        s.append_to_last_assistant(" world");
+        match s.chat_lines.last() {
+            Some(ChatLine::Assistant(text)) => assert_eq!(text, "Hello world"),
+            _ => panic!("expected Assistant line"),
+        }
+    }
+
+    #[test]
+    fn test_append_to_last_assistant_no_existing() {
+        let mut s = empty_state();
+        // No prior assistant line → creates one.
+        s.append_to_last_assistant("first token");
+        match s.chat_lines.last() {
+            Some(ChatLine::Assistant(text)) => assert_eq!(text, "first token"),
+            _ => panic!("expected Assistant line"),
+        }
+    }
+
+    #[test]
+    fn test_append_to_last_assistant_after_user_line() {
+        let mut s = empty_state();
+        s.push_chat_line(ChatLine::User("question".to_string()));
+        // Last line is User, not Assistant → should create new Assistant.
+        s.append_to_last_assistant("answer");
+        assert_eq!(s.chat_lines.len(), 2);
+        match s.chat_lines.last() {
+            Some(ChatLine::Assistant(text)) => assert_eq!(text, "answer"),
+            _ => panic!("expected Assistant line"),
+        }
+    }
+
+    #[test]
+    fn test_append_to_last_assistant_auto_scroll() {
+        let mut s = empty_state();
+        s.push_chat_line(ChatLine::Assistant("Hello".to_string()));
+        s.chat_scroll = 0; // reset after push
+        s.append_to_last_assistant(" world");
+        // auto_scroll is true → scroll set to MAX.
+        assert_eq!(s.chat_scroll, usize::MAX);
+    }
+
+    // ─── list navigation ───
+
+    #[test]
+    fn test_list_up_down_bounds() {
+        use std::path::PathBuf;
+        let mk = |name: &str| Skill {
+            name: name.into(),
+            description: "".into(),
+            body: "".into(),
+            category: Some("x".into()),
+            path: PathBuf::from(format!("/{}", name)),
+        };
+        let mut s = empty_state();
+        s.skills = vec![mk("a"), mk("b"), mk("c")];
+        s.focus = Focus::Skills;
+        assert_eq!(s.current_list_len(), 3);
+        s.list_down(3);
+        assert_eq!(s.list_cursor, 1);
+        s.list_down(3);
+        assert_eq!(s.list_cursor, 2);
+        s.list_down(3); // at len-1, no further
+        assert_eq!(s.list_cursor, 2);
+        s.list_up();
+        assert_eq!(s.list_cursor, 1);
+        s.list_up();
+        s.list_up();
+        assert_eq!(s.list_cursor, 0); // clamped at 0
+        s.list_up();
+        assert_eq!(s.list_cursor, 0);
+    }
+
+    #[test]
+    fn test_list_down_empty() {
+        let mut s = empty_state();
+        s.focus = Focus::Skills;
+        // len=0 → list_down should be a no-op.
+        s.list_down(0);
+        assert_eq!(s.list_cursor, 0);
+    }
+
+    #[test]
+    fn test_current_list_len_matches_focus() {
+        let mut s = empty_state();
+        s.models = vec![
+            ModelEntry { name: "default".into(), model: "gpt-4".into(), is_active: true },
+        ];
+        s.sessions = vec![
+            SessionEntry { id: "abc".into(), message_count: 5, started_at: None },
+            SessionEntry { id: "def".into(), message_count: 3, started_at: None },
+        ];
+        s.focus = Focus::Models;
+        assert_eq!(s.current_list_len(), 1);
+        s.focus = Focus::Sessions;
+        assert_eq!(s.current_list_len(), 2);
+        s.focus = Focus::Skills;
+        assert_eq!(s.current_list_len(), 0);
+        s.focus = Focus::Chat;
+        assert_eq!(s.current_list_len(), 0);
+        s.focus = Focus::Input;
+        assert_eq!(s.current_list_len(), 0);
+    }
+
+    #[test]
+    fn test_selected_model_and_session() {
+        let mut s = empty_state();
+        s.models = vec![
+            ModelEntry { name: "default".into(), model: "gpt-4".into(), is_active: true },
+            ModelEntry { name: "openai".into(), model: "o3".into(), is_active: false },
+        ];
+        s.sessions = vec![
+            SessionEntry { id: "s1".into(), message_count: 1, started_at: None },
+        ];
+        s.list_cursor = 0;
+        assert_eq!(s.selected_model().map(|m| m.name.as_str()), Some("default"));
+        s.list_cursor = 1;
+        assert_eq!(s.selected_model().map(|m| m.name.as_str()), Some("openai"));
+        s.list_cursor = 5;
+        assert!(s.selected_model().is_none());
+
+        s.list_cursor = 0;
+        assert_eq!(s.selected_session().map(|s| s.id.as_str()), Some("s1"));
+        s.list_cursor = 5;
+        assert!(s.selected_session().is_none());
+    }
+
+    #[test]
+    fn test_reset_list_cursor() {
+        let mut s = empty_state();
+        s.list_cursor = 7;
+        s.reset_list_cursor();
+        assert_eq!(s.list_cursor, 0);
+    }
 }
