@@ -35,9 +35,12 @@
 //!
 //! The 10,000-character truncation limit on tool output mirrors OpenCode's
 //! output truncation approach and Claude Code's similar output limits.
-
+use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use tokio::process::Command;
+use tokio::time::Duration;
+use tokio::time::timeout;
 
 use crate::kstore::KnowledgeStore;
 use crate::memory::MemoryStore;
@@ -353,7 +356,7 @@ pub fn tools_json() -> Vec<Value> {
 ///
 /// enchanter simplifies this to a single dispatch() match statement since
 /// all built-in tools are local functions rather than dynamically registered.
-pub fn dispatch(
+pub async fn dispatch(
     name: &str,
     args: &Value,
     memory: &mut MemoryStore,
@@ -362,7 +365,7 @@ pub fn dispatch(
     allow_unsandboxed_exec: bool,
 ) -> String {
     match name {
-        "exec_command" => tool_exec_command(args, allowed_paths, allow_unsandboxed_exec),
+        "exec_command" => tool_exec_command(args, allowed_paths, allow_unsandboxed_exec).await,
         "read_file" => tool_read_file(args, allowed_paths),
         "write_file" => tool_write_file(args, allowed_paths),
         "edit_file" => tool_edit_file(args, allowed_paths),
@@ -374,7 +377,7 @@ pub fn dispatch(
     }
 }
 
-fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsandboxed: bool) -> String {
+async fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsandboxed: bool) -> String {
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => return "Error: missing required parameter 'command'".to_string(),
@@ -397,22 +400,40 @@ fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsandboxed:
             Ok(p) => p,
             Err(e) => return format!("Error: cannot locate enchanter binary for sandbox: {}", e),
         };
-        std::process::Command::new(exe)
-            .arg(crate::sandbox::SANDBOX_ARG)
-            .arg(command)
-            .env(
-                crate::sandbox::SANDBOX_PATHS_ENV,
-                crate::sandbox::encode_paths(allowed_paths),
-            )
-            .current_dir(&cwd)
-            .output()
+        
+        match timeout(
+            Duration::from_secs(30),
+            Command::new(exe)
+                .arg(crate::sandbox::SANDBOX_ARG)
+                .arg(command)
+                .env(
+                    crate::sandbox::SANDBOX_PATHS_ENV,
+                    crate::sandbox::encode_paths(allowed_paths),
+                )
+                .current_dir(&cwd)
+                .output(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => return "Error: command execution timed out after 30 seconds".to_string(),
+        }
     } else if allow_unsandboxed {
         warn_unsandboxed_once();
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&cwd)
-            .output()
+        
+        match timeout(
+            Duration::from_secs(30),
+            Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(&cwd)
+                .output(),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => return "Error: command execution timed out after 30 seconds".to_string(),
+        }
     } else {
         return "Error: no filesystem sandbox available on this system (Landlock \
             unsupported), refusing to run an unsandboxed shell. Set \
@@ -711,7 +732,8 @@ fn tool_search_files(args: &Value, allowed_paths: &[PathBuf]) -> String {
 
             // Truncate if needed
             if result.len() > 10_000 {
-                result.truncate(10_000);
+                let trunc_at = result.floor_char_boundary(10_000);
+                result.truncate(trunc_at);
                 result.push_str("\n... [truncated]");
             }
 
@@ -1010,8 +1032,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatch_unknown_tool() {
+    #[tokio::test]
+    async fn dispatch_unknown_tool() {
         let mut mem = MemoryStore::default();
         let result = dispatch(
             "nonexistent",
@@ -1020,12 +1042,13 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(result.contains("Unknown tool"));
     }
 
-    #[test]
-    fn dispatch_missing_required_param() {
+    #[tokio::test]
+    async fn dispatch_missing_required_param() {
         let mut mem = MemoryStore::default();
         let result = dispatch(
             "exec_command",
@@ -1034,12 +1057,13 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(result.contains("missing required"));
     }
 
-    #[test]
-    fn write_and_read_file() {
+    #[tokio::test]
+    async fn write_and_read_file() {
         let mut mem = MemoryStore::default();
         let tmp = std::env::temp_dir().join("enchanter_test_write_read.txt");
         let path = tmp.to_string_lossy().to_string();
@@ -1051,7 +1075,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(write_result.contains("Wrote"));
 
         let read_result = dispatch(
@@ -1061,14 +1086,15 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(read_result.contains("hello world"));
 
         let _ = std::fs::remove_file(&tmp);
     }
 
-    #[test]
-    fn list_directory_works() {
+    #[tokio::test]
+    async fn list_directory_works() {
         let mut mem = MemoryStore::default();
         let result = dispatch(
             "list_directory",
@@ -1077,7 +1103,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(!result.contains("Error"));
     }
 
@@ -1086,8 +1113,8 @@ mod tests {
     // for. End-to-end sandbox behavior (allow inside $HOME, deny outside) is
     // covered by tests/sandbox.rs against the compiled binary.
 
-    #[test]
-    fn edit_file_basic() {
+    #[tokio::test]
+    async fn edit_file_basic() {
         let mut mem = MemoryStore::default();
         let tmp = std::env::temp_dir().join("enchanter_test_edit.txt");
         let path = tmp.to_string_lossy().to_string();
@@ -1100,7 +1127,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
 
         // Edit it
         let edit_result = dispatch(
@@ -1114,7 +1142,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(edit_result.contains("Edited"));
 
         // Verify
@@ -1125,15 +1154,16 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(read_result.contains("world"));
         assert!(!read_result.contains("hello"));
 
         let _ = std::fs::remove_file(&tmp);
     }
 
-    #[test]
-    fn edit_file_requires_unique_match() {
+    #[tokio::test]
+    async fn edit_file_requires_unique_match() {
         let mut mem = MemoryStore::default();
         let tmp = std::env::temp_dir().join("enchanter_test_edit_multi.txt");
         let path = tmp.to_string_lossy().to_string();
@@ -1146,7 +1176,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
 
         let edit_result = dispatch(
             "edit_file",
@@ -1159,14 +1190,15 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(edit_result.contains("2 times") || edit_result.contains("unique"));
 
         let _ = std::fs::remove_file(&tmp);
     }
 
-    #[test]
-    fn edit_file_replace_all() {
+    #[tokio::test]
+    async fn edit_file_replace_all() {
         let mut mem = MemoryStore::default();
         let tmp = std::env::temp_dir().join("enchanter_test_edit_all.txt");
         let path = tmp.to_string_lossy().to_string();
@@ -1178,7 +1210,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
 
         let edit_result = dispatch(
             "edit_file",
@@ -1192,14 +1225,15 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(edit_result.contains("2 occurrence"));
 
         let _ = std::fs::remove_file(&tmp);
     }
 
-    #[test]
-    fn search_files_by_name() {
+    #[tokio::test]
+    async fn search_files_by_name() {
         let mut mem = MemoryStore::default();
         let result = dispatch(
             "search_files",
@@ -1212,12 +1246,13 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(result.contains("Cargo.toml"));
     }
 
-    #[test]
-    fn memory_add_and_list() {
+    #[tokio::test]
+    async fn memory_add_and_list() {
         let mut mem = MemoryStore::default();
         let add_result = dispatch(
             "memory",
@@ -1229,7 +1264,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(add_result.contains("saved"));
 
         let list_result = dispatch(
@@ -1239,7 +1275,8 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
-        );
+        )
+        .await;
         assert!(list_result.contains("rust 1.85"));
     }
 }

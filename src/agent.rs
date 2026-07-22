@@ -855,6 +855,7 @@ async fn dispatch_tool(
             allowed_paths,
             allow_unsandboxed_exec,
         )
+        .await
     } else if name.contains("__") {
         match mcp.dispatch(name, args).await {
             Some(Ok(result)) => result,

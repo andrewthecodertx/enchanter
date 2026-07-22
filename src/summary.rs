@@ -49,7 +49,7 @@ fn build_summary_prompt(messages: &[Message]) -> String {
                 if let Some(content) = &msg.content {
                     // Truncate very long assistant messages
                     let truncated = if content.len() > 500 {
-                        format!("{}...[truncated]", &content[..500])
+                        truncate_chars(content, 500)
                     } else {
                         content.clone()
                     };
@@ -64,17 +64,13 @@ fn build_summary_prompt(messages: &[Message]) -> String {
 
     // Truncate total conversation if very long
     let conversation = turns.join("\n\n");
-    let conversation = if conversation.len() > 8000 {
-        &conversation[..8000]
-    } else {
-        &conversation
-    };
+    let conversation = truncate_chars(&conversation, 8000);
 
     format!(
-        "Summarize this session in 3-5 concise bullet points. \
-         Focus on: topics discussed, decisions made, work completed, \
-         and open tasks or next steps. Be brief and information-dense.\n\n{}",
-        conversation
+    "Summarize this session in 3-5 concise bullet points. \
+     Focus on: topics discussed, decisions made, work completed, \
+     and open tasks or next steps. Be brief and information-dense.\n\n{}",
+    conversation
     )
 }
 
