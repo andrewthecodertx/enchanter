@@ -246,7 +246,8 @@ mod tests {
         let skills = SkillsIndex::default();
         let config = Config::default();
 
-        let prompt = build_system_prompt_with_model(&soul, &memory, &kstore, &skills, &config, "qwen3");
+        let prompt =
+            build_system_prompt_with_model(&soul, &memory, &kstore, &skills, &config, "qwen3");
         assert!(prompt.contains("Model: qwen3"));
     }
 
@@ -301,7 +302,12 @@ mod tests {
         };
         let memory = MemoryStore::default();
         let mut kstore = KnowledgeStore::default();
-        kstore.store("project.rust_version", "1.85", crate::kstore::Category::Environment, crate::kstore::Source::Observed);
+        kstore.store(
+            "project.rust_version",
+            "1.85",
+            crate::kstore::Category::Environment,
+            crate::kstore::Source::Observed,
+        );
         let skills = SkillsIndex::default();
         let config = Config::default();
 
@@ -329,7 +335,14 @@ mod tests {
         let config = Config::default();
 
         let old_prompt = build_system_prompt(&soul, &memory, &kstore, &skills, &config);
-        let layers = build_prompt_layers(&soul, &memory, &kstore, &skills, &config, &config.model_id());
+        let layers = build_prompt_layers(
+            &soul,
+            &memory,
+            &kstore,
+            &skills,
+            &config,
+            &config.model_id(),
+        );
         let new_prompt = layers.assemble();
 
         // Both should produce identical output

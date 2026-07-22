@@ -203,10 +203,20 @@ pub struct LlmClient {
     base_url: String,
     api_key: Option<String>,
     model: String,
+    extra_headers: Vec<(String, String)>,
 }
 
 impl LlmClient {
     pub fn new(base_url: &str, api_key: Option<&str>, model: &str) -> Self {
+        Self::with_headers(base_url, api_key, model, Vec::new())
+    }
+
+    pub fn with_headers(
+        base_url: &str,
+        api_key: Option<&str>,
+        model: &str,
+        extra_headers: Vec<(String, String)>,
+    ) -> Self {
         let client = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(15))
             .build()
@@ -216,14 +226,20 @@ impl LlmClient {
             base_url: base_url.to_string(),
             api_key: api_key.map(|s| s.to_string()),
             model: model.to_string(),
+            extra_headers,
         }
     }
 
     fn apply_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.api_key {
+        let mut req = match &self.api_key {
             Some(key) => req.header("Authorization", format!("Bearer {}", key)),
             None => req,
+        };
+        // Apply extra headers (prompt caching, provider-specific features).
+        for (k, v) in &self.extra_headers {
+            req = req.header(k.as_str(), v.as_str());
         }
+        req
     }
 
     /// Streaming chat with tool support. Content tokens are emitted via the
@@ -284,7 +300,9 @@ impl LlmClient {
         const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
         loop {
-            if done { break; }
+            if done {
+                break;
+            }
 
             let chunk_opt = match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
                 Ok(opt) => opt,
@@ -294,7 +312,10 @@ impl LlmClient {
                         model: self.model.clone(),
                         elapsed_secs: STREAM_CHUNK_TIMEOUT.as_secs(),
                     });
-                    anyhow::bail!("stream timed out — no data received for {}s", STREAM_CHUNK_TIMEOUT.as_secs());
+                    anyhow::bail!(
+                        "stream timed out — no data received for {}s",
+                        STREAM_CHUNK_TIMEOUT.as_secs()
+                    );
                 }
             };
 

@@ -32,6 +32,23 @@ model:
 #     model: llama-3.3-70b-versatile
 #     base_url: https://api.groq.com/openai/v1
 #     api_key: ${GROQ_API_KEY}
+#
+# Extra HTTP headers sent on every API request — useful for prompt prefix
+# caching (reduces cost on repeated system prompts), provider-specific
+# features, or custom proxy headers. Values support ${VAR} expansion.
+# Provider-level extra_headers override model-level entries with the same key.
+#
+# Example — OpenRouter prompt caching:
+# model:
+#   extra_headers:
+#     HTTP-Referer: https://github.com/yourusername/yourproject
+#     X-Title: enchanter
+#
+# Example — Anthropic-style prompt caching (if using a compatible proxy):
+# providers:
+#   anthropic:
+#     extra_headers:
+#       anthropic-beta: prompt-caching-2024-07-31
 
 # Filesystem sandbox for the agent's file tools and shell execution.
 # security:

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::tui::state::{ModelContextInfo, ContextSource};
+use crate::tui::state::{ContextSource, ModelContextInfo};
 
 /// Fetch model metadata from a provider and extract context window sizes.
 ///
@@ -89,16 +89,20 @@ struct ModelData {
 fn parse_models_response(body: &ModelsResponse) -> HashMap<String, ModelContextInfo> {
     let mut map = HashMap::new();
     for m in &body.data {
-        let size = m.context_length
+        let size = m
+            .context_length
             .or(m.max_context_length)
             .or(m.context_window)
             .or(m.top_context_length);
 
         if let Some(s) = size {
-            map.insert(m.id.clone(), ModelContextInfo {
-                context_size: Some(s),
-                source: ContextSource::ApiQuery,
-            });
+            map.insert(
+                m.id.clone(),
+                ModelContextInfo {
+                    context_size: Some(s),
+                    source: ContextSource::ApiQuery,
+                },
+            );
         }
     }
     map

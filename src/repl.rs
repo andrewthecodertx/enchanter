@@ -27,7 +27,9 @@ enum Action {
 /// do exit summaries, MCP shutdown, etc.
 pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
     let info = agent.info();
-    let short_url = info.base_url.trim_end_matches('/')
+    let short_url = info
+        .base_url
+        .trim_end_matches('/')
         .replace("https://api.openai.com/v1", "openai")
         .replace("http://localhost:11434/v1", "ollama")
         .replace("http://127.0.0.1:11434/v1", "ollama")
@@ -37,8 +39,15 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
     let session_id = info.session_id.clone();
 
     println!();
-    println!("⟡ Enchanter v{}  session={}", env!("CARGO_PKG_VERSION"), &session_id[..8.min(session_id.len())]);
-    println!("  model={} | provider={} | tools={} | /help for commands", info.model, short_url, info.tool_count);
+    println!(
+        "⟡ Enchanter v{}  session={}",
+        env!("CARGO_PKG_VERSION"),
+        &session_id[..8.min(session_id.len())]
+    );
+    println!(
+        "  model={} | provider={} | tools={} | /help for commands",
+        info.model, short_url, info.tool_count
+    );
     println!();
 
     // Agent is stored in Option — None while a spawned task has it
@@ -158,7 +167,11 @@ async fn stream_events(rx: &mut UnboundedReceiver<Event>) {
                     print!("{}", text);
                     io::stdout().flush().ok();
                 }
-                Event::ToolCall { name, id: _, arguments: _ } => {
+                Event::ToolCall {
+                    name,
+                    id: _,
+                    arguments: _,
+                } => {
                     println!();
                     println!("  ⟩ {}", name);
                 }
@@ -171,8 +184,14 @@ async fn stream_events(rx: &mut UnboundedReceiver<Event>) {
                         println!("│ ... ({} more lines)", total_lines - 5);
                     }
                 }
-                Event::Compacted { removed_messages, budget_tokens } => {
-                    println!("── compacted {} messages (~{} tokens) ──", removed_messages, budget_tokens);
+                Event::Compacted {
+                    removed_messages,
+                    budget_tokens,
+                } => {
+                    println!(
+                        "── compacted {} messages (~{} tokens) ──",
+                        removed_messages, budget_tokens
+                    );
                 }
                 Event::Done => {
                     println!();
@@ -221,6 +240,8 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
             println!("  /tools       Show available tools");
             println!("  /sessions    List sessions");
             println!("  /log         Show recent activity");
+            println!();
+            println!("  Tip: use --resume <session_id> at startup to continue a previous session");
         }
         "/clear" => {
             if let Err(e) = agent.clear() {
@@ -234,15 +255,25 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
             let tokens = agent.estimated_context_tokens();
             println!("  model:    {}", info.model);
             println!("  base_url: {}", info.base_url);
-            println!("  api_key:  {}", if info.api_key_set { "set" } else { "none" });
-            println!("  max:      {} (soft: {})",
-                info.max_turns.map_or("unlimited".to_string(), |n| n.to_string()),
-                info.soft_limit.map_or("n/a".to_string(), |n| n.to_string()));
+            println!(
+                "  api_key:  {}",
+                if info.api_key_set { "set" } else { "none" }
+            );
+            println!(
+                "  max:      {} (soft: {})",
+                info.max_turns
+                    .map_or("unlimited".to_string(), |n| n.to_string()),
+                info.soft_limit.map_or("n/a".to_string(), |n| n.to_string())
+            );
             let budget = status_bar::model_context_size(&agent.resolved.model);
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
-                println!("  context:  ~{} / {} ({}%)",
-                    status_bar::fmt_tokens(tokens), status_bar::fmt_tokens(b), pct);
+                println!(
+                    "  context:  ~{} / {} ({}%)",
+                    status_bar::fmt_tokens(tokens),
+                    status_bar::fmt_tokens(b),
+                    pct
+                );
             } else {
                 println!("  context:  ~{} tokens", status_bar::fmt_tokens(tokens));
             }
@@ -258,11 +289,16 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
         }
         "/tools" => {
             let tools = agent.tools_payload();
-            let count = tools.as_ref().and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let count = tools
+                .as_ref()
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             println!("── {} tools ──", count);
             if let Some(arr) = tools.as_ref().and_then(|v| v.as_array()) {
                 for t in arr.iter().take(30) {
-                    let name = t.get("function")
+                    let name = t
+                        .get("function")
                         .and_then(|f| f.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("?");
@@ -278,14 +314,18 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
             let budget = status_bar::model_context_size(&agent.resolved.model);
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
-                println!("── context: ~{} / {} tokens ({}%) ──",
+                println!(
+                    "── context: ~{} / {} tokens ({}%) ──",
                     status_bar::fmt_tokens(tokens),
                     status_bar::fmt_tokens(b),
-                    pct);
+                    pct
+                );
             } else {
-                println!("── context: ~{} tokens (budget unknown for {}) ──",
+                println!(
+                    "── context: ~{} tokens (budget unknown for {}) ──",
                     status_bar::fmt_tokens(tokens),
-                    agent.resolved.model);
+                    agent.resolved.model
+                );
             }
         }
         "/undo" => {
@@ -317,22 +357,20 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
                 }
             }
         }
-        "/sessions" => {
-            match crate::session::Session::list_all() {
-                Ok(sessions) => {
-                    if sessions.is_empty() {
-                        println!("no sessions found");
-                    } else {
-                        println!("── sessions ──");
-                        for s in &sessions {
-                            let short = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
-                            println!("  {}  {} msgs", short, s.message_count);
-                        }
+        "/sessions" => match crate::session::Session::list_all() {
+            Ok(sessions) => {
+                if sessions.is_empty() {
+                    println!("no sessions found");
+                } else {
+                    println!("── sessions ──");
+                    for s in &sessions {
+                        let short = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+                        println!("  {}  {} msgs", short, s.message_count);
                     }
                 }
-                Err(e) => eprintln!("✗ {}", e),
             }
-        }
+            Err(e) => eprintln!("✗ {}", e),
+        },
         _ => {
             if let Some(new_name) = cmd.strip_prefix("/model ") {
                 let new_name = new_name.trim();

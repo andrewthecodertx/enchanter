@@ -69,6 +69,11 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Extra HTTP headers sent on every API request (e.g. for prompt caching,
+    /// provider-specific features). Values support ${VAR} expansion.
+    /// Provider-level headers override model-level headers with the same key.
+    #[serde(default)]
+    pub extra_headers: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -82,6 +87,10 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Extra HTTP headers sent on every API request (e.g. for prompt caching,
+    /// provider-specific features). Values support ${VAR} expansion.
+    #[serde(default)]
+    pub extra_headers: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -278,6 +287,31 @@ pub struct ResolvedModel {
     pub model: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    /// Extra HTTP headers (expanded, ready to send).
+    pub extra_headers: Vec<(String, String)>,
+}
+
+/// Merge extra_headers from model-level and provider-level configs.
+/// Provider headers override model-level headers with the same key.
+/// All values are ${VAR}-expanded.
+fn resolve_extra_headers(
+    model_headers: Option<&std::collections::HashMap<String, String>>,
+    provider_headers: Option<&std::collections::HashMap<String, String>>,
+) -> Vec<(String, String)> {
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(h) = model_headers {
+        for (k, v) in h {
+            map.insert(k.clone(), expand_env("model extra_headers", v));
+        }
+    }
+    if let Some(h) = provider_headers {
+        for (k, v) in h {
+            map.insert(k.clone(), expand_env("provider extra_headers", v));
+        }
+    }
+    let mut out: Vec<(String, String)> = map.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 impl Config {
@@ -362,10 +396,16 @@ impl Config {
         let api_key = api_key.map(|k| expand_env("model api_key", &k));
         let base_url = expand_env("model base_url", &base_url);
 
+        let extra_headers = resolve_extra_headers(
+            self.model.extra_headers.as_ref(),
+            provider.extra_headers.as_ref(),
+        );
+
         Some(ResolvedModel {
             model,
             base_url,
             api_key,
+            extra_headers,
         })
     }
 
@@ -374,10 +414,12 @@ impl Config {
         let model = self.model_id();
         let base_url = expand_env("model base_url", &self.base_url());
         let api_key = self.api_key().map(|k| expand_env("model api_key", &k));
+        let extra_headers = resolve_extra_headers(self.model.extra_headers.as_ref(), None);
         ResolvedModel {
             model,
             base_url,
             api_key,
+            extra_headers,
         }
     }
 
@@ -496,6 +538,7 @@ mod tests {
                 model: Some("qwen3".to_string()),
                 base_url: Some("http://localhost:11434/v1".to_string()),
                 api_key: None,
+                extra_headers: None,
             },
         );
         let resolved = c.resolve_provider("ollama").unwrap();
@@ -510,6 +553,68 @@ mod tests {
         let c = Config::default();
         let resolved = c.resolve_default();
         assert_eq!(resolved.model, "gpt-4.1-mini");
-        assert_eq!(resolved.base_url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            resolved.base_url,
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn extra_headers_from_model_level() {
+        let mut c = Config::default();
+        c.model.extra_headers = Some(
+            [("X-Custom".to_string(), "value1".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let resolved = c.resolve_default();
+        assert!(
+            resolved
+                .extra_headers
+                .contains(&("X-Custom".to_string(), "value1".to_string()))
+        );
+    }
+
+    #[test]
+    fn extra_headers_provider_overrides_model() {
+        let mut c = Config::default();
+        c.model.extra_headers = Some(
+            [("X-Header".to_string(), "model-val".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        c.providers.insert(
+            "test-prov".to_string(),
+            ProviderConfig {
+                model: Some("test-model".to_string()),
+                base_url: None,
+                api_key: None,
+                extra_headers: Some(
+                    [("X-Header".to_string(), "provider-val".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+            },
+        );
+        let resolved = c.resolve_provider("test-prov").unwrap();
+        // Provider header should override model-level
+        assert!(
+            resolved
+                .extra_headers
+                .contains(&("X-Header".to_string(), "provider-val".to_string()))
+        );
+        // Model-level header should NOT appear (was overridden)
+        assert!(
+            !resolved
+                .extra_headers
+                .contains(&("X-Header".to_string(), "model-val".to_string()))
+        );
+    }
+
+    #[test]
+    fn extra_headers_default_empty() {
+        let c = Config::default();
+        let resolved = c.resolve_default();
+        assert!(resolved.extra_headers.is_empty());
     }
 }

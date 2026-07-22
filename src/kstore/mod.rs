@@ -162,10 +162,8 @@ impl KnowledgeStore {
         let dir = knowledge_dir();
         std::fs::create_dir_all(&dir).context("creating knowledge directory")?;
         let path = kstore_path();
-        let content = serde_json::to_string_pretty(self)
-            .context("serializing knowledge store")?;
-        std::fs::write(&path, content)
-            .with_context(|| format!("writing {}", path.display()))?;
+        let content = serde_json::to_string_pretty(self).context("serializing knowledge store")?;
+        std::fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
@@ -291,7 +289,12 @@ mod tests {
     #[test]
     fn store_and_get() {
         let mut store = KnowledgeStore::default();
-        store.store("project.rust_version", "1.85", Category::Environment, Source::Observed);
+        store.store(
+            "project.rust_version",
+            "1.85",
+            Category::Environment,
+            Source::Observed,
+        );
         let entry = store.get("project.rust_version").unwrap();
         assert_eq!(entry.value, "1.85");
         assert_eq!(entry.category, Category::Environment);
@@ -322,8 +325,18 @@ mod tests {
     #[test]
     fn search_by_prefix() {
         let mut store = KnowledgeStore::default();
-        store.store("project.rust_version", "1.85", Category::Environment, Source::Observed);
-        store.store("project.name", "enchanter", Category::Project, Source::Observed);
+        store.store(
+            "project.rust_version",
+            "1.85",
+            Category::Environment,
+            Source::Observed,
+        );
+        store.store(
+            "project.name",
+            "enchanter",
+            Category::Project,
+            Source::Observed,
+        );
         store.store("user.name", "Andrew", Category::Fact, Source::Told);
 
         let results = store.search("project.");
@@ -335,9 +348,24 @@ mod tests {
     #[test]
     fn list_by_category() {
         let mut store = KnowledgeStore::default();
-        store.store("project.rust_version", "1.85", Category::Environment, Source::Observed);
-        store.store("project.name", "enchanter", Category::Project, Source::Observed);
-        store.store("user.style", "minimal comments", Category::Preference, Source::Told);
+        store.store(
+            "project.rust_version",
+            "1.85",
+            Category::Environment,
+            Source::Observed,
+        );
+        store.store(
+            "project.name",
+            "enchanter",
+            Category::Project,
+            Source::Observed,
+        );
+        store.store(
+            "user.style",
+            "minimal comments",
+            Category::Preference,
+            Source::Told,
+        );
 
         let groups = store.list_by_category();
         assert_eq!(groups.len(), 3); // environment, preference, project
@@ -346,8 +374,18 @@ mod tests {
     #[test]
     fn format_for_prompt_compact() {
         let mut store = KnowledgeStore::default();
-        store.store("project.rust_version", "1.85", Category::Environment, Source::Observed);
-        store.store("user.style", "minimal comments", Category::Preference, Source::Told);
+        store.store(
+            "project.rust_version",
+            "1.85",
+            Category::Environment,
+            Source::Observed,
+        );
+        store.store(
+            "user.style",
+            "minimal comments",
+            Category::Preference,
+            Source::Told,
+        );
 
         let formatted = store.format_for_prompt();
         assert!(formatted.contains("[environment]"));
@@ -365,9 +403,15 @@ mod tests {
     #[test]
     fn category_parse() {
         use std::str::FromStr;
-        assert_eq!(Category::from_str("environment").unwrap(), Category::Environment);
+        assert_eq!(
+            Category::from_str("environment").unwrap(),
+            Category::Environment
+        );
         assert_eq!(Category::from_str("PROJECT").unwrap(), Category::Project);
-        assert_eq!(Category::from_str("Preference").unwrap(), Category::Preference);
+        assert_eq!(
+            Category::from_str("Preference").unwrap(),
+            Category::Preference
+        );
         assert!(Category::from_str("unknown").is_err());
     }
 
@@ -387,12 +431,22 @@ mod tests {
     #[test]
     fn merge_from_dir() {
         let mut global = KnowledgeStore::default();
-        global.store("project.rust_version", "1.85", Category::Environment, Source::Observed);
+        global.store(
+            "project.rust_version",
+            "1.85",
+            Category::Environment,
+            Source::Observed,
+        );
         global.store("user.name", "Andrew", Category::Fact, Source::Told);
 
         let dir = tempfile::tempdir().unwrap();
         let mut project = KnowledgeStore::default();
-        project.store("project.rust_version", "1.86", Category::Environment, Source::Observed);
+        project.store(
+            "project.rust_version",
+            "1.86",
+            Category::Environment,
+            Source::Observed,
+        );
         project.store("project.custom", "value", Category::Project, Source::Told);
         let json = serde_json::to_string_pretty(&project).unwrap();
         std::fs::write(dir.path().join("kstore.json"), json).unwrap();

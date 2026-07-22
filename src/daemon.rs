@@ -106,7 +106,8 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     let config = crate::overlay::load_config(overlay.as_ref()).context("loading config")?;
     let soul = crate::overlay::load_soul(overlay.as_ref()).context("loading soul")?;
     let memory = crate::overlay::load_memories(overlay.as_ref()).context("loading memory")?;
-    let kstore = crate::overlay::load_knowledge(overlay.as_ref()).context("loading knowledge store")?;
+    let kstore =
+        crate::overlay::load_knowledge(overlay.as_ref()).context("loading knowledge store")?;
     let skills = crate::overlay::discover_skills(overlay.as_ref()).context("discovering skills")?;
 
     let resolved = config.resolve_default();

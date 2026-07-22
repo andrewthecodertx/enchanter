@@ -889,7 +889,9 @@ fn tool_knowledge(args: &Value, kstore: &mut KnowledgeStore) -> String {
             match kstore.get(key) {
                 Some(entry) => format!(
                     "{} = {} (category: {}, source: {}, updated: {})",
-                    entry.key, entry.value, entry.category.as_str(),
+                    entry.key,
+                    entry.value,
+                    entry.category.as_str(),
                     match entry.source {
                         crate::kstore::Source::Observed => "observed",
                         crate::kstore::Source::Told => "told",
@@ -1011,14 +1013,28 @@ mod tests {
     #[test]
     fn dispatch_unknown_tool() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("nonexistent", &json!({}), &mut mem, &mut KnowledgeStore::default(), &allowed(), true);
+        let result = dispatch(
+            "nonexistent",
+            &json!({}),
+            &mut mem,
+            &mut KnowledgeStore::default(),
+            &allowed(),
+            true,
+        );
         assert!(result.contains("Unknown tool"));
     }
 
     #[test]
     fn dispatch_missing_required_param() {
         let mut mem = MemoryStore::default();
-        let result = dispatch("exec_command", &json!({}), &mut mem, &mut KnowledgeStore::default(), &allowed(), true);
+        let result = dispatch(
+            "exec_command",
+            &json!({}),
+            &mut mem,
+            &mut KnowledgeStore::default(),
+            &allowed(),
+            true,
+        );
         assert!(result.contains("missing required"));
     }
 

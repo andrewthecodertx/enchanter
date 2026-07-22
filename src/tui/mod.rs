@@ -11,21 +11,27 @@
 //! stored in an Option — None while a background task owns it, restored when
 //! the task completes and returns it via JoinHandle.
 
-pub mod state;
-pub mod render;
 pub mod model_info;
+pub mod render;
+pub mod state;
 
 use std::io::stdout;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, KeyEventKind, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::cursor::{Hide, Show};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
-use crossterm::cursor::{Show, Hide};
-use ratatui::backend::CrosstermBackend;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::agent::AgentSession;
@@ -59,11 +65,13 @@ pub async fn run_tui(agent: AgentSession) -> Result<AgentSession> {
     // A single long-lived thread owns the event source and forwards events
     // through an unbounded tokio channel (sync send from the OS thread).
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<CrosstermEvent>();
-    thread::spawn(move || loop {
-        if event::poll(Duration::from_millis(50)).is_ok() {
-            if let Ok(ev) = event::read() {
-                if key_tx.send(ev).is_err() {
-                    break; // receiver dropped — TUI exiting
+    thread::spawn(move || {
+        loop {
+            if event::poll(Duration::from_millis(50)).is_ok() {
+                if let Ok(ev) = event::read() {
+                    if key_tx.send(ev).is_err() {
+                        break; // receiver dropped — TUI exiting
+                    }
                 }
             }
         }
@@ -72,7 +80,8 @@ pub async fn run_tui(agent: AgentSession) -> Result<AgentSession> {
     // Query model context info in the background (best-effort).
     let base_url = agent.resolved.base_url.clone();
     let api_key = agent.resolved.api_key.clone();
-    let (info_tx, mut info_rx) = mpsc::channel::<std::collections::HashMap<String, state::ModelContextInfo>>(1);
+    let (info_tx, mut info_rx) =
+        mpsc::channel::<std::collections::HashMap<String, state::ModelContextInfo>>(1);
     tokio::spawn(async move {
         let info = model_info::fetch_model_context_info(&base_url, api_key.as_deref()).await;
         let _ = info_tx.send(info).await;
@@ -153,7 +162,9 @@ async fn run_event_loop(
         // Check if the agent task has finished — recover the agent.
         if state.is_streaming && agent_handle.is_some() {
             // Try to poll the join handle without blocking.
-            match tokio::time::timeout(Duration::from_millis(0), agent_handle.as_mut().unwrap()).await {
+            match tokio::time::timeout(Duration::from_millis(0), agent_handle.as_mut().unwrap())
+                .await
+            {
                 Ok(join_res) => {
                     *agent_handle = None;
                     state.is_streaming = false;
@@ -180,7 +191,8 @@ async fn run_event_loop(
                             }
                         }
                         Err(e) => {
-                            state.push_chat_line(ChatLine::Error(format!("task join error: {}", e)));
+                            state
+                                .push_chat_line(ChatLine::Error(format!("task join error: {}", e)));
                             state.is_streaming = false;
                             if state.pending_quit {
                                 return Ok(());
@@ -356,11 +368,14 @@ fn handle_mouse(mouse: MouseEvent, state: &mut TuiState) {
             if let Some(target_focus) = state.pane_areas.hit_test(mouse.column, mouse.row) {
                 state.focus = target_focus;
                 // For sidebar list panes, also set the cursor to the clicked item.
-                if matches!(target_focus, Focus::Models | Focus::Sessions | Focus::Skills) {
-                    if let Some(index) = state.pane_areas.list_index_for_click(
-                        target_focus,
-                        mouse.row,
-                    ) {
+                if matches!(
+                    target_focus,
+                    Focus::Models | Focus::Sessions | Focus::Skills
+                ) {
+                    if let Some(index) = state
+                        .pane_areas
+                        .list_index_for_click(target_focus, mouse.row)
+                    {
                         let len = match target_focus {
                             Focus::Models => state.models.len(),
                             Focus::Sessions => state.sessions.len(),
@@ -518,7 +533,8 @@ async fn handle_input_key(
                 let (row, col) = render::cursor_row_col(&state.input_buffer, state.input_cursor);
                 if row > 0 {
                     // Move to end of previous line (or same col if it fits).
-                    let new_cursor = move_cursor_to_line(&state.input_buffer, state.input_cursor, row - 1, col);
+                    let new_cursor =
+                        move_cursor_to_line(&state.input_buffer, state.input_cursor, row - 1, col);
                     state.input_cursor = new_cursor;
                 }
             } else if !state.input_history.is_empty() {
@@ -540,7 +556,8 @@ async fn handle_input_key(
                 let (row, col) = render::cursor_row_col(&state.input_buffer, state.input_cursor);
                 let total_lines = state.input_buffer.lines().count();
                 if row < total_lines - 1 || state.input_buffer.ends_with('\n') {
-                    let new_cursor = move_cursor_to_line(&state.input_buffer, state.input_cursor, row + 1, col);
+                    let new_cursor =
+                        move_cursor_to_line(&state.input_buffer, state.input_cursor, row + 1, col);
                     state.input_cursor = new_cursor;
                 }
             } else if let Some(i) = state.history_index {
@@ -631,18 +648,21 @@ async fn handle_list_key(
                 Focus::Sessions => {
                     // TODO: session resume — needs loading logic.
                     if let Some(entry) = state.selected_session() {
-                        let display = if let Some(uuid_part) = entry.id.strip_prefix("enchanter_tui_") {
-                            format!("tui:{}", &uuid_part[..8.min(uuid_part.len())])
-                        } else {
-                            entry.id[..8.min(entry.id.len())].to_string()
-                        };
-                        state.status_message = format!("Session {} selected (resume not yet implemented)", display);
+                        let display =
+                            if let Some(uuid_part) = entry.id.strip_prefix("enchanter_tui_") {
+                                format!("tui:{}", &uuid_part[..8.min(uuid_part.len())])
+                            } else {
+                                entry.id[..8.min(entry.id.len())].to_string()
+                            };
+                        state.status_message =
+                            format!("Session {} selected (resume not yet implemented)", display);
                     }
                     LoopAction::Continue
                 }
                 Focus::Skills => {
                     if let Some(skill) = state.selected_skill() {
-                        state.status_message = format!("Skill: {} — {}", skill.name, skill.description);
+                        state.status_message =
+                            format!("Skill: {} — {}", skill.name, skill.description);
                     }
                     LoopAction::Continue
                 }
@@ -655,7 +675,12 @@ async fn handle_list_key(
 
 /// Move cursor from current position to a target line at a given column.
 /// Returns the new byte offset.
-fn move_cursor_to_line(buffer: &str, _current_cursor: usize, target_row: usize, target_col: usize) -> usize {
+fn move_cursor_to_line(
+    buffer: &str,
+    _current_cursor: usize,
+    target_row: usize,
+    target_col: usize,
+) -> usize {
     let mut row = 0;
     let mut result = 0;
 
@@ -746,7 +771,10 @@ async fn handle_slash_command(
                     crate::status_bar::fmt_tokens(b),
                     (state.tokens as f64 / b as f64 * 100.0) as u8
                 ),
-                None => format!("Context: {} tokens", crate::status_bar::fmt_tokens(state.tokens)),
+                None => format!(
+                    "Context: {} tokens",
+                    crate::status_bar::fmt_tokens(state.tokens)
+                ),
             };
             state.status_message = msg.clone();
             state.push_chat_line(ChatLine::System(msg));
@@ -758,7 +786,7 @@ async fn handle_slash_command(
         }
         "help" | "h" | "?" => {
             state.push_chat_line(ChatLine::System(
-                "Commands: /quit /sessions /model <name> /context /clear /help".to_string()
+                "Commands: /quit /sessions /model <name> /context /clear /help".to_string(),
             ));
             Ok(LoopAction::Continue)
         }
@@ -784,13 +812,20 @@ fn handle_agent_event(ev: Event, state: &mut TuiState) {
             // Truncate for display — full content is in the session log.
             let truncated = if content.lines().count() > 10 {
                 let lines: Vec<&str> = content.lines().take(10).collect();
-                format!("{}\n... ({} more lines)", lines.join("\n"), content.lines().count() - 10)
+                format!(
+                    "{}\n... ({} more lines)",
+                    lines.join("\n"),
+                    content.lines().count() - 10
+                )
             } else {
                 content
             };
             state.push_chat_line(ChatLine::ToolResult(String::new(), truncated));
         }
-        Event::Compacted { removed_messages, budget_tokens } => {
+        Event::Compacted {
+            removed_messages,
+            budget_tokens,
+        } => {
             state.push_chat_line(ChatLine::Compacted(format!(
                 "── compacted {} messages (~{} tokens) ──",
                 removed_messages,

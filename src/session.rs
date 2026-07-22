@@ -84,6 +84,43 @@ impl Session {
         Self::new_in_dir(model, &sessions_dir(), Some(name))
     }
 
+    /// Reopen an existing session by ID for continued appending.
+    /// Loads all existing entries and re-opens the file in append mode.
+    /// Returns the loaded entries and the reopened session handle.
+    pub fn resume(id: &str) -> Result<(Self, Vec<SessionEntry>)> {
+        Self::resume_from_dir(id, &sessions_dir())
+    }
+
+    /// Reopen a session from a specific directory by ID.
+    pub fn resume_from_dir(id: &str, dir: &std::path::Path) -> Result<(Self, Vec<SessionEntry>)> {
+        let path = dir.join(format!("{}.jsonl", id));
+        if !path.exists() {
+            anyhow::bail!("session '{}' not found at {}", id, path.display());
+        }
+        let entries = Self::load_from_dir(id, dir)?;
+
+        // Re-open the file in append mode for continued logging.
+        let file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("reopening session file {}", path.display()))?;
+
+        // Count existing message entries (excluding meta) for accurate message_count.
+        let msg_count = entries
+            .iter()
+            .filter(|e| !matches!(e, SessionEntry::Meta { .. }))
+            .count();
+
+        let session = Self {
+            id: id.to_string(),
+            file,
+            path,
+            message_count: msg_count,
+        };
+
+        Ok((session, entries))
+    }
+
     /// Start a new session, creating the JSONL file in the given directory.
     /// If `name` is provided, the session ID is `{name}_{uuid}`; otherwise it's a bare UUID.
     pub fn new_in_dir(model: &str, dir: &std::path::Path, name: Option<&str>) -> Result<Self> {
@@ -449,5 +486,47 @@ mod tests {
         let found = sessions.iter().find(|s| s.id == session.id());
         assert!(found.is_some());
         assert_eq!(found.unwrap().model.as_deref(), Some("test-model-list"));
+    }
+
+    #[test]
+    fn resume_reopens_session_and_preserves_entries() {
+        let (_dir, sdir) = setup_test_sessions_dir();
+        let mut session = Session::new_in_dir("test-model-resume", &sdir, None).unwrap();
+
+        // Write some messages
+        session.append(&Message::system("system prompt")).unwrap();
+        session.append(&Message::user("hello")).unwrap();
+        session.append(&Message::assistant("hi there")).unwrap();
+        let original_id = session.id().to_string();
+        drop(session);
+
+        // Resume: should reopen the same file and load all entries
+        let (mut resumed, entries) = Session::resume_from_dir(&original_id, &sdir).unwrap();
+
+        // Should have the same ID
+        assert_eq!(resumed.id(), original_id);
+
+        // Should have loaded all entries (meta + system + user + assistant = 4)
+        assert_eq!(entries.len(), 4);
+
+        // Converting entries to messages should give us 3 (excluding meta)
+        let messages = Session::entries_to_messages(&entries);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[2].role, "assistant");
+
+        // Should be able to append new messages to the resumed session
+        resumed.append(&Message::user("continued")).unwrap();
+
+        // Verify the new message was appended
+        let reloaded = Session::load_from_dir(&original_id, &sdir).unwrap();
+        assert_eq!(reloaded.len(), 5); // 4 original + 1 new
+    }
+
+    #[test]
+    fn resume_fails_for_nonexistent_session() {
+        let result = Session::resume_from_dir("does-not-exist", std::path::Path::new("/tmp"));
+        assert!(result.is_err());
     }
 }

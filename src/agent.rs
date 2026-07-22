@@ -24,6 +24,59 @@ use crate::tools;
 
 use crate::prompt::inspect::PromptLayers;
 
+/// Tools whose results are safe to cache within a session — they are
+/// read-only and their output doesn't change unless the underlying state
+/// changes (which a mutating tool call would do, invalidating the cache).
+const CACHEABLE_TOOLS: &[&str] = &["read_file", "list_directory", "search_files"];
+
+/// Cache for read-only tool results within a single agent session.
+///
+/// When the model calls `read_file("src/main.rs")` twice, the second call
+/// returns the cached result instead of re-reading the file and re-inject
+/// the full content as a new tool result message. This cuts token waste
+/// from duplicate tool calls.
+///
+/// The cache is invalidated on any mutating tool call (write_file, edit_file,
+/// exec_command) because those could change the underlying filesystem state
+/// that the cached reads depend on.
+#[derive(Debug, Clone, Default)]
+pub struct ToolResultCache {
+    entries: std::collections::HashMap<(String, String), String>,
+}
+
+impl ToolResultCache {
+    fn cache_key(tool_name: &str, args: &serde_json::Value) -> (String, String) {
+        (
+            tool_name.to_string(),
+            serde_json::to_string(args).unwrap_or_default(),
+        )
+    }
+
+    /// Look up a cached result. Returns None if not cached.
+    pub fn get(&self, tool_name: &str, args: &serde_json::Value) -> Option<&str> {
+        if !CACHEABLE_TOOLS.contains(&tool_name) {
+            return None;
+        }
+        let key = Self::cache_key(tool_name, args);
+        self.entries.get(&key).map(|s| s.as_str())
+    }
+
+    /// Store a result in the cache (no-op for non-cacheable tools).
+    pub fn insert(&mut self, tool_name: &str, args: &serde_json::Value, result: &str) {
+        if !CACHEABLE_TOOLS.contains(&tool_name) {
+            return;
+        }
+        let key = Self::cache_key(tool_name, args);
+        self.entries.insert(key, result.to_string());
+    }
+
+    /// Invalidate the entire cache. Called after any mutating tool (write_file,
+    /// edit_file, exec_command) because those could change filesystem state.
+    pub fn invalidate(&mut self) {
+        self.entries.clear();
+    }
+}
+
 /// Running agent session — holds all state for one conversation.
 pub struct AgentSession {
     pub config: Config,
@@ -41,6 +94,11 @@ pub struct AgentSession {
     pub system_override: Option<String>,
     /// Previous prompt layers for diff between turns (REQ-INS-001).
     pub previous_prompt_layers: Option<PromptLayers>,
+    /// Cache for read-only tool results within the current session.
+    /// Keyed by (tool_name, serialized_args). Prevents re-reading the same
+    /// file or re-listing the same directory multiple times, cutting token
+    /// waste from duplicate tool calls.
+    pub tool_cache: ToolResultCache,
 }
 
 /// Runtime options for an agent session, separate from the loaded core state.
@@ -93,10 +151,11 @@ impl AgentSession {
             system_override,
             session_name,
         } = options;
-        let client = LlmClient::new(
+        let client = LlmClient::with_headers(
             &resolved.base_url,
             resolved.api_key.as_deref(),
             &resolved.model,
+            resolved.extra_headers.clone(),
         );
         let mcp = McpManager::new();
         if !no_tools && !config.mcp.servers.is_empty() {
@@ -137,6 +196,90 @@ impl AgentSession {
             no_tools,
             system_override,
             previous_prompt_layers: None,
+            tool_cache: ToolResultCache::default(),
+        })
+    }
+
+    /// Resume a previous session by ID. Loads the conversation history from
+    /// the session JSONL file, rebuilds the system prompt from the current
+    /// config/soul/memory/knowledge/skills, and continues from where the
+    /// old session left off.
+    ///
+    /// The old session's JSONL file is reopened in append mode, so new
+    /// messages are appended to the same file. This means the full
+    /// conversation (old + new) is preserved on disk for later replay.
+    pub fn resume(
+        config: Config,
+        soul: Soul,
+        memory: MemoryStore,
+        kstore: KnowledgeStore,
+        skills: SkillsIndex,
+        resolved: ResolvedModel,
+        options: SessionOptions,
+        session_id: &str,
+    ) -> Result<Self> {
+        let SessionOptions {
+            no_stream,
+            no_tools,
+            system_override,
+            session_name: _,
+        } = options;
+        let client = LlmClient::with_headers(
+            &resolved.base_url,
+            resolved.api_key.as_deref(),
+            &resolved.model,
+            resolved.extra_headers.clone(),
+        );
+        let mcp = McpManager::new();
+
+        // Reopen the existing session file for appending, and load all
+        // previous entries.
+        let (session, entries) = Session::resume(session_id)?;
+
+        // Build a fresh system prompt from the current config. This ensures
+        // any config/soul/memory changes since the original session are
+        // reflected. The old system prompt (if any) from the JSONL is
+        // replaced by this fresh one.
+        let system_prompt = match &system_override {
+            Some(s) => s.clone(),
+            None => prompt::build_system_prompt_with_model(
+                &soul,
+                &memory,
+                &kstore,
+                &skills,
+                &config,
+                &resolved.model,
+            ),
+        };
+
+        // Convert old session entries to messages, then replace the system
+        // prompt (first message) with the freshly built one. If the old
+        // session had no system message, prepend one.
+        let mut messages = Session::entries_to_messages(&entries);
+        if messages.is_empty() {
+            messages.push(Message::system(&system_prompt));
+        } else if messages[0].role == "system" {
+            messages[0] = Message::system(&system_prompt);
+        } else {
+            messages.insert(0, Message::system(&system_prompt));
+        }
+
+        Ok(Self {
+            config,
+            soul,
+            memory,
+            kstore,
+            skills,
+            mcp,
+            messages,
+            resolved,
+            client,
+            session,
+            no_stream,
+            no_tools,
+            system_override,
+            previous_prompt_layers: None,
+            tool_cache: ToolResultCache::default(),
         })
     }
 
@@ -217,7 +360,10 @@ impl AgentSession {
     pub fn chat_events_spawned(
         mut self,
         user_prompt: &str,
-    ) -> Result<(tokio::task::JoinHandle<Result<AgentSession>>, mpsc::UnboundedReceiver<Event>)> {
+    ) -> Result<(
+        tokio::task::JoinHandle<Result<AgentSession>>,
+        mpsc::UnboundedReceiver<Event>,
+    )> {
         let user_msg = Message::user(user_prompt);
         self.session.append(&user_msg)?;
         self.messages.push(user_msg);
@@ -225,7 +371,9 @@ impl AgentSession {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(async move {
             if let Err(e) = self.run_agent_loop_events(&tx).await {
-                let _ = tx.send(Event::Error { message: e.to_string() });
+                let _ = tx.send(Event::Error {
+                    message: e.to_string(),
+                });
             }
             Ok(self)
         });
@@ -236,7 +384,10 @@ impl AgentSession {
     /// agent loop on a background task.
     pub fn retry_events_spawned(
         mut self,
-    ) -> Result<(tokio::task::JoinHandle<Result<AgentSession>>, mpsc::UnboundedReceiver<Event>)> {
+    ) -> Result<(
+        tokio::task::JoinHandle<Result<AgentSession>>,
+        mpsc::UnboundedReceiver<Event>,
+    )> {
         let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
         if let Some(idx) = last_user_idx
             && idx + 1 < self.messages.len()
@@ -246,7 +397,9 @@ impl AgentSession {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(async move {
             if let Err(e) = self.run_agent_loop_events(&tx).await {
-                let _ = tx.send(Event::Error { message: e.to_string() });
+                let _ = tx.send(Event::Error {
+                    message: e.to_string(),
+                });
             }
             Ok(self)
         });
@@ -339,6 +492,7 @@ impl AgentSession {
                 model: name.to_string(),
                 base_url: default.base_url,
                 api_key: default.api_key,
+                extra_headers: default.extra_headers,
             }
         });
 
@@ -348,10 +502,11 @@ impl AgentSession {
             new_resolved.model.clone()
         };
 
-        self.client = LlmClient::new(
+        self.client = LlmClient::with_headers(
             &new_resolved.base_url,
             new_resolved.api_key.as_deref(),
             &new_resolved.model,
+            new_resolved.extra_headers.clone(),
         );
         self.resolved = new_resolved;
 
@@ -449,7 +604,10 @@ impl AgentSession {
         let tools_payload = self.tools_payload();
         let mut total_tool_calls = 0;
         let mut soft_limit_triggered = false;
-        let tool_count = tools_payload.as_ref().and_then(|v| v.as_array()).map(|a| a.len());
+        let tool_count = tools_payload
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .map(|a| a.len());
 
         // Safety cap to prevent runaway loops from bugs (e.g., tool calling itself forever).
         // Only enforced when max_turns is unlimited.
@@ -461,10 +619,7 @@ impl AgentSession {
 
         loop {
             let turn_start = std::time::Instant::now();
-            activity_log::log(ActivityEvent::TurnStart {
-                turn,
-                max_turns,
-            });
+            activity_log::log(ActivityEvent::TurnStart { turn, max_turns });
 
             if let Some(limit) = max_turns {
                 let turns_remaining = limit.saturating_sub(turn);
@@ -472,7 +627,10 @@ impl AgentSession {
                 // Roll up older turns into a summary if the live window is over budget.
                 self.compact_if_needed(&sink).await;
 
-                if !soft_limit_triggered && soft_limit.unwrap_or(0) > 0 && turns_remaining <= soft_limit.unwrap_or(0) {
+                if !soft_limit_triggered
+                    && soft_limit.unwrap_or(0) > 0
+                    && turns_remaining <= soft_limit.unwrap_or(0)
+                {
                     soft_limit_triggered = true;
                     let nudge = format!(
                         "[System] You have {} turns remaining before the hard limit. Wrap up now: produce a final text response without any tool calls.",
@@ -555,23 +713,38 @@ impl AgentSession {
                 for tc in &tool_calls {
                     let tc_args: Value =
                         serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
-                    // Log tool call *before* dispatch — if it hangs, the log shows exactly which one.
-                    let tool_guard = ToolCallGuard::new(
-                        tc.function.name.clone(),
-                        &tc.function.arguments,
-                        turn,
-                    );
-                    let output = dispatch_tool(
-                        &tc.function.name,
-                        &tc_args,
-                        &mut self.memory,
-                        &mut self.kstore,
-                        &mut self.mcp,
-                        &self.config.allowed_paths(),
-                        self.config.allow_unsandboxed_exec(),
-                    )
-                    .await;
-                    tool_guard.end(&output, None);
+                    let tool_name = &tc.function.name;
+
+                    // Check the read-only tool cache first. If this exact
+                    // tool+args was already called in this session, return
+                    // the cached result instead of re-executing and
+                    // re-injecting the full output.
+                    let output = if let Some(cached) = self.tool_cache.get(tool_name, &tc_args) {
+                        cached.to_string()
+                    } else {
+                        // Log tool call *before* dispatch — if it hangs, the log shows exactly which one.
+                        let tool_guard =
+                            ToolCallGuard::new(tool_name.clone(), &tc.function.arguments, turn);
+                        let output = dispatch_tool(
+                            tool_name,
+                            &tc_args,
+                            &mut self.memory,
+                            &mut self.kstore,
+                            &mut self.mcp,
+                            &self.config.allowed_paths(),
+                            self.config.allow_unsandboxed_exec(),
+                        )
+                        .await;
+                        tool_guard.end(&output, None);
+
+                        // Cache read-only results; invalidate on mutating tools.
+                        if CACHEABLE_TOOLS.contains(&tool_name.as_str()) {
+                            self.tool_cache.insert(tool_name, &tc_args, &output);
+                        } else {
+                            self.tool_cache.invalidate();
+                        }
+                        output
+                    };
                     sink.send(Event::ToolResult {
                         id: tc.id.clone(),
                         content: output.clone(),
@@ -674,7 +847,14 @@ async fn dispatch_tool(
         "knowledge",
     ];
     if built_in_names.contains(&name) {
-        tools::dispatch(name, args, memory, kstore, allowed_paths, allow_unsandboxed_exec)
+        tools::dispatch(
+            name,
+            args,
+            memory,
+            kstore,
+            allowed_paths,
+            allow_unsandboxed_exec,
+        )
     } else if name.contains("__") {
         match mcp.dispatch(name, args).await {
             Some(Ok(result)) => result,
@@ -836,5 +1016,51 @@ mod tests {
         assert_eq!(out[2].role, "user");
         assert_eq!(out[2].content.as_deref(), Some("q3"));
         assert_eq!(out.last().unwrap().content.as_deref(), Some("answer3"));
+    }
+
+    #[test]
+    fn tool_cache_stores_read_only_results() {
+        let mut cache = ToolResultCache::default();
+        let args = serde_json::json!({"path": "/tmp/test.txt"});
+        cache.insert("read_file", &args, "file contents here");
+        assert_eq!(cache.get("read_file", &args), Some("file contents here"));
+    }
+
+    #[test]
+    fn tool_cache_returns_none_for_miss() {
+        let cache = ToolResultCache::default();
+        let args = serde_json::json!({"path": "/tmp/other.txt"});
+        assert!(cache.get("read_file", &args).is_none());
+    }
+
+    #[test]
+    fn tool_cache_ignores_mutating_tools() {
+        let mut cache = ToolResultCache::default();
+        let args = serde_json::json!({"path": "/tmp/test.txt", "content": "new"});
+        cache.insert("write_file", &args, "ok");
+        // write_file is not cacheable — should return None
+        assert!(cache.get("write_file", &args).is_none());
+    }
+
+    #[test]
+    fn tool_cache_invalidates_on_mutating_tool() {
+        let mut cache = ToolResultCache::default();
+        let read_args = serde_json::json!({"path": "/tmp/test.txt"});
+        cache.insert("read_file", &read_args, "contents");
+        assert!(cache.get("read_file", &read_args).is_some());
+
+        // After a mutating tool call, the cache should be cleared
+        cache.invalidate();
+        assert!(cache.get("read_file", &read_args).is_none());
+    }
+
+    #[test]
+    fn tool_cache_keys_on_different_args() {
+        let mut cache = ToolResultCache::default();
+        let args1 = serde_json::json!({"path": "/tmp/a.txt"});
+        let args2 = serde_json::json!({"path": "/tmp/b.txt"});
+        cache.insert("read_file", &args1, "content A");
+        assert_eq!(cache.get("read_file", &args1), Some("content A"));
+        assert!(cache.get("read_file", &args2).is_none());
     }
 }

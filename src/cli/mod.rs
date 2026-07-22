@@ -22,8 +22,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
-use crate::agent::{AgentSession, SessionInfo, SessionOptions};
 use crate::activity_log::{self, ActivityEvent};
+use crate::agent::{AgentSession, SessionInfo, SessionOptions};
 use crate::config::{Config, ResolvedModel};
 use crate::recorder::Recorder;
 use crate::session::Session;
@@ -61,6 +61,12 @@ pub struct Args {
     /// Launch the full-screen TUI instead of the line-oriented REPL.
     #[arg(long)]
     pub tui: bool,
+
+    /// Resume a previous session by ID. Loads the conversation history from
+    /// the session JSONL file and continues from where it left off.
+    /// Use /sessions to list available session IDs.
+    #[arg(long)]
+    pub resume: Option<String>,
 
     /// Run inline without connecting to the daemon (bypass daemon auto-start).
     #[cfg(unix)]
@@ -249,30 +255,61 @@ pub async fn run(args: Args) -> Result<()> {
                 model: model_flag.clone(),
                 base_url: default.base_url,
                 api_key: default.api_key,
+                extra_headers: default.extra_headers,
             }
         })
     } else {
         config.resolve_default()
     };
 
-    // Create agent session
-    let mut agent = AgentSession::new(
-        config,
-        soul,
-        memory,
-        kstore,
-        skills,
-        resolved,
-        SessionOptions {
-            no_stream: args.no_stream,
-            no_tools: args.no_tools,
-            system_override: args.system.clone(),
-            session_name: if args.tui { Some("enchanter_tui".to_string()) } else { None },
-        },
-    )?;
+    // Create agent session — either fresh or resumed from a previous session
+    let mut agent = if let Some(ref session_id) = args.resume {
+        AgentSession::resume(
+            config,
+            soul,
+            memory,
+            kstore,
+            skills,
+            resolved,
+            SessionOptions {
+                no_stream: args.no_stream,
+                no_tools: args.no_tools,
+                system_override: args.system.clone(),
+                session_name: if args.tui {
+                    Some("enchanter_tui".to_string())
+                } else {
+                    None
+                },
+            },
+            session_id,
+        )?
+    } else {
+        AgentSession::new(
+            config,
+            soul,
+            memory,
+            kstore,
+            skills,
+            resolved,
+            SessionOptions {
+                no_stream: args.no_stream,
+                no_tools: args.no_tools,
+                system_override: args.system.clone(),
+                session_name: if args.tui {
+                    Some("enchanter_tui".to_string())
+                } else {
+                    None
+                },
+            },
+        )?
+    };
 
-    // Initialize system prompt in session
-    agent.session.append(&agent.messages[0])?;
+    // For new sessions, append the system prompt to the JSONL. For resumed
+    // sessions, the old entries are already on disk — don't re-append the
+    // system prompt (it would duplicate).
+    if args.resume.is_none() {
+        agent.session.append(&agent.messages[0])?;
+    }
 
     // Log session start
     activity_log::log(ActivityEvent::SessionStart {
@@ -455,7 +492,11 @@ pub async fn run(args: Args) -> Result<()> {
     // Memory is auto-saved on every mutation (add_memory/remove/replace all persist immediately),
     // so no explicit save is needed here. But knowledge store needs to be saved.
     if let Err(e) = agent.kstore.save() {
-        eprintln!("{} Failed to save knowledge store: {}", "Warning:".yellow(), e);
+        eprintln!(
+            "{} Failed to save knowledge store: {}",
+            "Warning:".yellow(),
+            e
+        );
     }
 
     // Log session end

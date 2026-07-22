@@ -400,7 +400,11 @@ pub fn build_model_list(agent: &AgentSession) -> Vec<ModelEntry> {
     let active_model = &agent.resolved.model;
     let mut entries = Vec::new();
 
-    let default_model = agent.config.model.default.clone()
+    let default_model = agent
+        .config
+        .model
+        .default
+        .clone()
         .unwrap_or_else(|| "gpt-4.1-mini".to_string());
     entries.push(ModelEntry {
         name: "default".to_string(),
@@ -409,7 +413,9 @@ pub fn build_model_list(agent: &AgentSession) -> Vec<ModelEntry> {
     });
 
     for (name, provider) in &agent.config.providers {
-        let model = provider.model.clone()
+        let model = provider
+            .model
+            .clone()
             .unwrap_or_else(|| default_model.clone());
         let is_active = active_model == &model || active_model == name;
         entries.push(ModelEntry {
@@ -827,12 +833,22 @@ mod tests {
     #[test]
     fn test_current_list_len_matches_focus() {
         let mut s = empty_state();
-        s.models = vec![
-            ModelEntry { name: "default".into(), model: "gpt-4".into(), is_active: true },
-        ];
+        s.models = vec![ModelEntry {
+            name: "default".into(),
+            model: "gpt-4".into(),
+            is_active: true,
+        }];
         s.sessions = vec![
-            SessionEntry { id: "abc".into(), message_count: 5, started_at: None },
-            SessionEntry { id: "def".into(), message_count: 3, started_at: None },
+            SessionEntry {
+                id: "abc".into(),
+                message_count: 5,
+                started_at: None,
+            },
+            SessionEntry {
+                id: "def".into(),
+                message_count: 3,
+                started_at: None,
+            },
         ];
         s.focus = Focus::Models;
         assert_eq!(s.current_list_len(), 1);
@@ -850,12 +866,22 @@ mod tests {
     fn test_selected_model_and_session() {
         let mut s = empty_state();
         s.models = vec![
-            ModelEntry { name: "default".into(), model: "gpt-4".into(), is_active: true },
-            ModelEntry { name: "openai".into(), model: "o3".into(), is_active: false },
+            ModelEntry {
+                name: "default".into(),
+                model: "gpt-4".into(),
+                is_active: true,
+            },
+            ModelEntry {
+                name: "openai".into(),
+                model: "o3".into(),
+                is_active: false,
+            },
         ];
-        s.sessions = vec![
-            SessionEntry { id: "s1".into(), message_count: 1, started_at: None },
-        ];
+        s.sessions = vec![SessionEntry {
+            id: "s1".into(),
+            message_count: 1,
+            started_at: None,
+        }];
         s.list_cursor = 0;
         assert_eq!(s.selected_model().map(|m| m.name.as_str()), Some("default"));
         s.list_cursor = 1;

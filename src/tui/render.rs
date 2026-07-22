@@ -38,9 +38,9 @@ pub fn render(frame: &mut Frame, state: &mut TuiState) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),           // sidebar + chat
+            Constraint::Min(5),               // sidebar + chat
             Constraint::Length(input_height), // input (grows with multi-line content)
-            Constraint::Length(1),        // status bar
+            Constraint::Length(1),            // status bar
         ])
         .split(area);
 
@@ -51,10 +51,7 @@ pub fn render(frame: &mut Frame, state: &mut TuiState) {
     // Split top into sidebar and chat.
     let top_split = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(24),
-            Constraint::Min(10),
-        ])
+        .constraints([Constraint::Length(24), Constraint::Min(10)])
         .split(top_area);
 
     let sidebar_area = top_split[0];
@@ -110,7 +107,11 @@ fn render_models_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         Style::default().fg(DIM)
     };
 
-    let title = if focused { "│ Models ◀ │" } else { "│ Models │" };
+    let title = if focused {
+        "│ Models ◀ │"
+    } else {
+        "│ Models │"
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -138,12 +139,18 @@ fn render_models_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("▶ ");
 
     let mut list_state = ListState::default();
     if focused {
-        list_state.select(Some(state.list_cursor.min(state.models.len().saturating_sub(1))));
+        list_state.select(Some(
+            state.list_cursor.min(state.models.len().saturating_sub(1)),
+        ));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
 }
@@ -157,7 +164,11 @@ fn render_sessions_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         Style::default().fg(DIM)
     };
 
-    let title = if focused { "│ Sessions ◀ │" } else { "│ Sessions │" };
+    let title = if focused {
+        "│ Sessions ◀ │"
+    } else {
+        "│ Sessions │"
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -171,13 +182,16 @@ fn render_sessions_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
             // Strip known prefixes to get a meaningful display name.
             // For "enchanter_tui_{uuid}", show date + short UUID.
             // For bare UUIDs, show short UUID + date.
-            let display_name: String = if let Some(uuid_part) = s.id.strip_prefix("enchanter_tui_") {
+            let display_name: String = if let Some(uuid_part) = s.id.strip_prefix("enchanter_tui_")
+            {
                 let short = &uuid_part[..8.min(uuid_part.len())];
                 format!("tui:{}", short)
             } else {
                 s.id[..8.min(s.id.len())].to_string()
             };
-            let date_str = s.started_at.as_ref()
+            let date_str = s
+                .started_at
+                .as_ref()
                 .and_then(|t| {
                     // Extract just the date portion from RFC3339.
                     t.split('T').next()
@@ -186,7 +200,10 @@ fn render_sessions_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
                 .unwrap_or_default();
             let msgs = format!("{}m", s.message_count);
             ListItem::new(Line::from(vec![
-                Span::styled(display_name, Style::default().fg(if focused { Color::White } else { DIM })),
+                Span::styled(
+                    display_name,
+                    Style::default().fg(if focused { Color::White } else { DIM }),
+                ),
                 Span::raw(" "),
                 Span::styled(date_str, Style::default().fg(DIM)),
                 Span::raw(" "),
@@ -202,7 +219,11 @@ fn render_sessions_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
 
     let mut list_state = ListState::default();
     if focused {
-        list_state.select(Some(state.list_cursor.min(state.sessions.len().saturating_sub(1))));
+        list_state.select(Some(
+            state
+                .list_cursor
+                .min(state.sessions.len().saturating_sub(1)),
+        ));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
 }
@@ -216,7 +237,11 @@ fn render_skills_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
         Style::default().fg(DIM)
     };
 
-    let title = if focused { "│ Skills ◀ │" } else { "│ Skills │" };
+    let title = if focused {
+        "│ Skills ◀ │"
+    } else {
+        "│ Skills │"
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -243,7 +268,9 @@ fn render_skills_pane(frame: &mut Frame, state: &mut TuiState, area: Rect) {
 
     let mut list_state = ListState::default();
     if focused {
-        list_state.select(Some(state.list_cursor.min(state.skills.len().saturating_sub(1))));
+        list_state.select(Some(
+            state.list_cursor.min(state.skills.len().saturating_sub(1)),
+        ));
     }
     frame.render_stateful_widget(list, area, &mut list_state);
 }
@@ -314,18 +341,20 @@ fn build_chat_lines(state: &TuiState) -> Vec<Line<'static>> {
     for entry in &state.chat_lines {
         match entry {
             ChatLine::User(text) => {
-                lines.push(Line::from(vec![
-                    Span::styled("You", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    "You",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )]));
                 for line in text.lines() {
                     lines.push(Line::from(Span::raw(line.to_string())));
                 }
                 lines.push(Line::raw(""));
             }
             ChatLine::Assistant(text) => {
-                lines.push(Line::from(vec![
-                    Span::styled("Assistant", Style::default().fg(GREEN).add_modifier(Modifier::BOLD)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    "Assistant",
+                    Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                )]));
                 for line in text.lines() {
                     lines.push(Line::from(Span::raw(line.to_string())));
                 }
@@ -357,7 +386,10 @@ fn build_chat_lines(state: &TuiState) -> Vec<Line<'static>> {
                 }
             }
             ChatLine::System(text) => {
-                lines.push(Line::from(Span::styled(text.clone(), Style::default().fg(DIM))));
+                lines.push(Line::from(Span::styled(
+                    text.clone(),
+                    Style::default().fg(DIM),
+                )));
             }
             ChatLine::Compacted(text) => {
                 lines.push(Line::from(Span::styled(
@@ -394,8 +426,14 @@ fn render_input(frame: &mut Frame, state: &mut TuiState, area: Rect) {
     };
 
     let prompt_symbol = if state.is_streaming {
-        if state.has_first_content { "…" } else { "⠋" }
-    } else { "⟩" };
+        if state.has_first_content {
+            "…"
+        } else {
+            "⠋"
+        }
+    } else {
+        "⟩"
+    };
     let title = if focused {
         format!("│ {} Input ◀ │", prompt_symbol)
     } else {
@@ -424,10 +462,7 @@ fn render_input(frame: &mut Frame, state: &mut TuiState, area: Rect) {
                 lines.push(Line::from(vec![prompt_span.clone(), Span::raw(*line_text)]));
             } else {
                 // Indent continuation lines to align under the text (2 spaces = prompt width).
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::raw(*line_text),
-                ]));
+                lines.push(Line::from(vec![Span::raw("  "), Span::raw(*line_text)]));
             }
         }
         // If the buffer ends with \n, add an empty line so the cursor can sit there.
@@ -507,7 +542,9 @@ fn render_status_bar(frame: &mut Frame, state: &TuiState, area: Rect) {
     } else {
         &state.session_id[..8.min(state.session_id.len())]
     };
-    let short_model = state.model_name.rsplit_once('/')
+    let short_model = state
+        .model_name
+        .rsplit_once('/')
         .map(|(_, m)| m.to_string())
         .unwrap_or_else(|| state.model_name.clone());
 
@@ -533,7 +570,10 @@ fn render_status_bar(frame: &mut Frame, state: &TuiState, area: Rect) {
             _ => "⠸",
         };
         let bar = Line::from(vec![
-            Span::styled(format!(" {} thinking… ", spinner), Style::default().fg(YELLOW)),
+            Span::styled(
+                format!(" {} thinking… ", spinner),
+                Style::default().fg(YELLOW),
+            ),
             Span::styled("│ ", Style::default().fg(DIM)),
             Span::styled(&short_model, Style::default()),
             Span::styled(" │ ", Style::default().fg(DIM)),

@@ -283,6 +283,7 @@ mod tests {
                 model: Some("gpt-4".to_string()),
                 base_url: None,
                 api_key: None,
+                extra_headers: None,
             },
         );
 
@@ -293,6 +294,7 @@ mod tests {
                 model: Some("claude-sonnet-4".to_string()),
                 base_url: None,
                 api_key: None,
+                extra_headers: None,
             },
         );
 
@@ -314,6 +316,7 @@ mod tests {
                 model: Some("gpt-4".to_string()),
                 base_url: None,
                 api_key: None,
+                extra_headers: None,
             },
         );
 
@@ -324,6 +327,7 @@ mod tests {
                 model: Some("claude-sonnet-4".to_string()),
                 base_url: None,
                 api_key: None,
+                extra_headers: None,
             },
         );
 
@@ -361,7 +365,12 @@ mod tests {
 
         // Write a project-level kstore.json
         let mut project_store = KnowledgeStore::default();
-        project_store.store("project.test_key", "project_value", Category::Project, Source::Told);
+        project_store.store(
+            "project.test_key",
+            "project_value",
+            Category::Project,
+            Source::Told,
+        );
         let json = serde_json::to_string_pretty(&project_store).unwrap();
         std::fs::write(enchanter_dir.join("knowledge").join("kstore.json"), json).unwrap();
 
@@ -388,19 +397,37 @@ mod tests {
         std::fs::create_dir_all(&project_knowledge_dir).unwrap();
 
         let mut project_store = KnowledgeStore::default();
-        project_store.store("environment.rust_version", "1.85-project", Category::Environment, Source::Told);
+        project_store.store(
+            "environment.rust_version",
+            "1.85-project",
+            Category::Environment,
+            Source::Told,
+        );
         let json = serde_json::to_string_pretty(&project_store).unwrap();
         std::fs::write(project_knowledge_dir.join("kstore.json"), json).unwrap();
 
         // Create a global store with the same key but different value
         let mut global_store = KnowledgeStore::default();
-        global_store.store("environment.rust_version", "1.84", Category::Environment, Source::Observed);
-        global_store.store("environment.os", "linux", Category::Environment, Source::Observed);
+        global_store.store(
+            "environment.rust_version",
+            "1.84",
+            Category::Environment,
+            Source::Observed,
+        );
+        global_store.store(
+            "environment.os",
+            "linux",
+            Category::Environment,
+            Source::Observed,
+        );
 
         // Merge project into global — project key should override
         let overridden = global_store.merge_from_dir(&project_knowledge_dir).unwrap();
         assert_eq!(overridden, 1); // 1 entry was overridden
-        assert_eq!(global_store.get("environment.rust_version").unwrap().value, "1.85-project");
+        assert_eq!(
+            global_store.get("environment.rust_version").unwrap().value,
+            "1.85-project"
+        );
         assert_eq!(global_store.get("environment.os").unwrap().value, "linux"); // non-conflicting preserved
     }
 }

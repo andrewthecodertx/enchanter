@@ -58,10 +58,7 @@ pub enum ActivityEvent {
         error: String,
     },
     /// Stream chunk timeout (potential hang point).
-    StreamTimeout {
-        model: String,
-        elapsed_secs: u64,
-    },
+    StreamTimeout { model: String, elapsed_secs: u64 },
     /// About to dispatch a tool call.
     ToolCallStart {
         name: String,
@@ -84,10 +81,7 @@ pub enum ActivityEvent {
         error: String,
     },
     /// Agent loop turn started.
-    TurnStart {
-        turn: u32,
-        max_turns: Option<u32>,
-    },
+    TurnStart { turn: u32, max_turns: Option<u32> },
     /// Agent loop turn completed.
     TurnEnd {
         turn: u32,
@@ -95,15 +89,9 @@ pub enum ActivityEvent {
         duration_ms: u64,
     },
     /// Agent loop hit max turns.
-    MaxTurnsReached {
-        turn: u32,
-        limit: String,
-    },
+    MaxTurnsReached { turn: u32, limit: String },
     /// Session started.
-    SessionStart {
-        session_id: String,
-        model: String,
-    },
+    SessionStart { session_id: String, model: String },
     /// Session ended (normal exit or Ctrl+C).
     SessionEnd {
         session_id: String,
@@ -117,10 +105,7 @@ pub enum ActivityEvent {
         budget_tokens: u64,
     },
     /// Generic error.
-    Error {
-        context: String,
-        message: String,
-    },
+    Error { context: String, message: String },
 }
 
 impl ActivityEvent {
@@ -170,7 +155,12 @@ pub struct ApiCallGuard {
 }
 
 impl ApiCallGuard {
-    pub fn new(model: String, message_count: usize, tool_count: Option<usize>, stream: bool) -> Self {
+    pub fn new(
+        model: String,
+        message_count: usize,
+        tool_count: Option<usize>,
+        stream: bool,
+    ) -> Self {
         log(ActivityEvent::ApiCallStart {
             model: model.clone(),
             message_count,
@@ -284,7 +274,9 @@ impl ActivityLogger {
 
     /// Append one event to the log.
     pub fn log(&mut self, event: ActivityEvent) -> anyhow::Result<()> {
-        let Some(writer) = &mut self.writer else { return Ok(()) };
+        let Some(writer) = &mut self.writer else {
+            return Ok(());
+        };
         let line = event.to_jsonl()?;
         writeln!(writer, "{}", line)?;
         writer.flush()?; // Always flush — the whole point is durability on crash

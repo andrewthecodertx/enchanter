@@ -10,7 +10,13 @@
 ///
 /// Uses dim text (ANSI faint/bright-black) so it's visible but unobtrusive.
 /// Pads to fill the full terminal width.
-pub fn render_bar(model: &str, tokens: u64, budget: Option<u64>, session_id: &str, width: u16) -> String {
+pub fn render_bar(
+    model: &str,
+    tokens: u64,
+    budget: Option<u64>,
+    session_id: &str,
+    width: u16,
+) -> String {
     // Token portion — e.g. "45k/128k (35%)" or "45k"
     let token_str = match budget {
         Some(b) => {
@@ -21,10 +27,7 @@ pub fn render_bar(model: &str, tokens: u64, budget: Option<u64>, session_id: &st
     };
 
     let short_id = &session_id[..8.min(session_id.len())];
-    let short_model = model
-        .rsplit_once('/')
-        .map(|(_, m)| m)
-        .unwrap_or(model);
+    let short_model = model.rsplit_once('/').map(|(_, m)| m).unwrap_or(model);
 
     // Build candidate strings (longest to shortest)
     // Style: "Context:" in bright-black (dim), separators in faint,
@@ -37,10 +40,7 @@ pub fn render_bar(model: &str, tokens: u64, budget: Option<u64>, session_id: &st
         " \x1b[90mContext:\x1b[0m {} \x1b[2m│\x1b[22m {} ",
         token_str, short_model
     );
-    let minimal = format!(
-        " \x1b[90mContext:\x1b[0m {} ",
-        token_str
-    );
+    let minimal = format!(" \x1b[90mContext:\x1b[0m {} ", token_str);
 
     // Pick the longest that fits
     let content = if strip_ansi_len(&full) <= width as usize {
@@ -79,7 +79,7 @@ pub fn print_bar(model: &str, tokens: u64, budget: Option<u64>, session_id: &str
 pub fn terminal_size() -> (u16, u16) {
     #[cfg(unix)]
     {
-        use libc::{ioctl, isatty, winsize, TIOCGWINSZ, STDOUT_FILENO};
+        use libc::{STDOUT_FILENO, TIOCGWINSZ, ioctl, isatty, winsize};
         unsafe {
             if isatty(STDOUT_FILENO) == 0 {
                 return (24, 80);
