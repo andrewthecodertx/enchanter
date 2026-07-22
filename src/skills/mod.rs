@@ -16,7 +16,7 @@
 //!   directories for SKILL.md files with frontmatter, builds a name→Info
 //!   map, and formats the index for the system prompt. OpenCode uses
 //!   ConfigMarkdown for parsing; enchanter uses a lightweight YAML
-//!   frontmatter parser with serde_yml.
+//!   frontmatter parser with serde_yaml.
 //!
 //! The category-from-path convention (directory name under skills/
 //! becomes the category tag) follows hermes-agent's convention where
@@ -186,7 +186,7 @@ fn parse_frontmatter(content: &str) -> (SkillFrontmatter, String) {
     if let Some(end_idx) = after_open.find("\n---") {
         let yaml_str = &after_open[..end_idx];
         let body = after_open[end_idx + 4..].trim_start().to_string();
-        let frontmatter: SkillFrontmatter = serde_yml::from_str(yaml_str).unwrap_or_default();
+        let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_str).unwrap_or_default();
         return (frontmatter, body);
     }
 

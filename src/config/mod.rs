@@ -322,7 +322,7 @@ impl Config {
         }
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let config: Config = serde_yml::from_str(&contents)
+        let config: Config = serde_yaml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
         Ok(config)
     }
@@ -334,7 +334,7 @@ impl Config {
         }
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let config: Config = serde_yml::from_str(&contents)
+        let config: Config = serde_yaml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
         Ok(config)
     }
