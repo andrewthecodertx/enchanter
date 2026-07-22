@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run clippy
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+
+  build-and-test:
+    name: Build & Test (${{ matrix.os }}, ${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        features:
+          - ""
+          - "--no-default-features"
+        include:
+          - features: ""
+            label: "default (with TUI)"
+          - features: "--no-default-features"
+            label: "no TUI"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build ${{ matrix.features }}
+      - name: Build release
+        run: cargo build --release ${{ matrix.features }}
+      - name: Test
+        run: cargo test ${{ matrix.features }}
+
+  release:
+    name: Release binaries
+    needs: [build-and-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build release (Linux x86_64)
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: Build release (macOS)
+        # Note: cross-compilation to macOS from Linux is not supported.
+        # This job would need to run on macOS-latest to produce a macOS binary.
+        # Skipping for now; add a separate macOS release job if needed.
+        run: echo "Skipping macOS cross-compile; requires macOS runner"
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/x86_64-unknown-linux-gnu/release/enchanter
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

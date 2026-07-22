@@ -83,7 +83,19 @@ mod soul;
 mod status_bar;
 mod summary;
 mod tools;
+
+#[cfg(feature = "tui")]
 mod tui;
+
+#[cfg(not(feature = "tui"))]
+mod tui {
+    use anyhow::{Result, bail};
+    use crate::agent::AgentSession;
+
+    pub async fn run_tui(_agent: AgentSession) -> Result<AgentSession> {
+        bail!("TUI support was not compiled in. Rebuild with `cargo build --features tui` or use the default build.")
+    }
+}
 
 use anyhow::Result;
 use clap::Parser;

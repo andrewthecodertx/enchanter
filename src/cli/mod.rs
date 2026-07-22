@@ -276,7 +276,15 @@ pub async fn run(args: Args) -> Result<()> {
                 no_tools: args.no_tools,
                 system_override: args.system.clone(),
                 session_name: if args.tui {
-                    Some("enchanter_tui".to_string())
+                    #[cfg(feature = "tui")]
+                    {
+                        Some("enchanter_tui".to_string())
+                    }
+                    #[cfg(not(feature = "tui"))]
+                    {
+                        let _ = args.tui; // suppress unused warning
+                        None
+                    }
                 } else {
                     None
                 },
@@ -296,7 +304,15 @@ pub async fn run(args: Args) -> Result<()> {
                 no_tools: args.no_tools,
                 system_override: args.system.clone(),
                 session_name: if args.tui {
-                    Some("enchanter_tui".to_string())
+                    #[cfg(feature = "tui")]
+                    {
+                        Some("enchanter_tui".to_string())
+                    }
+                    #[cfg(not(feature = "tui"))]
+                    {
+                        let _ = args.tui; // suppress unused warning
+                        None
+                    }
                 } else {
                     None
                 },
@@ -412,7 +428,14 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     let mut agent = if args.tui {
-        crate::tui::run_tui(agent).await?
+        #[cfg(not(feature = "tui"))]
+        {
+            anyhow::bail!("TUI support was not compiled in (built with --no-default-features).\nRebuild with: cargo build --features tui");
+        }
+        #[cfg(feature = "tui")]
+        {
+            crate::tui::run_tui(agent).await?
+        }
     } else {
         crate::repl::run_repl(agent).await?
     };

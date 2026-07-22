@@ -5,6 +5,11 @@
 #   OpenAI, OpenRouter, Groq, Ollama, LM Studio, and more.
 # Local providers (Ollama, LM Studio) typically don't need an API key.
 
+# Config schema version. Incremented when breaking changes are made to config.yaml.
+# If you see an error about "config_version newer than supported", upgrade enchanter
+# or edit this file and set config_version: 1.
+config_version: 1
+
 model:
   # default: gpt-4.1-mini               # Model ID (override with ENCHANTER_MODEL env var)
   # base_url: https://api.openai.com/v1 # API base URL (override with ENCHANTER_BASE_URL)

@@ -47,6 +47,9 @@ pub fn expand_env(context: &str, val: &str) -> String {
 
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Config {
+    /// Config schema version. Defaults to 1. Future versions can add migration logic.
+    #[serde(default = "default_config_version")]
+    pub config_version: u32,
     #[serde(default)]
     pub model: ModelConfig,
     #[serde(default)]
@@ -57,6 +60,10 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+}
+
+fn default_config_version() -> u32 {
+    1
 }
 
 /// A named provider preset: model + base_url + api_key.
@@ -322,8 +329,9 @@ impl Config {
         }
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let config: Config = serde_yaml::from_str(&contents)
+        let mut config: Config = serde_yaml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
+        config.validate_version()?;
         Ok(config)
     }
 
@@ -334,9 +342,27 @@ impl Config {
         }
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let config: Config = serde_yaml::from_str(&contents)
+        let mut config: Config = serde_yaml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
+        config.validate_version()?;
         Ok(config)
+    }
+
+    /// Validate the config_version field. Returns an error if the version
+    /// is newer than what this build supports. Defaults to v1 for backwards
+    /// compatibility with configs that don't have the field.
+    fn validate_version(&self) -> Result<()> {
+        const SUPPORTED_VERSION: u32 = 1;
+        if self.config_version > SUPPORTED_VERSION {
+            anyhow::bail!(
+                "Config schema version {} is newer than supported (v{}). \
+                Please upgrade enchanter or edit ~/.enchanter/config.yaml and set config_version: {}",
+                self.config_version,
+                SUPPORTED_VERSION,
+                SUPPORTED_VERSION
+            );
+        }
+        Ok(())
     }
 
     /// Model ID: config > ENCHANTER_MODEL > "gpt-4.1-mini".
