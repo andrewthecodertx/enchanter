@@ -67,10 +67,10 @@ fn build_summary_prompt(messages: &[Message]) -> String {
     let conversation = truncate_chars(&conversation, 8000);
 
     format!(
-    "Summarize this session in 3-5 concise bullet points. \
+        "Summarize this session in 3-5 concise bullet points. \
      Focus on: topics discussed, decisions made, work completed, \
      and open tasks or next steps. Be brief and information-dense.\n\n{}",
-    conversation
+        conversation
     )
 }
 

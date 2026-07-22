@@ -89,11 +89,13 @@ mod tui;
 
 #[cfg(not(feature = "tui"))]
 mod tui {
-    use anyhow::{Result, bail};
     use crate::agent::AgentSession;
+    use anyhow::{Result, bail};
 
     pub async fn run_tui(_agent: AgentSession) -> Result<AgentSession> {
-        bail!("TUI support was not compiled in. Rebuild with `cargo build --features tui` or use the default build.")
+        bail!(
+            "TUI support was not compiled in. Rebuild with `cargo build --features tui` or use the default build."
+        )
     }
 }
 

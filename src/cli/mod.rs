@@ -430,7 +430,9 @@ pub async fn run(args: Args) -> Result<()> {
     let mut agent = if args.tui {
         #[cfg(not(feature = "tui"))]
         {
-            anyhow::bail!("TUI support was not compiled in (built with --no-default-features).\nRebuild with: cargo build --features tui");
+            anyhow::bail!(
+                "TUI support was not compiled in (built with --no-default-features).\nRebuild with: cargo build --features tui"
+            );
         }
         #[cfg(feature = "tui")]
         {

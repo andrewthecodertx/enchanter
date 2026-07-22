@@ -377,7 +377,11 @@ pub async fn dispatch(
     }
 }
 
-async fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsandboxed: bool) -> String {
+async fn tool_exec_command(
+    args: &Value,
+    allowed_paths: &[PathBuf],
+    allow_unsandboxed: bool,
+) -> String {
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => return "Error: missing required parameter 'command'".to_string(),
@@ -400,7 +404,7 @@ async fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsand
             Ok(p) => p,
             Err(e) => return format!("Error: cannot locate enchanter binary for sandbox: {}", e),
         };
-        
+
         match timeout(
             Duration::from_secs(30),
             Command::new(exe)
@@ -420,7 +424,7 @@ async fn tool_exec_command(args: &Value, allowed_paths: &[PathBuf], allow_unsand
         }
     } else if allow_unsandboxed {
         warn_unsandboxed_once();
-        
+
         match timeout(
             Duration::from_secs(30),
             Command::new("sh")
