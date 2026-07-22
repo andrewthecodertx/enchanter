@@ -328,22 +328,31 @@ async fn handle_connection(
         Request::Chat {
             prompt,
             model,
-            system: _system,
+            system,
             no_stream,
             no_tools,
         } => {
-            // Switch model if requested
-            if let Some(new_model) = model
-                && let Err(e) = agent.switch_model(&new_model)
-            {
-                let err_event = Event::Error {
-                    message: format!("Failed to switch model: {}", e),
-                };
-                if let Ok(jsonl) = err_event.to_jsonl() {
-                    let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
-                }
-                return;
+            // Apply system prompt override if provided
+            if let Some(sys_prompt) = system {
+                agent.system_override = Some(sys_prompt);
             }
+
+            // Switch model if requested, save previous for restoration
+            let prev_model = if let Some(new_model) = model {
+                let prev = agent.resolved.model.clone();
+                if let Err(e) = agent.switch_model(&new_model) {
+                    let err_event = Event::Error {
+                        message: format!("Failed to switch model: {}", e),
+                    };
+                    if let Ok(jsonl) = err_event.to_jsonl() {
+                        let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
+                    }
+                    return;
+                }
+                Some(prev)
+            } else {
+                None
+            };
 
             // Apply overrides
             let prev_no_stream = agent.no_stream;
@@ -379,6 +388,9 @@ async fn handle_connection(
             // Restore overrides
             agent.no_stream = prev_no_stream;
             agent.no_tools = prev_no_tools;
+            if let Some(prev_model) = prev_model {
+                let _ = agent.switch_model(&prev_model);
+            }
         }
         Request::Ping => {
             let event = Event::Pong;
@@ -623,8 +635,6 @@ pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
         }
         // Reset umask so the daemon can create files with any permissions
         libc::umask(0o022);
-        // Change working directory to home to avoid holding arbitrary mount points
-        // (don't chdir to / — we need to write PID/socket files relative to home)
     }
 
     // Write our PID to the pipe so the original caller can read it
