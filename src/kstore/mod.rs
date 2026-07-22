@@ -26,20 +26,17 @@ use crate::home;
 /// Source of a knowledge entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Source {
     /// Directly observed from tool output, filesystem, or runtime.
     Observed,
     /// Explicitly told by the user.
+    #[default]
     Told,
     /// Inferred by the agent from context.
     Inferred,
 }
 
-impl Default for Source {
-    fn default() -> Self {
-        Self::Told
-    }
-}
 
 impl Source {
     #[allow(dead_code)]
@@ -131,17 +128,11 @@ fn default_confidence() -> f32 {
 
 /// The knowledge store: in-memory HashMap backed by a JSON file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct KnowledgeStore {
     pub entries: HashMap<String, KnowledgeEntry>,
 }
 
-impl Default for KnowledgeStore {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
-    }
-}
 
 impl KnowledgeStore {
     /// Load the knowledge store from disk. Returns empty store if file doesn't exist.

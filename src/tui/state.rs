@@ -288,11 +288,10 @@ impl TuiState {
 
     /// Get the context budget for the current model.
     pub fn context_budget(&self) -> Option<u64> {
-        if let Some(info) = self.model_context.get(&self.model_name) {
-            if let Some(size) = info.context_size {
+        if let Some(info) = self.model_context.get(&self.model_name)
+            && let Some(size) = info.context_size {
                 return Some(size);
             }
-        }
         crate::status_bar::model_context_size(&self.model_name)
     }
 

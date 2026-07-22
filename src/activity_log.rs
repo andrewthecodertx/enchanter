@@ -244,14 +244,12 @@ impl ActivityLogger {
     /// Open (or create) the activity log file.
     pub fn open(path: &PathBuf) -> anyhow::Result<Self> {
         // Rotate if the file is too large
-        if path.exists() {
-            if let Ok(meta) = std::fs::metadata(path) {
-                if meta.len() > MAX_LOG_SIZE {
+        if path.exists()
+            && let Ok(meta) = std::fs::metadata(path)
+                && meta.len() > MAX_LOG_SIZE {
                     let rotated = path.with_extension("jsonl.bak");
                     let _ = std::fs::rename(path, &rotated);
                 }
-            }
-        }
 
         let file = std::fs::OpenOptions::new()
             .create(true)

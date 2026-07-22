@@ -67,13 +67,11 @@ pub async fn run_tui(agent: AgentSession) -> Result<AgentSession> {
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<CrosstermEvent>();
     thread::spawn(move || {
         loop {
-            if event::poll(Duration::from_millis(50)).is_ok() {
-                if let Ok(ev) = event::read() {
-                    if key_tx.send(ev).is_err() {
+            if event::poll(Duration::from_millis(50)).is_ok()
+                && let Ok(ev) = event::read()
+                    && key_tx.send(ev).is_err() {
                         break; // receiver dropped — TUI exiting
                     }
-                }
-            }
         }
     });
 
@@ -371,8 +369,8 @@ fn handle_mouse(mouse: MouseEvent, state: &mut TuiState) {
                 if matches!(
                     target_focus,
                     Focus::Models | Focus::Sessions | Focus::Skills
-                ) {
-                    if let Some(index) = state
+                )
+                    && let Some(index) = state
                         .pane_areas
                         .list_index_for_click(target_focus, mouse.row)
                     {
@@ -386,7 +384,6 @@ fn handle_mouse(mouse: MouseEvent, state: &mut TuiState) {
                             state.list_cursor = index;
                         }
                     }
-                }
             }
         }
         MouseEventKind::ScrollUp => {

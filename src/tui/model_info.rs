@@ -34,11 +34,10 @@ pub async fn fetch_model_context_info(
         .unwrap_or_default();
 
     let mut req = client.get(&models_url);
-    if let Some(key) = api_key {
-        if !key.is_empty() {
+    if let Some(key) = api_key
+        && !key.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
-    }
 
     match req.send().await {
         Ok(resp) => {
@@ -59,11 +58,7 @@ fn derive_models_url(base_url: &str) -> Option<String> {
     let trimmed = base_url.trim_end_matches('/');
     if let Some(prefix) = trimmed.strip_suffix("/chat/completions") {
         Some(format!("{}/models", prefix))
-    } else if let Some(prefix) = trimmed.strip_suffix("/v1") {
-        Some(format!("{}/v1/models", prefix))
-    } else {
-        None
-    }
+    } else { trimmed.strip_suffix("/v1").map(|prefix| format!("{}/v1/models", prefix)) }
 }
 
 #[derive(Debug, Deserialize)]

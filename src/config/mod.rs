@@ -329,7 +329,7 @@ impl Config {
         }
         let contents = std::fs::read_to_string(&path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let mut config: Config = serde_yaml::from_str(&contents)
+        let config: Config = serde_yaml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
         config.validate_version()?;
         Ok(config)
@@ -342,7 +342,7 @@ impl Config {
         }
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
-        let mut config: Config = serde_yaml::from_str(&contents)
+        let config: Config = serde_yaml::from_str(&contents)
             .with_context(|| format!("parsing config YAML from {}", path.display()))?;
         config.validate_version()?;
         Ok(config)
