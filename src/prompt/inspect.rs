@@ -1,11 +1,9 @@
-//! Prompt inspection — diff and budget analysis for assembled system prompts.
+//! Prompt inspection — budget analysis for assembled system prompts.
 //!
-//! Implements REQ-INS-001 through REQ-INS-010 from the SRS:
-//! - Prompt diff: human-readable diff between turns (REQ-INS-001–005)
+//! Implements REQ-INS-006 through REQ-INS-010 from the SRS:
 //! - Prompt budget: character/token counts per layer (REQ-INS-006–010)
 
 use colored::Colorize;
-use similar::{ChangeTag, TextDiff};
 
 /// A single layer of the assembled system prompt.
 #[derive(Debug, Clone)]
@@ -48,46 +46,6 @@ impl PromptLayers {
                 .iter()
                 .map(|l| estimate_tokens(&l.content))
                 .sum(),
-        }
-    }
-
-    /// Diff two prompt layer sets, returning a human-readable diff string.
-    pub fn diff(&self, previous: &PromptLayers) -> PromptDiffResult {
-        let self_text = self.assemble();
-        let prev_text = previous.assemble();
-
-        // Also diff per-layer to detect what changed
-        let mut layer_changes = Vec::new();
-        let self_names: Vec<&str> = self.layers.iter().map(|l| l.name.as_str()).collect();
-        let prev_names: Vec<&str> = previous.layers.iter().map(|l| l.name.as_str()).collect();
-
-        // Detect added/removed layers
-        for name in &self_names {
-            if !prev_names.contains(name) {
-                layer_changes.push(LayerChange::Added(name.to_string()));
-            }
-        }
-        for name in &prev_names {
-            if !self_names.contains(name) {
-                layer_changes.push(LayerChange::Removed(name.to_string()));
-            }
-        }
-
-        // Detect content changes in common layers
-        for self_layer in &self.layers {
-            if let Some(prev_layer) = previous.layers.iter().find(|l| l.name == self_layer.name)
-                && self_layer.content != prev_layer.content
-            {
-                layer_changes.push(LayerChange::Modified(self_layer.name.clone()));
-            }
-        }
-
-        // Full text diff
-        let text_diff = TextDiff::from_lines(&prev_text, &self_text);
-
-        PromptDiffResult {
-            layer_changes,
-            unified_diff: format_diff(&text_diff),
         }
     }
 }
@@ -221,93 +179,6 @@ impl BudgetReport {
     }
 }
 
-/// A change to a specific prompt layer between turns.
-#[derive(Debug, Clone)]
-pub enum LayerChange {
-    Added(String),
-    Removed(String),
-    Modified(String),
-}
-
-/// The result of diffing two prompt layer sets.
-#[derive(Debug, Clone)]
-pub struct PromptDiffResult {
-    pub layer_changes: Vec<LayerChange>,
-    pub unified_diff: String,
-}
-
-impl PromptDiffResult {
-    /// Render the diff result as a human-readable string.
-    /// Color-coded per REQ-INS-005, never showing API keys (REQ-INS-004).
-    pub fn render(&self) -> String {
-        let mut lines = Vec::new();
-
-        lines.push(format!("{}", "═══ PROMPT DIFF ═══".bright_cyan()));
-        lines.push(String::new());
-
-        // Layer changes summary
-        if !self.layer_changes.is_empty() {
-            lines.push("Changes by layer:".to_string());
-            for change in &self.layer_changes {
-                match change {
-                    LayerChange::Added(name) => {
-                        lines.push(format!("  {} {}", "+".green(), name.green()));
-                    }
-                    LayerChange::Removed(name) => {
-                        lines.push(format!("  {} {}", "-".red(), name.red()));
-                    }
-                    LayerChange::Modified(name) => {
-                        lines.push(format!("  {} {}", "~".yellow(), name.yellow()));
-                    }
-                }
-            }
-            lines.push(String::new());
-        } else {
-            lines.push(format!("  {}", "No layer structure changes.".dimmed()));
-            lines.push(String::new());
-        }
-
-        // Unified diff
-        if self.unified_diff.is_empty() {
-            lines.push(format!("  {}", "No content changes.".dimmed()));
-        } else {
-            lines.push("Content diff:".to_string());
-            lines.push(self.unified_diff.clone());
-        }
-
-        lines.join("\n")
-    }
-}
-
-/// Format a TextDiff into a color-coded unified diff string.
-/// Uses green/red coloring per REQ-INS-005.
-fn format_diff<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> String {
-    let mut lines = Vec::new();
-
-    for change in diff.iter_all_changes() {
-        let line = change.to_string_lossy();
-        match change.tag() {
-            ChangeTag::Delete => {
-                for l in line.lines() {
-                    lines.push(format!("{}{}", "-".red(), l.red()));
-                }
-            }
-            ChangeTag::Insert => {
-                for l in line.lines() {
-                    lines.push(format!("{}{}", "+".green(), l.green()));
-                }
-            }
-            ChangeTag::Equal => {
-                for l in line.lines() {
-                    lines.push(format!(" {}", l));
-                }
-            }
-        }
-    }
-
-    lines.join("\n")
-}
-
 /// Redact API keys, tokens, and auth headers from text (REQ-INS-004).
 /// Used by the recording feature (REQ-REC-004).
 ///
@@ -404,99 +275,6 @@ mod tests {
         assert_eq!(budget.layers[0].chars, 9);
         assert_eq!(budget.layers[0].name, "soul");
         assert_eq!(budget.total_chars, 21);
-    }
-
-    #[test]
-    fn test_prompt_diff_no_changes() {
-        let layers = PromptLayers {
-            layers: vec![PromptLayer {
-                name: "soul".to_string(),
-                content: "I am Tim.".to_string(),
-            }],
-        };
-        let result = layers.diff(&layers);
-        assert!(result.layer_changes.is_empty());
-    }
-
-    #[test]
-    fn test_prompt_diff_added_layer() {
-        let prev = PromptLayers {
-            layers: vec![PromptLayer {
-                name: "soul".to_string(),
-                content: "I am Tim.".to_string(),
-            }],
-        };
-        let curr = PromptLayers {
-            layers: vec![
-                PromptLayer {
-                    name: "soul".to_string(),
-                    content: "I am Tim.".to_string(),
-                },
-                PromptLayer {
-                    name: "memory".to_string(),
-                    content: "project uses rust".to_string(),
-                },
-            ],
-        };
-        let result = curr.diff(&prev);
-        assert!(
-            result
-                .layer_changes
-                .iter()
-                .any(|c| matches!(c, LayerChange::Added(name) if name == "memory"))
-        );
-    }
-
-    #[test]
-    fn test_prompt_diff_modified_layer() {
-        let prev = PromptLayers {
-            layers: vec![PromptLayer {
-                name: "soul".to_string(),
-                content: "I am Tim.".to_string(),
-            }],
-        };
-        let curr = PromptLayers {
-            layers: vec![PromptLayer {
-                name: "soul".to_string(),
-                content: "I am Tim v2.".to_string(),
-            }],
-        };
-        let result = curr.diff(&prev);
-        assert!(
-            result
-                .layer_changes
-                .iter()
-                .any(|c| matches!(c, LayerChange::Modified(name) if name == "soul"))
-        );
-    }
-
-    #[test]
-    fn test_prompt_diff_removed_layer() {
-        let prev = PromptLayers {
-            layers: vec![
-                PromptLayer {
-                    name: "soul".to_string(),
-                    content: "I am Tim.".to_string(),
-                },
-                PromptLayer {
-                    name: "volatile".to_string(),
-                    content: "old memory".to_string(),
-                },
-            ],
-        };
-        let curr = PromptLayers {
-            layers: vec![PromptLayer {
-                name: "soul".to_string(),
-                content: "I am Tim.".to_string(),
-            }],
-        };
-        let result = curr.diff(&prev);
-        assert!(
-            result
-                .layer_changes
-                .iter()
-                .any(|c| matches!(c, LayerChange::Removed(name) if name == "volatile"))
-        );
     }
 
     #[test]

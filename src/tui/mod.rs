@@ -138,6 +138,7 @@ pub async fn run_tui(agent: AgentSession) -> Result<AgentSession> {
 }
 
 /// Main event loop — multiplexes terminal input and agent streaming events.
+#[expect(clippy::too_many_arguments)]
 async fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: &mut TuiState,
@@ -679,34 +680,18 @@ fn move_cursor_to_line(
     target_col: usize,
 ) -> usize {
     let mut row = 0;
-    let mut result = 0;
-
-    for (i, ch) in buffer.char_indices() {
+    let mut col = 0;
+    for (byte_pos, ch) in buffer.char_indices() {
         if row == target_row {
-            // We're on the target line — advance to target_col chars.
-            let mut col = 0;
-            let mut byte_pos = i;
-            for (j, c) in buffer[i..].char_indices() {
-                if c == '\n' || col >= target_col {
-                    break;
-                }
-                col += 1;
-                byte_pos = i + j + c.len_utf8();
+            if ch == '\n' || col >= target_col {
+                return byte_pos;
             }
-            result = byte_pos;
-            if result < i {
-                result = i;
-            }
-            return result;
+            col += 1;
         }
         if ch == '\n' {
             row += 1;
+            col = 0;
         }
-    }
-
-    // If target_row is beyond the last line, go to end of buffer.
-    if buffer.ends_with('\n') && row == target_row {
-        return buffer.len();
     }
     buffer.len()
 }

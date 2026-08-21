@@ -207,6 +207,7 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    #[expect(dead_code)]
     pub fn new(base_url: &str, api_key: Option<&str>, model: &str) -> Self {
         Self::with_headers(base_url, api_key, model, Vec::new())
     }

@@ -167,6 +167,8 @@ impl Recorder {
     }
 
     /// Record a model/provider change event (REQ-REC-003).
+    /// Only exercised by tests so far (future: live model switching).
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn record_model_change(&mut self, from_model: &str, to_model: &str) -> Result<()> {
         let payload = serde_json::json!({
             "from_model": from_model,

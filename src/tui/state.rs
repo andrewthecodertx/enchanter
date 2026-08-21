@@ -195,6 +195,7 @@ pub struct SessionEntry {
 #[derive(Debug, Clone, Default)]
 pub struct ModelContextInfo {
     pub context_size: Option<u64>,
+    #[expect(dead_code)]
     pub source: ContextSource,
 }
 
@@ -203,6 +204,7 @@ pub enum ContextSource {
     #[default]
     Hardcoded,
     ApiQuery,
+    #[expect(dead_code)]
     Config,
 }
 
@@ -237,6 +239,7 @@ pub struct TuiState {
     /// Cursor position within the currently focused sidebar list.
     pub list_cursor: usize,
     /// Provider names from config (for model switching).
+    #[expect(dead_code)]
     pub provider_names: Vec<String>,
     /// Pane areas stored during render for mouse hit-testing.
     pub pane_areas: PaneAreas,

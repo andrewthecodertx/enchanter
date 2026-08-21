@@ -98,11 +98,8 @@ pub enum Commands {
     Memory,
     Skills,
     Config,
-    /// Show, diff, or budget the assembled system prompt
+    /// Show or budget the assembled system prompt
     Prompt {
-        /// Show a diff between the previous and current system prompt
-        #[arg(long)]
-        diff: bool,
         /// Show a token/character budget breakdown of the system prompt
         #[arg(long)]
         budget: bool,
@@ -732,7 +729,7 @@ fn handle_command(
                 }
             }
         }
-        Commands::Prompt { diff, budget } => {
+        Commands::Prompt { budget } => {
             let layers = crate::prompt::build_prompt_layers(
                 soul,
                 memory,
@@ -741,25 +738,7 @@ fn handle_command(
                 config,
                 &config.model_id(),
             );
-            if *diff {
-                // Diff against itself (no previous state for CLI — show current layers)
-                // A meaningful diff requires two turns, so we show the current structure
-                println!("{}", "═══ PROMPT DIFF ═══".bright_cyan());
-                println!(
-                    "{}",
-                    "(No previous prompt to diff against — showing current layer structure.)"
-                        .dimmed()
-                );
-                println!();
-                for layer in &layers.layers {
-                    println!("  {} {}", "●".bright_cyan(), layer.name.bold());
-                }
-                println!();
-                println!(
-                    "{}",
-                    "Use /prompt diff in a REPL session to diff between turns.".dimmed()
-                );
-            } else if *budget {
+            if *budget {
                 let report = layers.budget();
                 println!("{}", report.render(4000));
             } else {
@@ -959,10 +938,6 @@ fn print_help(config: &Config) {
         ("/sessions", "List session history"),
         ("/config", "Show resolved configuration"),
         ("/prompt", "Show assembled system prompt"),
-        (
-            "/prompt diff",
-            "Show diff of system prompt from previous turn",
-        ),
         (
             "/prompt budget",
             "Show token/character budget per prompt layer",

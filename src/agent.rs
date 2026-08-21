@@ -22,8 +22,6 @@ use crate::skills::SkillsIndex;
 use crate::soul::Soul;
 use crate::tools;
 
-use crate::prompt::inspect::PromptLayers;
-
 /// Tools whose results are safe to cache within a session — they are
 /// read-only and their output doesn't change unless the underlying state
 /// changes (which a mutating tool call would do, invalidating the cache).
@@ -92,8 +90,6 @@ pub struct AgentSession {
     pub no_stream: bool,
     pub no_tools: bool,
     pub system_override: Option<String>,
-    /// Previous prompt layers for diff between turns (REQ-INS-001).
-    pub previous_prompt_layers: Option<PromptLayers>,
     /// Cache for read-only tool results within the current session.
     /// Keyed by (tool_name, serialized_args). Prevents re-reading the same
     /// file or re-listing the same directory multiple times, cutting token
@@ -195,7 +191,6 @@ impl AgentSession {
             no_stream,
             no_tools,
             system_override,
-            previous_prompt_layers: None,
             tool_cache: ToolResultCache::default(),
         })
     }
@@ -208,6 +203,7 @@ impl AgentSession {
     /// The old session's JSONL file is reopened in append mode, so new
     /// messages are appended to the same file. This means the full
     /// conversation (old + new) is preserved on disk for later replay.
+    #[expect(clippy::too_many_arguments)]
     pub fn resume(
         config: Config,
         soul: Soul,
@@ -278,7 +274,6 @@ impl AgentSession {
             no_stream,
             no_tools,
             system_override,
-            previous_prompt_layers: None,
             tool_cache: ToolResultCache::default(),
         })
     }
@@ -436,6 +431,7 @@ impl AgentSession {
     }
 
     /// Continue from existing messages (e.g., /retry).
+    #[expect(dead_code)]
     pub async fn retry(&mut self) -> Result<ChatResult> {
         // Remove everything after last user message, then re-run
         let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
