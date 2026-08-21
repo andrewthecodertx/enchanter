@@ -143,7 +143,6 @@ enchanter --record session.jsonl --record-redact
 | `/tools`           | List all available tools                             |
 | `/model <name>`    | Switch model or named provider                       |
 | `/prompt`          | Show full system prompt                              |
-| `/prompt diff`     | Show diff of system prompt from previous turn         |
 | `/prompt budget`   | Show token/character budget per prompt layer           |
 | `/retry`           | Re-send the last user message                         |
 | `/undo`            | Remove last exchange from history                     |
@@ -161,9 +160,6 @@ enchanter prompt
 
 # Show a token/character budget breakdown per layer
 enchanter prompt --budget
-
-# Show the diff between the previous and current turn's prompt
-# (available in REPL as /prompt diff)
 ```
 
 The budget view shows approximate token counts per layer (using a chars÷4 heuristic), visual bar charts, and threshold warnings when a layer exceeds ~4,000 estimated tokens.
@@ -248,7 +244,6 @@ enchanter skills        # List discovered skills
 enchanter config        # Show resolved configuration
 enchanter prompt        # Show assembled system prompt
 enchanter prompt --budget  # Show token/character budget per layer
-enchanter prompt --diff     # Show prompt layer structure
 enchanter sessions      # List session history
 enchanter sessions <id> # Show a specific session
 enchanter replay <file.jsonl>  # Replay a recorded session
@@ -336,7 +331,7 @@ The system prompt is built in layers:
 6. **VOLATILE** — memory entries, user profile
 7. **SESSION** — timestamp
 
-Each layer can be inspected via `/prompt budget` and compared across turns with `/prompt diff`.
+Each layer can be inspected via `/prompt budget`.
 
 Memory uses the same `§`-delimited format as Hermes Agent. Skills use the
 same SKILL.md format (agentskills.io). If you're coming from Hermes, just

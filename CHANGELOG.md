@@ -5,28 +5,43 @@ All notable changes to enchanter are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.1] - 2026-08-21
+
+First public release since v0.4.3. Rolls up all work that had accumulated in
+`[Unreleased]` (the in-tree version sat at 0.5.0 but was never released) plus
+a round of critical-bug fixes and cleanup.
 
 ### Added
-- Session resume: reload prior conversation history and continue where you left off
-- Tool result cache: avoid redundant tool executions within a session
+- Session resume: `--resume <id>` reloads prior conversation history and continues where you left off
+- Tool result cache: avoids redundant read-only tool executions within a session
 - Custom provider headers: pass arbitrary HTTP headers to LLM API providers
 - TUI mode re-introduced with `--tui` CLI flag (multi-pane layout, streaming, thinking indicator, Ctrl+HJKL/Ctrl+Arrows pane navigation)
-- Test suite expanded to 184 tests (focus navigation, chat scroll, list tests)
+- `config_version` schema field with version checking in config loading
+- Daemon: SIGHUP triggers a graceful restart (stops accepting, cleans up, exits with code 0) so `daemon start` after a signal picks up new config
+- Test suite expanded to 177 tests (focus navigation, chat scroll, list tests)
 
 ### Changed
 - Migrated from unmaintained `serde_yml` crate to `serde_yaml` 0.9
+- Removed the prompt diff feature (`PromptLayers::diff`, `PromptDiffResult`, `LayerChange`, `format_diff`, the `similar` crate dependency, and the `prompt --diff` / `/prompt diff` surfaces). Budget inspection via `prompt --budget` / `/prompt budget` is unchanged. May be re-added later if the feature earns its keep.
+- Flattened single-file module folders: `src/{config,soul,memory,skills,api,cli,tools,mcp,kstore}/mod.rs` → `src/<name>.rs`
 
 ### Fixed
+- **Security:** `write_file` and `search_files` rejected `..` path components and patterns containing `/`, `\`, or `..` (directory traversal)
+- **Daemon:** one-shot `-p` calls are now stateless per request — no conversation history or tool-cache bleed between calls (matches inline `-p` behavior)
+- **Daemon:** system prompt and model config no longer leak across sessions; `-s/--system` override now applied in daemon mode
+- **Daemon:** SIGHUP handled explicitly (previously a raw `SIG_IGN`)
+- **Session resume:** consecutive tool calls are grouped into a single assistant message so resumed history matches the API's expected shape
 - `exec_command` now enforces a real timeout instead of blocking indefinitely
 - UTF-8 panics on truncated multi-byte output in `exec_command` resolved
-- Daemon: fixed system prompt and model config leaking across sessions
-- Daemon: system prompt override now correctly applied in daemon mode
 - TUI: chat pane auto-scroll, scroll direction, and clamping fixes
 - TUI: defer quit while streaming to preserve session save path
 - TUI: session names displayed correctly
 - MCP tool name prefix: colons replaced with double underscores to avoid parsing issues
 - Status bar prints inline above prompt instead of using absolute cursor positioning
+
+### Removed
+- `similar` crate dependency (was only used by the removed prompt diff feature)
+- Sandbox integration tests (covered by the path-traversal unit tests)
 
 ---
 
@@ -138,11 +153,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/andrewthecoder/enchanter/compare/v0.4.3...HEAD
-[0.4.3]: https://github.com/andrewthecoder/enchanter/compare/v0.4.2...v0.4.3
-[0.4.2]: https://github.com/andrewthecoder/enchanter/compare/v0.4.1...v0.4.2
-[0.4.1]: https://github.com/andrewthecoder/enchanter/compare/v0.3.0...v0.4.1
-[0.3.0]: https://github.com/andrewthecoder/enchanter/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/andrewthecoder/enchanter/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/andrewthecoder/enchanter/compare/v0.0.1...v0.1.0
-[0.0.1]: https://github.com/andrewthecoder/enchanter/releases/tag/v0.0.1
+[Unreleased]: https://github.com/andrewthecodertx/enchanter/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/andrewthecodertx/enchanter/compare/v0.4.3...v0.9.1
+[0.4.3]: https://github.com/andrewthecodertx/enchanter/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/andrewthecodertx/enchanter/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/andrewthecodertx/enchanter/compare/v0.3.0...v0.4.1
+[0.3.0]: https://github.com/andrewthecodertx/enchanter/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/andrewthecodertx/enchanter/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/andrewthecodertx/enchanter/compare/v0.0.1...v0.1.0
+[0.0.1]: https://github.com/andrewthecodertx/enchanter/releases/tag/v0.0.1
