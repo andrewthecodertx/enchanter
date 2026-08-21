@@ -368,6 +368,23 @@ Stdio servers are auto-restarted on crash (up to 3 attempts). HTTP servers
 use the Streamable HTTP transport — they handle both direct JSON responses
 and SSE-streamed responses, with `Mcp-Session-Id` tracking.
 
+### Project overlays and MCP trust
+
+A project's `.enchanter/config.yaml` is untrusted input: a stdio MCP server
+is an arbitrary command that runs with your full privileges. Project overlays
+therefore only add MCP servers that your global config explicitly trusts:
+
+```yaml
+# ~/.enchanter/config.yaml
+security:
+  trusted_mcp_servers:
+    - my-project-server   # allow THIS project-defined server to start
+```
+
+Untrusted project servers are skipped with a loud warning naming the server
+and the key to add. The trust list can only ever be set in global config —
+project overlays cannot extend it.
+
 ## Security sandbox
 
 On Linux, Enchanter confines `exec_command` (shell execution) using Landlock,

@@ -66,6 +66,11 @@ model:
 #   # (old kernel, non-Linux), exec_command refuses by default. Set this true to
 #   # run the shell unsandboxed on such systems (escape hatch — use with care).
 #   allow_unsandboxed_exec: false
+#   # MCP servers that project overlays (.enchanter/config.yaml) may define.
+#   # Untrusted project servers are skipped with a warning (a stdio MCP server
+#   # is an arbitrary command running with your full privileges).
+#   trusted_mcp_servers:
+#     - my-trusted-project-server
 
 agent:
   # max_turns: 30                       # Max agent loop turns (0 = unlimited)

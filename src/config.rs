@@ -262,6 +262,14 @@ pub struct SecurityConfig {
     /// platforms where Landlock is unavailable.
     #[serde(default)]
     pub allow_unsandboxed_exec: bool,
+
+    /// MCP servers that project overlays (.enchanter/config.yaml) are allowed
+    /// to define. A project's config file is untrusted input: a stdio MCP
+    /// server is an arbitrary command that runs with the user's full
+    /// privileges, so overlays may only add servers explicitly trusted here.
+    /// Global config only — project overlays cannot extend this list.
+    #[serde(default)]
+    pub trusted_mcp_servers: Vec<String>,
 }
 
 impl SecurityConfig {
