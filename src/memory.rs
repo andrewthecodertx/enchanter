@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use crate::api::{LlmClient, Message};
 use crate::config::MemoryConfig;
 use crate::home;
+use crate::summary::truncate_chars;
 
 const ENTRY_DELIMITER: &str = "\n§\n";
 
@@ -241,11 +242,12 @@ impl MemoryStore {
     async fn summarize_entries(&self, client: &LlmClient, entries: &[String]) -> Result<String> {
         let entries_text = entries.join("\n---\n");
 
-        // Truncate if very long to avoid token limits
-        let truncated = if entries_text.len() > 12_000 {
-            &entries_text[..12_000]
+        // Truncate if very long to avoid token limits.
+        // Use truncate_chars to avoid UTF-8 boundary panics on multi-byte chars.
+        let truncated = if entries_text.chars().count() > 12_000 {
+            truncate_chars(&entries_text, 12_000)
         } else {
-            &entries_text
+            entries_text
         };
 
         let system_prompt = "You are a memory condenser. Your job is to summarize \
@@ -351,14 +353,33 @@ mod tests {
 
     #[test]
     fn total_entry_count() {
-        let store = MemoryStore {
-            user_entries: vec!["u1".to_string(), "u2".to_string()],
-            memory_entries: vec!["m1".to_string()],
-            summary: None,
-        };
-        assert_eq!(store.total_entry_count(), 3);
-    }
+            let store = MemoryStore {
+                user_entries: vec!["u1".to_string(), "u2".to_string()],
+                memory_entries: vec!["m1".to_string()],
+                summary: None,
+            };
+            assert_eq!(store.total_entry_count(), 3);
+        }
 
+        #[test]
+        fn truncate_chars_utf8_safe() {
+            // Multi-byte chars at the boundary must not panic
+            let cjk = "你好世界"; // 4 chars, 12 bytes
+            let truncated = crate::summary::truncate_chars(cjk, 2);
+            assert_eq!(truncated.chars().count(), 2);
+            assert!(!truncated.ends_with("…"));
+
+            let emoji = "😀😃😄"; // 3 chars, 12 bytes
+            let truncated = crate::summary::truncate_chars(emoji, 1);
+            assert_eq!(truncated.chars().count(), 1);
+            assert!(truncated.contains("😀"));
+
+            // Boundary exactly at multi-byte char
+            let mixed = "abc你好def"; // 10 chars
+            let truncated = crate::summary::truncate_chars(mixed, 5);
+            assert_eq!(truncated.chars().count(), 5);
+        }
+    }
     #[test]
     fn cap_under_max_no_change() {
         let store = MemoryStore {
@@ -375,5 +396,4 @@ mod tests {
         assert_eq!(store.memory_entries.len(), 10);
         let _ = &config; // verify it compiles
         let _ = &store;
-    }
 }
