@@ -258,7 +258,7 @@ mod tests {
         let s = "héllo wörld ✨ über";
         let out = truncate_chars(s, 5);
         assert!(out.starts_with("héllo"));
-        assert!(out.contains("truncated"));
+        assert_eq!(out.chars().count(), 5);
         // Short strings pass through untouched.
         assert_eq!(truncate_chars("hi", 10), "hi");
     }
