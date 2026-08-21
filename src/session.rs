@@ -231,38 +231,74 @@ impl Session {
     /// Convert recorded entries back into conversation messages for replay.
     pub fn entries_to_messages(entries: &[SessionEntry]) -> Vec<Message> {
         let mut messages = Vec::new();
-        for entry in entries {
-            match entry {
+        let mut i = 0;
+        
+        while i < entries.len() {
+            match &entries[i] {
                 SessionEntry::System { content } => {
-                    messages.push(Message::system(content));
+                    messages.push(Message::system(content.clone()));
+                    i += 1;
                 }
                 SessionEntry::User { content } => {
-                    messages.push(Message::user(content));
+                    messages.push(Message::user(content.clone()));
+                    i += 1;
                 }
                 SessionEntry::Assistant { content } => {
-                    messages.push(Message::assistant(content));
+                    messages.push(Message::assistant(content.clone()));
+                    i += 1;
                 }
-                SessionEntry::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                } => {
-                    let tc = crate::api::ToolCall {
-                        id: id.clone(),
-                        call_type: "function".to_string(),
-                        function: crate::api::ToolCallFunction {
-                            name: name.clone(),
-                            arguments: arguments.clone(),
-                        },
-                    };
-                    messages.push(Message::assistant_with_tools(vec![tc], None));
+                SessionEntry::ToolCall { .. } => {
+                    // Group consecutive ToolCall entries (and possibly following Assistant content)
+                    let mut tool_calls = Vec::new();
+                    let mut assistant_content = None;
+                    
+                    // Collect all consecutive ToolCall entries
+                    while i < entries.len() {
+                        match &entries[i] {
+                            SessionEntry::ToolCall { id, name, arguments } => {
+                                let tc = crate::api::ToolCall {
+                                    id: id.clone(),
+                                    call_type: "function".to_string(),
+                                    function: crate::api::ToolCallFunction {
+                                        name: name.clone(),
+                                        arguments: arguments.clone(),
+                                    },
+                                };
+                                tool_calls.push(tc);
+                                i += 1;
+                            }
+                            SessionEntry::Assistant { content } => {
+                                // If there's an Assistant entry right after the tool calls, 
+                                // include it as the content for this assistant message
+                                assistant_content = Some(content.clone());
+                                i += 1;
+                                break; // Stop collecting tool calls after seeing Assistant content
+                            }
+                            _ => {
+                                // Stop at any other entry type
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Create the assistant message with all collected tool calls
+                    if let Some(content) = assistant_content {
+                        messages.push(Message::assistant_with_tools(tool_calls, Some(content)));
+                    } else {
+                        messages.push(Message::assistant_with_tools(tool_calls, None));
+                    }
                 }
                 SessionEntry::ToolResult { id, content } => {
-                    messages.push(Message::tool_result(id, content));
+                    messages.push(Message::tool_result(id.clone(), content.clone()));
+                    i += 1;
                 }
-                SessionEntry::Meta { .. } => {} // Skip meta entries
+                SessionEntry::Meta { .. } => {
+                    // Skip meta entries
+                    i += 1;
+                }
             }
         }
+        
         messages
     }
 

@@ -191,10 +191,25 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
         }
     });
 
-    // SIGHUP — ignore (we're a daemon, terminal disconnect is expected)
-    unsafe {
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-    }
+    // SIGHUP — reload config/soul/memory/skills (like nginx)
+    let shutdown_hup = shutdown.clone();
+    let shutdown_notify_hup = shutdown_notify.clone();
+    let _hup_handle = tokio::spawn(async move {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(mut sig) => {
+                loop {
+                    sig.recv().await;
+                    eprintln!("\nReceived SIGHUP, reloading config...");
+                    // The main loop will check a reload flag
+                    shutdown_hup.store(true, Ordering::SeqCst);
+                    shutdown_notify_hup.notify_one();
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: could not install SIGHUP handler: {}", e);
+            }
+        }
+    });
 
     // Listen on Unix socket
     let listener = UnixListener::bind(&sock_path)

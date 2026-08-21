@@ -37,7 +37,7 @@
 //! output truncation approach and Claude Code's similar output limits.
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, Component};
 use tokio::process::Command;
 use tokio::time::Duration;
 use tokio::time::timeout;
@@ -88,6 +88,14 @@ fn resolve_and_validate(path_str: &str, allowed: &[PathBuf]) -> Result<PathBuf, 
             path
         }
     };
+
+    // Reject any path that contains '..' components to prevent directory traversal
+    if resolved.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!(
+            "Access denied: path '{}' contains '..' component",
+            path_str
+        ));
+    }
 
     if path_is_allowed(&resolved, allowed) {
         Ok(resolved)
@@ -638,6 +646,11 @@ fn tool_search_files(args: &Value, allowed_paths: &[PathBuf]) -> String {
         Some(p) => p,
         None => return "Error: missing required parameter 'pattern'".to_string(),
     };
+
+    // Reject patterns that contain path separators or '..' to prevent directory traversal
+    if pattern.contains('/') || pattern.contains('\\') || pattern.contains("..") {
+        return "Error: pattern must not contain '/', '\\\\', or '..'".to_string();
+    }
 
     let search_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let target = args
