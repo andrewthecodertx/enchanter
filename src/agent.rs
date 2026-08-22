@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::activity_log::{self, ActivityEvent, ApiCallGuard, ToolCallGuard};
 use crate::api::{LlmClient, Message};
-use crate::config::{Config, ResolvedModel};
+use crate::config::{Config, ResolvedModel, SecurityConfig};
 use crate::kstore::KnowledgeStore;
 use crate::mcp::McpManager;
 use crate::memory::MemoryStore;
@@ -729,6 +729,7 @@ impl AgentSession {
                             &mut self.mcp,
                             &self.config.allowed_paths(),
                             self.config.allow_unsandboxed_exec(),
+                            &self.config.security,
                         )
                         .await;
                         tool_guard.end(&output, None);
@@ -823,6 +824,7 @@ impl EventSink {
 }
 
 /// Dispatch a tool call — built-in tools first, then MCP.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_tool(
     name: &str,
     args: &Value,
@@ -831,6 +833,7 @@ async fn dispatch_tool(
     mcp: &mut McpManager,
     allowed_paths: &[PathBuf],
     allow_unsandboxed_exec: bool,
+    security: &SecurityConfig,
 ) -> String {
     let built_in_names = [
         "exec_command",
@@ -850,6 +853,7 @@ async fn dispatch_tool(
             kstore,
             allowed_paths,
             allow_unsandboxed_exec,
+            security,
         )
         .await
     } else if name.contains("__") {

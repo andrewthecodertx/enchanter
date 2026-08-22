@@ -42,6 +42,7 @@ use tokio::process::Command;
 use tokio::time::Duration;
 use tokio::time::timeout;
 
+use crate::config::SecurityConfig;
 use crate::kstore::KnowledgeStore;
 use crate::memory::MemoryStore;
 
@@ -371,9 +372,10 @@ pub async fn dispatch(
     kstore: &mut KnowledgeStore,
     allowed_paths: &[PathBuf],
     allow_unsandboxed_exec: bool,
+    security: &SecurityConfig,
 ) -> String {
     match name {
-        "exec_command" => tool_exec_command(args, allowed_paths, allow_unsandboxed_exec).await,
+        "exec_command" => tool_exec_command(args, allowed_paths, allow_unsandboxed_exec, security).await,
         "read_file" => tool_read_file(args, allowed_paths),
         "write_file" => tool_write_file(args, allowed_paths),
         "edit_file" => tool_edit_file(args, allowed_paths),
@@ -389,6 +391,7 @@ async fn tool_exec_command(
     args: &Value,
     allowed_paths: &[PathBuf],
     allow_unsandboxed: bool,
+    security: &SecurityConfig,
 ) -> String {
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
@@ -421,6 +424,10 @@ async fn tool_exec_command(
                 .env(
                     crate::sandbox::SANDBOX_PATHS_ENV,
                     crate::sandbox::encode_paths(allowed_paths),
+                )
+                .env(
+                    crate::sandbox::SANDBOX_PASSTHROUGH_ENV,
+                    security.sandbox_passthrough_env.join(","),
                 )
                 .current_dir(&cwd)
                 .output(),
@@ -1027,10 +1034,15 @@ fn tool_knowledge(args: &Value, kstore: &mut KnowledgeStore) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use crate::config::SecurityConfig;
 
     /// Broad allow-list for tests: permits any path so file/exec tools run.
     fn allowed() -> Vec<PathBuf> {
         vec![PathBuf::from("/")]
+    }
+
+    fn test_security() -> SecurityConfig {
+        SecurityConfig::default()
     }
 
     #[test]
@@ -1059,6 +1071,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(result.contains("Unknown tool"));
@@ -1074,6 +1087,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(result.contains("missing required"));
@@ -1092,6 +1106,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(write_result.contains("Wrote"));
@@ -1103,6 +1118,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(read_result.contains("hello world"));
@@ -1120,6 +1136,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(!result.contains("Error"));
@@ -1144,6 +1161,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
 
@@ -1159,6 +1177,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(edit_result.contains("Edited"));
@@ -1171,6 +1190,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(read_result.contains("world"));
@@ -1193,6 +1213,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
 
@@ -1207,6 +1228,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(edit_result.contains("2 times") || edit_result.contains("unique"));
@@ -1227,6 +1249,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
 
@@ -1242,6 +1265,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(edit_result.contains("2 occurrence"));
@@ -1263,6 +1287,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(result.contains("Cargo.toml"));
@@ -1281,6 +1306,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(add_result.contains("saved"));
@@ -1292,6 +1318,7 @@ mod tests {
             &mut KnowledgeStore::default(),
             &allowed(),
             true,
+            &test_security(),
         )
         .await;
         assert!(list_result.contains("rust 1.85"));

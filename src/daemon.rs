@@ -57,6 +57,24 @@ pub fn pid_path() -> PathBuf {
     home::enchanter_home().join("daemon.pid")
 }
 
+/// Restrict the daemon socket to owner read/write (0600).
+///
+/// The daemon carries the user's API key and filesystem access, so any other
+/// local user must not be able to connect and send Chat/Shutdown requests.
+/// A freshly bound socket inherits the process umask, which is often
+/// group- or world-accessible; this forces the restrictive mode.
+fn restrict_socket_perms(sock_path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting socket permissions {}", sock_path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = sock_path;
+    Ok(())
+}
+
 // ── Daemon server ──────────────────────────────────────────────
 
 /// Running daemon state.
@@ -214,6 +232,11 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
     // Listen on Unix socket
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding socket {}", sock_path.display()))?;
+    // Restrict the socket to its owner. The daemon carries the user's API key
+    // and filesystem access, so any other local user must not be able to
+    // connect (send Chat/Shutdown requests) — the socket inherits the
+    // process umask by default, which is often 0o002 (group-writable).
+    restrict_socket_perms(&sock_path)?;
 
     let idle_timeout =
         Duration::from_secs(idle_timeout_mins.unwrap_or(DEFAULT_IDLE_TIMEOUT_MINS) * 60);
@@ -880,5 +903,19 @@ mod tests {
         let path = pid_path();
         assert!(path.to_string_lossy().ends_with("daemon.pid"));
         assert!(path.to_string_lossy().contains(".enchanter"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_socket_perms_sets_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
+        std::fs::write(&sock, b"").unwrap();
+        // Start permissive, then restrict.
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)).unwrap();
+        restrict_socket_perms(&sock).unwrap();
+        let mode = std::fs::metadata(&sock).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "socket must be owner read/write only");
     }
 }

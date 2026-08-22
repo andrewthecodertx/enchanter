@@ -106,12 +106,11 @@ pub async fn generate_session_summary(client: &LlmClient, messages: &[Message]) 
 
 /// Truncate a string to at most `max` chars without splitting a UTF-8 code
 /// point (plain slicing like `&s[..n]` panics on a multibyte boundary).
-fn truncate_chars(s: &str, max: usize) -> String {
+pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        let truncated: String = s.chars().take(max).collect();
-        format!("{}…[truncated]", truncated)
+        s.chars().take(max).collect()
     }
 }
 
@@ -259,7 +258,7 @@ mod tests {
         let s = "héllo wörld ✨ über";
         let out = truncate_chars(s, 5);
         assert!(out.starts_with("héllo"));
-        assert!(out.contains("truncated"));
+        assert_eq!(out.chars().count(), 5);
         // Short strings pass through untouched.
         assert_eq!(truncate_chars("hi", 10), "hi");
     }

@@ -27,6 +27,10 @@ pub const SANDBOX_ARG: &str = "__sandboxed-exec";
 /// sandbox helper child.
 pub const SANDBOX_PATHS_ENV: &str = "ENCHANTER_SANDBOX_PATHS";
 
+/// Comma-separated environment variable names that are allowed to pass through
+/// the sandbox. Names are exact (no wildcards).
+pub const SANDBOX_PASSTHROUGH_ENV: &str = "ENCHANTER_SANDBOX_PASSTHROUGH";
+
 /// Encode allowed paths for transport to the helper child via env var.
 pub fn encode_paths(paths: &[PathBuf]) -> String {
     paths
@@ -59,6 +63,34 @@ pub fn run_sandboxed_child() -> anyhow::Result<()> {
     let paths = std::env::var(SANDBOX_PATHS_ENV)
         .map(|raw| decode_paths(&raw))
         .unwrap_or_default();
+
+    // Scrub environment: strip known secret-carrying vars unless explicitly
+    // allowed via ENCHANTER_SANDBOX_PASSTHROUGH.
+    let passthrough: std::collections::HashSet<String> = std::env::var(SANDBOX_PASSTHROUGH_ENV)
+        .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
+        .unwrap_or_default();
+
+    let secret_prefixes = [
+        "API_KEY", "APIKEY", "API_TOKEN", "APITOKEN", "ACCESS_TOKEN",
+        "SECRET", "SECRET_KEY", "SECRET_TOKEN", "PRIVATE_KEY",
+        "OAUTH", "BEARER", "JWT", "AUTH_TOKEN", "AUTHORIZATION",
+        "PASSWORD", "PASSWD", "PASSPHRASE", "CREDENTIAL",
+    ];
+
+    for (key, _) in std::env::vars().collect::<Vec<_>>() {
+        let upper = key.to_uppercase();
+        let is_secret = secret_prefixes.iter().any(|p| upper.contains(p));
+        let allowed = passthrough.contains(&key);
+        if is_secret && !allowed {
+            // SAFETY: This runs in the single-threaded re-exec child before the
+            // async runtime starts. No other threads exist, so removing env vars
+            // is safe. This is the standard pattern for scrubbing secrets before
+            // exec.
+            unsafe {
+                std::env::remove_var(&key);
+            }
+        }
+    }
 
     apply(&paths)?;
 
