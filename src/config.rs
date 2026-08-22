@@ -270,6 +270,14 @@ pub struct SecurityConfig {
     /// Global config only — project overlays cannot extend this list.
     #[serde(default)]
     pub trusted_mcp_servers: Vec<String>,
+
+    /// Environment variables that are allowed to pass through to the sandboxed
+    /// shell. By default, known secret-carrying variables (API keys, tokens,
+    /// secrets) are stripped. Add specific variable names here to allow them
+    /// through (e.g., a project-specific key like `FAL_KEY` for the fal MCP
+    /// server). Wildcard patterns are not supported; exact names only.
+    #[serde(default)]
+    pub sandbox_passthrough_env: Vec<String>,
 }
 
 impl SecurityConfig {

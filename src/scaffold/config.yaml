@@ -71,6 +71,11 @@ model:
 #   # is an arbitrary command running with your full privileges).
 #   trusted_mcp_servers:
 #     - my-trusted-project-server
+#   # Environment variables allowed to pass through to the sandboxed shell.
+#   # By default, known secret variables (API keys, tokens, secrets) are
+#   # stripped. Add specific variable names here to allow them through.
+#   sandbox_passthrough_env:
+#     - FAL_KEY
 
 agent:
   # max_turns: 30                       # Max agent loop turns (0 = unlimited)
