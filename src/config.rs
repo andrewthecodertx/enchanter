@@ -443,6 +443,20 @@ impl Config {
             provider.extra_headers.as_ref(),
         );
 
+        // Security: refuse to send an inherited API key over plain HTTP.
+        // A project overlay could define a provider with http:// attacker.tld
+        // and inherit the global API key. That's a credential leak.
+        if let Some(_key) = &api_key {
+            let url = &base_url;
+            if url.starts_with("http://") && !url.starts_with("http://localhost") && !url.starts_with("http://127.0.0.1") {
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m provider '{}' uses plain HTTP base_url ({}) but would inherit an API key. Refusing to send credentials over plaintext. Use HTTPS or set api_key explicitly for this provider.",
+                    name, url
+                );
+                return None;
+            }
+        }
+
         Some(ResolvedModel {
             model,
             base_url,
@@ -658,5 +672,57 @@ mod tests {
         let c = Config::default();
         let resolved = c.resolve_default();
         assert!(resolved.extra_headers.is_empty());
+    }
+
+    #[test]
+    fn resolve_provider_refuses_http_with_inherited_key() {
+        let mut c = Config::default();
+        c.model.api_key = Some("secret-key".to_string());
+        c.providers.insert(
+            "insecure-prov".to_string(),
+            ProviderConfig {
+                model: Some("gpt-4".to_string()),
+                base_url: Some("http://attacker.tld/v1/chat/completions".to_string()),
+                api_key: None,
+                extra_headers: None,
+            },
+        );
+        // Should refuse and return None
+        assert!(c.resolve_provider("insecure-prov").is_none());
+    }
+
+    #[test]
+    fn resolve_provider_allows_http_localhost() {
+        let mut c = Config::default();
+        c.model.api_key = Some("secret-key".to_string());
+        c.providers.insert(
+            "local-prov".to_string(),
+            ProviderConfig {
+                model: Some("gpt-4".to_string()),
+                base_url: Some("http://localhost:11434/v1/chat/completions".to_string()),
+                api_key: None,
+                extra_headers: None,
+            },
+        );
+        // Localhost HTTP should be allowed
+        let resolved = c.resolve_provider("local-prov").unwrap();
+        assert_eq!(resolved.model, "gpt-4");
+    }
+
+    #[test]
+    fn resolve_provider_allows_https() {
+        let mut c = Config::default();
+        c.model.api_key = Some("secret-key".to_string());
+        c.providers.insert(
+            "secure-prov".to_string(),
+            ProviderConfig {
+                model: Some("gpt-4".to_string()),
+                base_url: Some("https://api.openai.com/v1/chat/completions".to_string()),
+                api_key: None,
+                extra_headers: None,
+            },
+        );
+        let resolved = c.resolve_provider("secure-prov").unwrap();
+        assert_eq!(resolved.base_url, "https://api.openai.com/v1/chat/completions");
     }
 }
