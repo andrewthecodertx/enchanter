@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::activity_log::{self, ActivityEvent, ApiCallGuard, ToolCallGuard};
-use crate::api::{LlmClient, Message};
+use crate::api::{LlmClient, Message, TokenUsage};
 use crate::config::{Config, ResolvedModel, SecurityConfig};
 use crate::kstore::KnowledgeStore;
 use crate::mcp::McpManager;
@@ -95,6 +95,9 @@ pub struct AgentSession {
     /// file or re-listing the same directory multiple times, cutting token
     /// waste from duplicate tool calls.
     pub tool_cache: ToolResultCache,
+    /// Cumulative token usage reported by the provider across this session's
+    /// API calls (estimated when the provider omits usage data).
+    pub token_usage: TokenUsage,
 }
 
 /// Runtime options for an agent session, separate from the loaded core state.
@@ -192,6 +195,7 @@ impl AgentSession {
             no_tools,
             system_override,
             tool_cache: ToolResultCache::default(),
+            token_usage: TokenUsage::default(),
         })
     }
 
@@ -275,6 +279,7 @@ impl AgentSession {
             no_tools,
             system_override,
             tool_cache: ToolResultCache::default(),
+            token_usage: TokenUsage::default(),
         })
     }
 
@@ -331,6 +336,12 @@ impl AgentSession {
     /// Includes the system prompt and all conversation history.
     pub fn estimated_context_tokens(&self) -> u64 {
         estimate_messages_tokens(&self.messages)
+    }
+
+    /// Cumulative token usage as reported by the provider across this
+    /// session's API calls (estimated when providers omit usage data).
+    pub fn token_usage(&self) -> TokenUsage {
+        self.token_usage
     }
 
     /// Run one agent loop: call model, handle tool_calls, repeat until done or max_turns.
@@ -680,6 +691,12 @@ impl AgentSession {
                 }
             };
             let result = result.unwrap();
+
+            if let Some(u) = result.usage {
+                self.token_usage.prompt_tokens += u.prompt_tokens;
+                self.token_usage.completion_tokens += u.completion_tokens;
+                self.token_usage.total_tokens += u.total_tokens;
+            }
 
             if result.has_tool_calls() {
                 let tool_calls = result.tool_calls.unwrap();

@@ -327,6 +327,15 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
                     agent.resolved.model
                 );
             }
+            let u = agent.token_usage();
+            if u.total_tokens > 0 {
+                println!(
+                    "── session: {} in / {} out / {} total (provider-reported) ──",
+                    status_bar::fmt_tokens(u.prompt_tokens),
+                    status_bar::fmt_tokens(u.completion_tokens),
+                    status_bar::fmt_tokens(u.total_tokens)
+                );
+            }
         }
         "/undo" => {
             if agent.undo() {

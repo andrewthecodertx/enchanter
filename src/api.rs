@@ -114,10 +114,20 @@ struct ToolCallAccum {
 
 // ── Result type for chat calls ──────────────────────────────────
 
+/// Token usage as reported by the provider. Some providers omit this,
+/// especially on streaming responses; callers should fall back to estimates.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
 #[derive(Debug)]
 pub struct ChatResult {
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
+    pub usage: Option<TokenUsage>,
 }
 
 impl ChatResult {
@@ -142,6 +152,7 @@ struct ChatRequest<'a> {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    usage: Option<RawUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,17 +166,31 @@ struct ResponseMessage {
     tool_calls: Option<Vec<ToolCall>>,
 }
 
+/// Wire format for the `usage` object; all fields optional since some
+/// providers return partial or missing counts.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct Usage {
+pub struct RawUsage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
 }
 
+impl RawUsage {
+    fn to_usage(&self) -> TokenUsage {
+        let p = self.prompt_tokens.unwrap_or(0);
+        let c = self.completion_tokens.unwrap_or(0);
+        TokenUsage {
+            prompt_tokens: p,
+            completion_tokens: c,
+            total_tokens: self.total_tokens.unwrap_or(p + c),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct StreamDelta {
     choices: Vec<StreamChoice>,
+    usage: Option<RawUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -290,6 +315,7 @@ impl LlmClient {
         let mut full_content = String::new();
         let mut tool_calls_accum: std::collections::BTreeMap<u64, ToolCallAccum> =
             std::collections::BTreeMap::new();
+        let mut streamed_usage: Option<TokenUsage> = None;
         let mut stream = response.bytes_stream();
         use futures_util::StreamExt;
 
@@ -337,6 +363,9 @@ impl LlmClient {
                     }
 
                     if let Ok(delta) = serde_json::from_str::<StreamDelta>(data) {
+                        if let Some(u) = &delta.usage {
+                            streamed_usage = Some(u.to_usage());
+                        }
                         for choice in &delta.choices {
                             if let Some(content) = &choice.delta.content {
                                 full_content.push_str(content);
@@ -392,6 +421,23 @@ impl LlmClient {
             Some(calls)
         };
 
+        // If the provider didn't report usage, estimate it: prompt side from
+        // the request messages (~4 chars/token), completion side from what we
+        // actually received. Marked as an estimate by the caller context.
+        let usage = streamed_usage.or_else(|| {
+            if full_content.is_empty() && tool_calls_accum.is_empty() {
+                None
+            } else {
+                let prompt = crate::agent::estimate_messages_tokens(messages);
+                let completion = (full_content.len() as u64 + 3) / 4;
+                Some(TokenUsage {
+                    prompt_tokens: prompt,
+                    completion_tokens: completion,
+                    total_tokens: prompt + completion,
+                })
+            }
+        });
+
         let content = if full_content.is_empty() {
             None
         } else {
@@ -401,6 +447,7 @@ impl LlmClient {
         Ok(ChatResult {
             content,
             tool_calls,
+            usage,
         })
     }
 
@@ -461,10 +508,12 @@ impl LlmClient {
         let choice = chat_response.choices.first();
         let content = choice.and_then(|c| c.message.content.clone());
         let tool_calls = choice.and_then(|c| c.message.tool_calls.clone());
+        let usage = chat_response.usage.as_ref().map(RawUsage::to_usage);
 
         Ok(ChatResult {
             content,
             tool_calls,
+            usage,
         })
     }
 }
@@ -523,5 +572,35 @@ mod tests {
         let parsed: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.role, "tool");
         assert_eq!(parsed.tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn usage_parsing_variants() {
+        // Full usage object
+        let u: RawUsage = serde_json::from_str(
+            r#"{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}"#,
+        )
+        .unwrap();
+        let t = u.to_usage();
+        assert_eq!(
+            (t.prompt_tokens, t.completion_tokens, t.total_tokens),
+            (10, 5, 15)
+        );
+
+        // Missing total -> derived from prompt + completion
+        let u: RawUsage =
+            serde_json::from_str(r#"{"prompt_tokens": 7, "completion_tokens": 3}"#).unwrap();
+        let t = u.to_usage();
+        assert_eq!(t.total_tokens, 10);
+
+        // Empty usage object -> all zeros (treated as absent by callers via total==0)
+        let u: RawUsage = serde_json::from_str("{}").unwrap();
+        let t = u.to_usage();
+        assert_eq!(t.total_tokens, 0);
+
+        // ChatResponse without usage field -> None
+        let resp: ChatResponse =
+            serde_json::from_str(r#"{"choices": [{"message": {"content": "hi"}}]}"#).unwrap();
+        assert!(resp.usage.is_none());
     }
 }
