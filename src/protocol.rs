@@ -55,6 +55,21 @@ pub enum Event {
         removed_messages: usize,
         budget_tokens: u64,
     },
+    /// Token usage for the completed turn, emitted before Done by the daemon.
+    /// prompt + completion approximates the post-turn context window size.
+    Usage {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+        /// Estimated context footprint (used as fallback when the provider
+        /// omits usage data).
+        estimated_context_tokens: u64,
+        model: String,
+        /// Effective budget (tokens): config-declared context_window or the
+        /// built-in table. None if unknown for this model.
+        #[serde(default)]
+        context_budget: Option<u64>,
+    },
     /// The response is complete.
     Done,
     /// Response to a Ping.

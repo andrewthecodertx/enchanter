@@ -167,6 +167,14 @@ pub fn model_context_size(model: &str) -> Option<u64> {
     None
 }
 
+/// Effective context budget for a resolved model: config-declared
+/// `context_window` wins over the built-in model table.
+pub fn context_budget(resolved: &crate::config::ResolvedModel) -> Option<u64> {
+    resolved
+        .context_window
+        .or_else(|| model_context_size(&resolved.model))
+}
+
 /// Format a token count for display: "45k" for thousands, "1.2M" for millions.
 pub fn fmt_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {

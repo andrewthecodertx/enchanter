@@ -253,6 +253,7 @@ pub async fn run(args: Args) -> Result<()> {
                 base_url: default.base_url,
                 api_key: default.api_key,
                 extra_headers: default.extra_headers,
+                context_window: default.context_window,
             }
         })
     } else {
@@ -414,6 +415,23 @@ pub async fn run(args: Args) -> Result<()> {
         {
             println!("{}", text);
         }
+        // One-shot token report to stderr so piped stdout stays clean.
+        let budget = crate::status_bar::context_budget(&agent.resolved);
+        let used = agent.last_usage().map(|u| u.prompt_tokens + u.completion_tokens);
+        let used_str = match used {
+            Some(n) => format!("{}", crate::status_bar::fmt_tokens(n)),
+            None => format!("~{}", crate::status_bar::fmt_tokens(agent.estimated_context_tokens())),
+        };
+        let line = match budget {
+            Some(b) => format!(
+                "── tokens: {} / {} ({}%) ──",
+                used_str,
+                crate::status_bar::fmt_tokens(b),
+                ((used.unwrap_or(0) as f64 / b as f64) * 100.0).round() as u64
+            ),
+            None => format!("── tokens: {} (budget unknown for {}) ──", used_str, agent.resolved.model),
+        };
+        eprintln!("{}", line);
         agent.shutdown_mcp().await;
         activity_log::log(ActivityEvent::SessionEnd {
             session_id: agent.session.id().to_string(),

@@ -430,6 +430,30 @@ async fn handle_connection(
                                 break; // Client disconnected
                             }
                         }
+                        // Report this turn's token usage before Done.
+                        let est = agent.estimated_context_tokens();
+                        let budget = crate::status_bar::context_budget(&agent.resolved);
+                        let usage_event = match agent.last_usage() {
+                            Some(u) => Event::Usage {
+                                prompt_tokens: u.prompt_tokens,
+                                completion_tokens: u.completion_tokens,
+                                total_tokens: u.total_tokens,
+                                estimated_context_tokens: est,
+                                model: agent.resolved.model.clone(),
+                                context_budget: budget,
+                            },
+                            None => Event::Usage {
+                                prompt_tokens: est.saturating_sub(100),
+                                completion_tokens: 0,
+                                total_tokens: 0,
+                                estimated_context_tokens: est,
+                                model: agent.resolved.model.clone(),
+                                context_budget: budget,
+                            },
+                        };
+                        if let Ok(jsonl) = usage_event.to_jsonl() {
+                            let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
+                        }
                     }
                     Err(e) => {
                         let err_event = Event::Error {
@@ -863,6 +887,29 @@ pub async fn chat_via_daemon(
                             "\n  {} Compacted {} earlier message(s) to stay within the context budget (~{} tokens).",
                             "⟡".dimmed(), removed_messages, budget_tokens
                         );
+                    }
+                    Event::Usage { prompt_tokens, completion_tokens, total_tokens, estimated_context_tokens: est, model, context_budget: budget } => {
+                        let budget = budget.or_else(|| crate::status_bar::model_context_size(&model));
+                        let used = if total_tokens > 0 {
+                            prompt_tokens + completion_tokens
+                        } else {
+                            est
+                        };
+                        let used_str = if total_tokens > 0 {
+                            crate::status_bar::fmt_tokens(used)
+                        } else {
+                            format!("~{}", crate::status_bar::fmt_tokens(used))
+                        };
+                        let line = match budget {
+                            Some(b) => format!(
+                                "── tokens: {} / {} ({}%) ──",
+                                used_str,
+                                crate::status_bar::fmt_tokens(b),
+                                ((used as f64 / b as f64) * 100.0).round() as u64
+                            ),
+                            None => format!("── tokens: {} (budget unknown for {}) ──", used_str, model),
+                        };
+                        eprintln!("{}", line);
                     }
                     Event::Done
                         if !full_response.is_empty() => {

@@ -153,7 +153,7 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
 fn draw_status_bar(agent: &AgentSession) {
     let tokens = agent.estimated_context_tokens();
     let model = &agent.resolved.model;
-    let budget = status_bar::model_context_size(model);
+    let budget = status_bar::context_budget(&agent.resolved);
     let session_id = agent.session.id().to_string();
     status_bar::print_bar(model, tokens, budget, &session_id);
 }
@@ -265,7 +265,7 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
                     .map_or("unlimited".to_string(), |n| n.to_string()),
                 info.soft_limit.map_or("n/a".to_string(), |n| n.to_string())
             );
-            let budget = status_bar::model_context_size(&agent.resolved.model);
+            let budget = status_bar::context_budget(&agent.resolved);
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 println!(
@@ -311,7 +311,7 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
         }
         "/ctx" | "/context" => {
             let tokens = agent.estimated_context_tokens();
-            let budget = status_bar::model_context_size(&agent.resolved.model);
+            let budget = status_bar::context_budget(&agent.resolved);
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 println!(

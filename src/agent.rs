@@ -98,6 +98,9 @@ pub struct AgentSession {
     /// Cumulative token usage reported by the provider across this session's
     /// API calls (estimated when the provider omits usage data).
     pub token_usage: TokenUsage,
+    /// Usage from the most recent API call, if the provider reported it.
+    /// prompt + completion approximates the current context window size.
+    last_usage: Option<TokenUsage>,
 }
 
 /// Runtime options for an agent session, separate from the loaded core state.
@@ -196,6 +199,7 @@ impl AgentSession {
             system_override,
             tool_cache: ToolResultCache::default(),
             token_usage: TokenUsage::default(),
+            last_usage: None,
         })
     }
 
@@ -280,6 +284,7 @@ impl AgentSession {
             system_override,
             tool_cache: ToolResultCache::default(),
             token_usage: TokenUsage::default(),
+            last_usage: None,
         })
     }
 
@@ -342,6 +347,13 @@ impl AgentSession {
     /// session's API calls (estimated when providers omit usage data).
     pub fn token_usage(&self) -> TokenUsage {
         self.token_usage
+    }
+
+    /// Usage from the most recent API call. prompt + completion approximates
+    /// the current context window size (provider-reported, more accurate than
+    /// estimated_context_tokens).
+    pub fn last_usage(&self) -> Option<TokenUsage> {
+        self.last_usage
     }
 
     /// Run one agent loop: call model, handle tool_calls, repeat until done or max_turns.
@@ -500,6 +512,7 @@ impl AgentSession {
                 base_url: default.base_url,
                 api_key: default.api_key,
                 extra_headers: default.extra_headers,
+                context_window: default.context_window,
             }
         });
 
@@ -693,6 +706,7 @@ impl AgentSession {
             let result = result.unwrap();
 
             if let Some(u) = result.usage {
+                self.last_usage = Some(u);
                 self.token_usage.prompt_tokens += u.prompt_tokens;
                 self.token_usage.completion_tokens += u.completion_tokens;
                 self.token_usage.total_tokens += u.total_tokens;
