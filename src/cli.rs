@@ -318,6 +318,9 @@ pub async fn run(args: Args) -> Result<()> {
         )?
     };
 
+    // Best-effort: query the provider for real context window sizes.
+    agent.refresh_api_context_size().await;
+
     // For new sessions, append the system prompt to the JSONL. For resumed
     // sessions, the old entries are already on disk — don't re-append the
     // system prompt (it would duplicate).
@@ -416,7 +419,7 @@ pub async fn run(args: Args) -> Result<()> {
             println!("{}", text);
         }
         // One-shot token report to stderr so piped stdout stays clean.
-        let budget = crate::status_bar::context_budget(&agent.resolved);
+        let budget = agent.context_budget();
         let used = agent.last_usage().map(|u| u.prompt_tokens + u.completion_tokens);
         let used_str = match used {
             Some(n) => format!("{}", crate::status_bar::fmt_tokens(n)),

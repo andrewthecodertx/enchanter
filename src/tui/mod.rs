@@ -11,7 +11,7 @@
 //! stored in an Option — None while a background task owns it, restored when
 //! the task completes and returns it via JoinHandle.
 
-pub mod model_info;
+
 pub mod render;
 pub mod state;
 
@@ -81,7 +81,8 @@ pub async fn run_tui(agent: AgentSession) -> Result<AgentSession> {
     let (info_tx, mut info_rx) =
         mpsc::channel::<std::collections::HashMap<String, state::ModelContextInfo>>(1);
     tokio::spawn(async move {
-        let info = model_info::fetch_model_context_info(&base_url, api_key.as_deref()).await;
+        let info =
+            crate::model_info::fetch_model_context_info(&base_url, api_key.as_deref()).await;
         let _ = info_tx.send(info).await;
     });
 

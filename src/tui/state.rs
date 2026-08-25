@@ -192,21 +192,8 @@ pub struct SessionEntry {
 }
 
 /// Context info queried from the provider's /models endpoint.
-#[derive(Debug, Clone, Default)]
-pub struct ModelContextInfo {
-    pub context_size: Option<u64>,
-    #[expect(dead_code)]
-    pub source: ContextSource,
-}
-
-#[derive(Debug, Clone, Default)]
-pub enum ContextSource {
-    #[default]
-    Hardcoded,
-    ApiQuery,
-    #[expect(dead_code)]
-    Config,
-}
+/// Re-exported from the shared model_info module (used by REPL/CLI too).
+pub use crate::model_info::ModelContextInfo;
 
 /// All state for the TUI.
 pub struct TuiState {

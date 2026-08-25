@@ -101,6 +101,9 @@ pub struct AgentSession {
     /// Usage from the most recent API call, if the provider reported it.
     /// prompt + completion approximates the current context window size.
     last_usage: Option<TokenUsage>,
+    /// Context window size reported by the provider's /models endpoint,
+    /// if queried successfully. Layered under config-declared context_window.
+    api_context_size: Option<u64>,
 }
 
 /// Runtime options for an agent session, separate from the loaded core state.
@@ -200,6 +203,7 @@ impl AgentSession {
             tool_cache: ToolResultCache::default(),
             token_usage: TokenUsage::default(),
             last_usage: None,
+            api_context_size: None,
         })
     }
 
@@ -285,6 +289,7 @@ impl AgentSession {
             tool_cache: ToolResultCache::default(),
             token_usage: TokenUsage::default(),
             last_usage: None,
+            api_context_size: None,
         })
     }
 
@@ -354,6 +359,37 @@ impl AgentSession {
     /// estimated_context_tokens).
     pub fn last_usage(&self) -> Option<TokenUsage> {
         self.last_usage
+    }
+
+    /// Query the provider's /models endpoint for this model's context window.
+    /// Best-effort: on failure the built-in table remains the fallback.
+    pub async fn refresh_api_context_size(&mut self) {
+        let info = crate::model_info::fetch_model_context_info(
+            &self.resolved.base_url,
+            self.resolved.api_key.as_deref(),
+        )
+        .await;
+        if let Some(info) = info.get(&self.resolved.model) {
+            self.api_context_size = info.context_size;
+        }
+    }
+
+    /// Effective context budget for the current model:
+    /// config-declared context_window > provider-reported > built-in table.
+    pub fn context_budget(&self) -> Option<u64> {
+        self.budget_with_source().map(|(b, _)| b)
+    }
+
+    /// Effective budget plus where the number came from.
+    pub fn budget_with_source(&self) -> Option<(u64, crate::model_info::ContextSource)> {
+        if let Some(cw) = self.resolved.context_window {
+            return Some((cw, crate::model_info::ContextSource::Config));
+        }
+        if let Some(api) = self.api_context_size {
+            return Some((api, crate::model_info::ContextSource::ApiQuery));
+        }
+        crate::status_bar::model_context_size(&self.resolved.model)
+            .map(|b| (b, crate::model_info::ContextSource::BuiltinTable))
     }
 
     /// Run one agent loop: call model, handle tool_calls, repeat until done or max_turns.

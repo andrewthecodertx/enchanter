@@ -153,7 +153,7 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
 fn draw_status_bar(agent: &AgentSession) {
     let tokens = agent.estimated_context_tokens();
     let model = &agent.resolved.model;
-    let budget = status_bar::context_budget(&agent.resolved);
+    let budget = agent.context_budget();
     let session_id = agent.session.id().to_string();
     status_bar::print_bar(model, tokens, budget, &session_id);
 }
@@ -265,7 +265,7 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
                     .map_or("unlimited".to_string(), |n| n.to_string()),
                 info.soft_limit.map_or("n/a".to_string(), |n| n.to_string())
             );
-            let budget = status_bar::context_budget(&agent.resolved);
+            let budget = agent.context_budget();
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 println!(
@@ -311,7 +311,7 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
         }
         "/ctx" | "/context" => {
             let tokens = agent.estimated_context_tokens();
-            let budget = status_bar::context_budget(&agent.resolved);
+            let budget = agent.context_budget();
             if let Some(b) = budget {
                 let pct = ((tokens as f64 / b as f64) * 100.0) as u8;
                 println!(
@@ -326,6 +326,18 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
                     status_bar::fmt_tokens(tokens),
                     agent.resolved.model
                 );
+            }
+            match agent.budget_with_source() {
+                Some((_, crate::model_info::ContextSource::Config)) => {
+                    println!("── budget source: config.yaml (context_window) ──");
+                }
+                Some((_, crate::model_info::ContextSource::ApiQuery)) => {
+                    println!("── budget source: provider /models query ──");
+                }
+                Some((_, crate::model_info::ContextSource::BuiltinTable)) => {
+                    println!("── budget source: built-in table (may be stale) ──");
+                }
+                None => {}
             }
             let u = agent.token_usage();
             if u.total_tokens > 0 {

@@ -70,6 +70,7 @@ mod home;
 mod kstore;
 mod mcp;
 mod memory;
+mod model_info;
 mod overlay;
 mod prompt;
 mod protocol;

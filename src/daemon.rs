@@ -141,6 +141,9 @@ pub async fn run_daemon(idle_timeout_mins: Option<u64>) -> Result<()> {
         SessionOptions::default(), // streaming + tools enabled, no system override
     )?;
 
+    // Best-effort: query the provider for real context window sizes.
+    agent.refresh_api_context_size().await;
+
     agent.session.append(&agent.messages[0])?;
 
     // Cap + summarize memory if needed
@@ -432,7 +435,7 @@ async fn handle_connection(
                         }
                         // Report this turn's token usage before Done.
                         let est = agent.estimated_context_tokens();
-                        let budget = crate::status_bar::context_budget(&agent.resolved);
+                        let budget = agent.context_budget();
                         let usage_event = match agent.last_usage() {
                             Some(u) => Event::Usage {
                                 prompt_tokens: u.prompt_tokens,

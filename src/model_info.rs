@@ -12,7 +12,22 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::tui::state::{ContextSource, ModelContextInfo};
+/// Context window info for a model and where it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelContextInfo {
+    pub context_size: Option<u64>,
+    pub source: ContextSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSource {
+    /// Declared in config.yaml (context_window).
+    Config,
+    /// Queried from the provider's /models endpoint.
+    ApiQuery,
+    /// Built-in MODEL_CONTEXT_SIZES table.
+    BuiltinTable,
+}
 
 /// Fetch model metadata from a provider and extract context window sizes.
 ///
