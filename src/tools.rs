@@ -1146,9 +1146,10 @@ mod tests {
     #[tokio::test]
     async fn list_directory_works() {
         let mut mem = MemoryStore::default();
+        let tmp = std::env::temp_dir().to_string_lossy().to_string();
         let result = dispatch(
             "list_directory",
-            &json!({"path": "/tmp"}),
+            &json!({"path": tmp}),
             &mut mem,
             &mut KnowledgeStore::default(),
             &allowed(),
