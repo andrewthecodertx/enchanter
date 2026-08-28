@@ -1043,7 +1043,19 @@ mod tests {
 
     /// Broad allow-list for tests: permits any path so file/exec tools run.
     fn allowed() -> Vec<PathBuf> {
-        vec![PathBuf::from("/")]
+        // Root of the current filesystem so tests can touch temp files and CWD.
+        // On Unix this is `/`; on Windows it's the drive root of CWD (e.g. `C:\`),
+        // which `starts_with` matching requires for temp-dir paths.
+        #[cfg(unix)]
+        {
+            vec![PathBuf::from("/")]
+        }
+        #[cfg(windows)]
+        {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let root = cwd.ancestors().last().unwrap_or(&cwd).to_path_buf();
+            vec![root]
+        }
     }
 
     fn test_security() -> SecurityConfig {
