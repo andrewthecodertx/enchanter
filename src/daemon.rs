@@ -628,9 +628,10 @@ pub fn spawn_daemon(idle_timeout_mins: Option<u64>) -> Result<u32> {
     let mut pipe_fds: [std::os::fd::RawFd; 2] = [0, 0];
     unsafe {
         if libc::pipe(pipe_fds.as_mut_ptr()) != 0 {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             return Err(anyhow::anyhow!(
                 "failed to create pipe for daemon PID: errno {}",
-                *libc::__errno_location()
+                errno
             ));
         }
     }
