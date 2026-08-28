@@ -88,15 +88,14 @@ pub enum Event {
 
 // ── Serialization helpers ──────────────────────────────────────
 
+#[cfg(unix)]
 impl Request {
     /// Serialize this request as a single JSONL line.
-    #[cfg(unix)]
     pub fn to_jsonl(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string(self)?)
     }
 
     /// Deserialize a request from a JSONL line.
-    #[cfg(unix)]
     pub fn from_jsonl(line: &str) -> anyhow::Result<Self> {
         Ok(serde_json::from_str(line)?)
     }
