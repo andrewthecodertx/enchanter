@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 // ── Request types ──────────────────────────────────────────────
 
 /// A request from the CLI client to the daemon.
+#[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
@@ -89,11 +90,13 @@ pub enum Event {
 
 impl Request {
     /// Serialize this request as a single JSONL line.
+    #[cfg(unix)]
     pub fn to_jsonl(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string(self)?)
     }
 
     /// Deserialize a request from a JSONL line.
+    #[cfg(unix)]
     pub fn from_jsonl(line: &str) -> anyhow::Result<Self> {
         Ok(serde_json::from_str(line)?)
     }
@@ -117,6 +120,7 @@ impl Event {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn chat_request_roundtrip() {
         let req = Request::Chat {
@@ -149,6 +153,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn chat_request_minimal_roundtrip() {
         let req = Request::Chat {
@@ -182,6 +187,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn ping_request_roundtrip() {
         let req = Request::Ping;
@@ -190,6 +196,7 @@ mod tests {
         assert!(matches!(decoded, Request::Ping));
     }
 
+    #[cfg(unix)]
     #[test]
     fn status_request_roundtrip() {
         let req = Request::Status;
@@ -198,6 +205,7 @@ mod tests {
         assert!(matches!(decoded, Request::Status));
     }
 
+    #[cfg(unix)]
     #[test]
     fn shutdown_request_roundtrip() {
         let req = Request::Shutdown;
@@ -358,6 +366,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn all_request_types_from_raw_json() {
         let cases = [

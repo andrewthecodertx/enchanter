@@ -464,6 +464,8 @@ impl AgentSession {
 
     /// Start a chat, blocking until the entire agent loop completes.
     /// All events are buffered in the returned receiver — no real-time streaming.
+    /// Daemon-only (Unix); web/REPL use `chat_events_spawned`.
+    #[cfg(unix)]
     pub async fn chat_events(
         &mut self,
         user_prompt: &str,

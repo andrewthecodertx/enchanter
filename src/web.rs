@@ -116,6 +116,7 @@ impl IntoResponse for WebError {
 
 /// Run the web server until the process exits (or the listener fails).
 #[expect(clippy::too_many_arguments)]
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub async fn serve(
     agent: AgentSession,
     config: Config,

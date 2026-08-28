@@ -40,6 +40,7 @@ pub fn encode_paths(paths: &[PathBuf]) -> String {
         .join("\n")
 }
 
+#[cfg(unix)]
 fn decode_paths(raw: &str) -> Vec<PathBuf> {
     raw.lines()
         .filter(|l| !l.is_empty())
@@ -225,6 +226,7 @@ pub fn is_supported() -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub fn apply(_allowed_paths: &[PathBuf]) -> anyhow::Result<()> {
     anyhow::bail!("filesystem sandbox is only available on Linux (Landlock)")
 }
