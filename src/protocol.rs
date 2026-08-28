@@ -101,6 +101,7 @@ impl Request {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl Event {
     /// Serialize this event as a single JSONL line.
     pub fn to_jsonl(&self) -> anyhow::Result<String> {
