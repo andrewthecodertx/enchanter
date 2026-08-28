@@ -137,6 +137,7 @@ pub struct SessionInfo {
     pub mcp_servers: Vec<String>,
     pub skill_count: usize,
     pub session_id: String,
+    pub session_title: Option<String>,
 }
 
 impl AgentSession {
@@ -339,6 +340,7 @@ impl AgentSession {
                 .collect(),
             skill_count: self.skills.skills.len(),
             session_id: self.session.id().to_string(),
+            session_title: self.session.title().map(String::from),
         }
     }
 

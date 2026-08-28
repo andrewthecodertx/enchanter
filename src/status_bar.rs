@@ -167,6 +167,76 @@ pub fn model_context_size(model: &str) -> Option<u64> {
     None
 }
 
+/// Approximate list prices for a model, in USD per 1M tokens (input, output).
+/// Prefix-matched the same way as MODEL_CONTEXT_SIZES so partial names resolve.
+/// These are public list prices and may drift; treat the /cost figure as an
+/// estimate, not a bill. Models absent from this table report cost as "unknown".
+const MODEL_PRICES: &[(&str, f64, f64)] = &[
+    // OpenAI — per-1M-token list price (input, output)
+    ("gpt-4.1", 2.00, 8.00),
+    ("gpt-4.1-mini", 0.40, 1.60),
+    ("gpt-4.1-nano", 0.10, 0.40),
+    ("gpt-4o-mini", 0.15, 0.60),
+    ("gpt-4o", 2.50, 10.00),
+    ("o3", 2.00, 8.00),
+    ("o3-mini", 1.10, 4.40),
+    ("o4-mini", 1.10, 4.40),
+    // Anthropic (via proxy)
+    ("claude-3.5-sonnet", 3.00, 15.00),
+    ("claude-3-opus", 15.00, 75.00),
+    ("claude-3-haiku", 0.25, 1.25),
+    ("claude-sonnet-4", 3.00, 15.00),
+    // Google
+    ("gemini-2.5-pro", 1.25, 10.00),
+    ("gemini-2.5-flash", 0.30, 2.50),
+    ("gemini-2.0-flash", 0.10, 0.40),
+    // Meta
+    ("llama-3.3-70b", 0.59, 0.79),
+    ("llama-3.1-405b", 3.00, 3.75),
+    ("llama-3.1-70b", 0.59, 0.79),
+    // DeepSeek (OpenRouter list price; v4-flash is an estimate in v3 family range)
+    ("deepseek-r1", 0.55, 2.19),
+    ("deepseek-v4", 0.30, 0.90),
+    ("deepseek-v3", 0.27, 1.10),
+    // Perplexity
+    ("sonar", 1.00, 2.00),
+    // Qwen
+    ("qwen3-235b", 0.50, 0.80),
+    ("qwen3-30b", 0.32, 0.48),
+];
+
+/// Look up per-1M-token list prices (input, output) for a model, if known.
+/// Prefix-matched, case-insensitive — the longest matching prefix wins so
+/// "gpt-4.1-mini" resolves to its own price, not "gpt-4.1". For
+/// provider-prefixed names (OpenRouter style, e.g. "deepseek/deepseek-v4-flash"),
+/// the segment after the last "/" is also tried.
+pub fn model_price(model: &str) -> Option<(f64, f64)> {
+    let lower = model.to_lowercase();
+    let candidates: Vec<&str> = lower.split('/').collect();
+    let mut best: Option<(usize, f64, f64)> = None;
+    for candidate in candidates {
+        for (prefix, input, output) in MODEL_PRICES {
+            if candidate.starts_with(prefix) {
+                let len = prefix.len();
+                if best.is_none_or(|(blen, _, _)| len > blen) {
+                    best = Some((len, *input, *output));
+                }
+            }
+        }
+    }
+    best.map(|(_, i, o)| (i, o))
+}
+
+/// Estimate cost in USD for a token split using the model's list price.
+/// Returns None if the model isn't in the price table.
+pub fn estimate_cost(model: &str, prompt_tokens: u64, completion_tokens: u64) -> Option<f64> {
+    let (input_mill, output_mill) = model_price(model)?;
+    Some(
+        prompt_tokens as f64 / 1_000_000.0 * input_mill
+            + completion_tokens as f64 / 1_000_000.0 * output_mill,
+    )
+}
+
 /// Format a token count for display: "45k" for thousands, "1.2M" for millions.
 pub fn fmt_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
@@ -187,6 +257,30 @@ mod tests {
         assert_eq!(model_context_size("gpt-4o"), Some(128_000));
         assert_eq!(model_context_size("gpt-4.1-mini"), Some(1_047_576));
         assert_eq!(model_context_size("unknown-model"), None);
+    }
+
+    #[test]
+    fn model_price_lookup() {
+        // Exact and prefix-matched lookups
+        assert_eq!(model_price("gpt-4o"), Some((2.50, 10.00)));
+        assert_eq!(model_price("gpt-4.1-mini"), Some((0.40, 1.60)));
+        // Provider-prefixed model names (OpenRouter style) still resolve
+        assert_eq!(
+            model_price("deepseek/deepseek-v4-flash-0731"),
+            Some((0.30, 0.90))
+        );
+        assert_eq!(model_price("unknown-model"), None);
+    }
+
+    #[test]
+    fn estimate_cost_calculates() {
+        // 1M input tokens at $2.50 + 500k output at $10.00 => $2.50 + $5.00
+        let cost = estimate_cost("gpt-4o", 1_000_000, 500_000);
+        assert_eq!(cost, Some(7.50));
+        // Unknown model -> no estimate
+        assert_eq!(estimate_cost("unknown-model", 1000, 1000), None);
+        // Zero tokens -> zero cost
+        assert_eq!(estimate_cost("gpt-4o", 0, 0), Some(0.0));
     }
 
     #[test]

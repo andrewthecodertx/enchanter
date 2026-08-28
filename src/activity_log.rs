@@ -246,10 +246,11 @@ impl ActivityLogger {
         // Rotate if the file is too large
         if path.exists()
             && let Ok(meta) = std::fs::metadata(path)
-                && meta.len() > MAX_LOG_SIZE {
-                    let rotated = path.with_extension("jsonl.bak");
-                    let _ = std::fs::rename(path, &rotated);
-                }
+            && meta.len() > MAX_LOG_SIZE
+        {
+            let rotated = path.with_extension("jsonl.bak");
+            let _ = std::fs::rename(path, &rotated);
+        }
 
         let file = std::fs::OpenOptions::new()
             .create(true)

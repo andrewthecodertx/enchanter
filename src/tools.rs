@@ -37,7 +37,7 @@
 //! output truncation approach and Claude Code's similar output limits.
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf, Component};
+use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
 use tokio::time::Duration;
 use tokio::time::timeout;
@@ -91,7 +91,10 @@ fn resolve_and_validate(path_str: &str, allowed: &[PathBuf]) -> Result<PathBuf, 
     };
 
     // Reject any path that contains '..' components to prevent directory traversal
-    if resolved.components().any(|c| matches!(c, Component::ParentDir)) {
+    if resolved
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
         return Err(format!(
             "Access denied: path '{}' contains '..' component",
             path_str
@@ -375,7 +378,9 @@ pub async fn dispatch(
     security: &SecurityConfig,
 ) -> String {
     match name {
-        "exec_command" => tool_exec_command(args, allowed_paths, allow_unsandboxed_exec, security).await,
+        "exec_command" => {
+            tool_exec_command(args, allowed_paths, allow_unsandboxed_exec, security).await
+        }
         "read_file" => tool_read_file(args, allowed_paths),
         "write_file" => tool_write_file(args, allowed_paths),
         "edit_file" => tool_edit_file(args, allowed_paths),
@@ -1033,8 +1038,8 @@ fn tool_knowledge(args: &Value, kstore: &mut KnowledgeStore) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::config::SecurityConfig;
+    use serde_json::json;
 
     /// Broad allow-list for tests: permits any path so file/exec tools run.
     fn allowed() -> Vec<PathBuf> {

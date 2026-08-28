@@ -67,14 +67,34 @@ pub fn run_sandboxed_child() -> anyhow::Result<()> {
     // Scrub environment: strip known secret-carrying vars unless explicitly
     // allowed via ENCHANTER_SANDBOX_PASSTHROUGH.
     let passthrough: std::collections::HashSet<String> = std::env::var(SANDBOX_PASSTHROUGH_ENV)
-        .map(|s| s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect())
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
 
     let secret_prefixes = [
-        "API_KEY", "APIKEY", "API_TOKEN", "APITOKEN", "ACCESS_TOKEN",
-        "SECRET", "SECRET_KEY", "SECRET_TOKEN", "PRIVATE_KEY",
-        "OAUTH", "BEARER", "JWT", "AUTH_TOKEN", "AUTHORIZATION",
-        "PASSWORD", "PASSWD", "PASSPHRASE", "CREDENTIAL",
+        "API_KEY",
+        "APIKEY",
+        "API_TOKEN",
+        "APITOKEN",
+        "ACCESS_TOKEN",
+        "SECRET",
+        "SECRET_KEY",
+        "SECRET_TOKEN",
+        "PRIVATE_KEY",
+        "OAUTH",
+        "BEARER",
+        "JWT",
+        "AUTH_TOKEN",
+        "AUTHORIZATION",
+        "PASSWORD",
+        "PASSWD",
+        "PASSPHRASE",
+        "CREDENTIAL",
     ];
 
     for (key, _) in std::env::vars().collect::<Vec<_>>() {

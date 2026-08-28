@@ -5,6 +5,27 @@ All notable changes to enchanter are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-08-28
+
+First stable release. Web UI, setup wizard, token usage tracking, and
+cross-platform prebuilt binaries.
+
+### Added
+- **Web UI** — `enchanter serve` starts a local web interface (default `http://127.0.0.1:3005`) with streaming responses, tool-call visibility in a side panel, model switching, session resume/rename, and token/context display. Replaces the ratatui TUI.
+- **First-run setup wizard** — `enchanter` offers an interactive setup when no model/key is configured (provider presets, masked API key entry, guided config). `enchanter config --edit` and `enchanter config --set key=value` for non-interactive editing.
+- **Token usage tracking** — provider-reported usage captured per turn and modeled session-total; shown in the REPL status bar, `/ctx`, `/cost`, and the web UI. Falls back to character-based estimation when providers omit usage.
+- **Model info** — `enchanter models` queries the active provider for its real model list and context windows; `context_window` config field overrides the built-in table.
+- **Session titles** — sessions get auto-derived titles (first user message); rename via web UI or API.
+- **Prebuilt binaries** — GitHub Actions release workflow builds native binaries for Linux, macOS, and Windows on x86_64 and arm64, attached to the release.
+- **Tool side panel** — web UI shows tool calls (arguments + results) in a left-hand panel instead of inline with the conversation.
+
+### Changed
+- Switched default web port to 3005 (`enchanter serve --port` to override).
+- REPL status bar hardened to avoid fighting terminal input echo (scrolls as a regular line).
+
+### Removed
+- TUI mode (`--tui`, ratatui/crossterm) — superseded by the web UI.
+
 ## [0.9.1] - 2026-08-21
 
 First public release since v0.4.3. Rolls up all work that had accumulated in
@@ -153,7 +174,8 @@ a round of critical-bug fixes and cleanup.
 
 ---
 
-[Unreleased]: https://github.com/andrewthecodertx/enchanter/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/andrewthecodertx/enchanter/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/andrewthecodertx/enchanter/compare/v0.9.1...v1.0.0
 [0.9.1]: https://github.com/andrewthecodertx/enchanter/compare/v0.4.3...v0.9.1
 [0.4.3]: https://github.com/andrewthecodertx/enchanter/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/andrewthecodertx/enchanter/compare/v0.4.1...v0.4.2

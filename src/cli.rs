@@ -58,10 +58,6 @@ pub struct Args {
     #[arg(long)]
     pub no_tools: bool,
 
-    /// Launch the full-screen TUI instead of the line-oriented REPL.
-    #[arg(long)]
-    pub tui: bool,
-
     /// Resume a previous session by ID. Loads the conversation history from
     /// the session JSONL file and continues from where it left off.
     /// Use /sessions to list available session IDs.
@@ -97,7 +93,16 @@ pub enum Commands {
     Soul,
     Memory,
     Skills,
-    Config,
+    /// Show resolved configuration, or edit/set it
+    Config {
+        /// Open the interactive editor (prefilled with current values)
+        #[arg(short, long)]
+        edit: bool,
+        /// Set a config value: KEY=VALUE. Supports model, base_url, api_key,
+        /// and dotted providers.<name>.<field>. Repeatable. Empty VALUE removes.
+        #[arg(long = "set", value_name = "KEY=VALUE", action = clap::ArgAction::Append)]
+        set: Vec<String>,
+    },
     /// Show or budget the assembled system prompt
     Prompt {
         /// Show a token/character budget breakdown of the system prompt
@@ -123,6 +128,19 @@ pub enum Commands {
         /// Show a specific session by ID
         id: Option<String>,
     },
+    /// Start the local web chat UI (HTTP + SSE). Local development only — no
+    /// authentication, do not expose publicly.
+    Serve {
+        /// Port to bind
+        #[arg(long, default_value_t = 3005)]
+        port: u16,
+        /// Address to bind. Defaults to loopback; the interface has no auth.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Do not attempt to open a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
     /// Daemon management: start, stop, or check status.
     #[cfg(unix)]
     Daemon {
@@ -143,7 +161,45 @@ pub enum DaemonAction {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    if crate::home::init_home()? {
+    let fresh = crate::home::init_home()?;
+
+    // First-run / not-configured setup wizard — interactive REPL/bare runs
+    // only. When a subcommand or -p prompt is given, skip entirely so
+    // non-interactive usage never blocks (or prompts) on piped stdin.
+    let interactive_run = args.command.is_none() && args.prompt.is_none();
+    if interactive_run {
+        if fresh {
+            if !crate::wizard::run_wizard()? {
+                // User aborted the wizard: still show where the files live.
+                print_init_guidance();
+            } else {
+                crate::wizard::print_guidance(true);
+            }
+        } else {
+            let config = crate::overlay::load_config(None)?;
+            if !crate::wizard::is_configured(&config) && crate::wizard::stdin_is_tty() {
+                print!(
+                    "{} No model configured. Run setup wizard? [Y/n] ",
+                    "Note:".yellow()
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                let answer = line.trim().to_string();
+                if answer.is_empty() || matches!(answer.as_str(), "y" | "Y" | "yes" | "YES") {
+                    crate::wizard::run_config_edit()?;
+                } else {
+                    println!(
+                        "  {} Use `enchanter config --edit` to configure.",
+                        "↳".dimmed()
+                    );
+                }
+            }
+        }
+    } else if fresh {
+        // Non-interactive first run (subcommand or -p): the scaffold was
+        // created, but the wizard can't run — point at the files.
         print_init_guidance();
     }
 
@@ -167,7 +223,7 @@ pub async fn run(args: Args) -> Result<()> {
     let skills = crate::overlay::discover_skills(overlay.as_ref())?;
 
     if let Some(cmd) = &args.command {
-        return handle_command(cmd, &config, &soul, &memory, &kstore, &skills);
+        return handle_command(cmd, &config, &soul, &memory, &kstore, &skills).await;
     }
 
     // Try daemon mode first (unless --no-daemon) — Unix only
@@ -273,19 +329,7 @@ pub async fn run(args: Args) -> Result<()> {
                 no_stream: args.no_stream,
                 no_tools: args.no_tools,
                 system_override: args.system.clone(),
-                session_name: if args.tui {
-                    #[cfg(feature = "tui")]
-                    {
-                        Some("enchanter_tui".to_string())
-                    }
-                    #[cfg(not(feature = "tui"))]
-                    {
-                        let _ = args.tui; // suppress unused warning
-                        None
-                    }
-                } else {
-                    None
-                },
+                session_name: None,
             },
             session_id,
         )?
@@ -301,19 +345,7 @@ pub async fn run(args: Args) -> Result<()> {
                 no_stream: args.no_stream,
                 no_tools: args.no_tools,
                 system_override: args.system.clone(),
-                session_name: if args.tui {
-                    #[cfg(feature = "tui")]
-                    {
-                        Some("enchanter_tui".to_string())
-                    }
-                    #[cfg(not(feature = "tui"))]
-                    {
-                        let _ = args.tui; // suppress unused warning
-                        None
-                    }
-                } else {
-                    None
-                },
+                session_name: None,
             },
         )?
     };
@@ -420,10 +452,15 @@ pub async fn run(args: Args) -> Result<()> {
         }
         // One-shot token report to stderr so piped stdout stays clean.
         let budget = agent.context_budget();
-        let used = agent.last_usage().map(|u| u.prompt_tokens + u.completion_tokens);
+        let used = agent
+            .last_usage()
+            .map(|u| u.prompt_tokens + u.completion_tokens);
         let used_str = match used {
-            Some(n) => format!("{}", crate::status_bar::fmt_tokens(n)),
-            None => format!("~{}", crate::status_bar::fmt_tokens(agent.estimated_context_tokens())),
+            Some(n) => crate::status_bar::fmt_tokens(n).to_string(),
+            None => format!(
+                "~{}",
+                crate::status_bar::fmt_tokens(agent.estimated_context_tokens())
+            ),
         };
         let line = match budget {
             Some(b) => format!(
@@ -432,7 +469,10 @@ pub async fn run(args: Args) -> Result<()> {
                 crate::status_bar::fmt_tokens(b),
                 ((used.unwrap_or(0) as f64 / b as f64) * 100.0).round() as u64
             ),
-            None => format!("── tokens: {} (budget unknown for {}) ──", used_str, agent.resolved.model),
+            None => format!(
+                "── tokens: {} (budget unknown for {}) ──",
+                used_str, agent.resolved.model
+            ),
         };
         eprintln!("{}", line);
         agent.shutdown_mcp().await;
@@ -445,20 +485,7 @@ pub async fn run(args: Args) -> Result<()> {
         return result.map(|_| ());
     }
 
-    let mut agent = if args.tui {
-        #[cfg(not(feature = "tui"))]
-        {
-            anyhow::bail!(
-                "TUI support was not compiled in (built with --no-default-features).\nRebuild with: cargo build --features tui"
-            );
-        }
-        #[cfg(feature = "tui")]
-        {
-            crate::tui::run_tui(agent).await?
-        }
-    } else {
-        crate::repl::run_repl(agent).await?
-    };
+    let mut agent = crate::repl::run_repl(agent).await?;
     agent.shutdown_mcp().await;
 
     // Exit summary
@@ -623,7 +650,7 @@ async fn handle_daemon_command(action: &DaemonAction, args: &Args) -> Result<()>
     }
 }
 
-fn handle_command(
+async fn handle_command(
     cmd: &Commands,
     config: &Config,
     soul: &crate::soul::Soul,
@@ -632,6 +659,49 @@ fn handle_command(
     skills: &crate::skills::SkillsIndex,
 ) -> Result<()> {
     match cmd {
+        Commands::Serve {
+            port,
+            host,
+            no_browser,
+        } => {
+            // Resolve initial model: config default (no -m flag in serve).
+            let resolved = config.resolve_default();
+            let mut agent = AgentSession::new(
+                config.clone(),
+                soul.clone(),
+                memory.clone(),
+                kstore.clone(),
+                skills.clone(),
+                resolved.clone(),
+                SessionOptions {
+                    no_stream: false,
+                    no_tools: false,
+                    system_override: None,
+                    session_name: None,
+                },
+            )?;
+
+            // Best-effort: query the provider for real context window sizes.
+            agent.refresh_api_context_size().await;
+            // For new sessions, append the system prompt to the JSONL.
+            agent.session.append(&agent.messages[0])?;
+            // Start MCP servers (mirrors the REPL path).
+            agent.start_mcp().await;
+
+            crate::web::serve(
+                agent,
+                config.clone(),
+                soul.clone(),
+                memory.clone(),
+                kstore.clone(),
+                skills.clone(),
+                resolved.clone(),
+                host.clone(),
+                *port,
+                *no_browser,
+            )
+            .await?;
+        }
         Commands::Init => {
             let cwd = std::env::current_dir()?;
             match crate::overlay::init_project_overlay(&cwd) {
@@ -706,7 +776,28 @@ fn handle_command(
                 }
             }
         }
-        Commands::Config => {
+        Commands::Config { edit, set } => {
+            if !set.is_empty() {
+                // Non-interactive: parse KEY=VALUE pairs and apply them.
+                let mut pairs: Vec<(String, String)> = Vec::new();
+                for item in set {
+                    match item.split_once('=') {
+                        Some((k, v)) => pairs.push((k.trim().to_string(), v.to_string())),
+                        None => {
+                            anyhow::bail!(
+                                "Invalid --set '{}' (expected KEY=VALUE, e.g. model=gpt-4.1-mini)",
+                                item
+                            );
+                        }
+                    }
+                }
+                crate::wizard::apply_config_sets(&pairs)?;
+                return Ok(());
+            }
+            if *edit {
+                crate::wizard::run_config_edit()?;
+                return Ok(());
+            }
             println!("{}", "═══ CONFIG ═══".bright_cyan());
             println!("  Model:      {}", config.model_id());
             println!("  Base URL:   {}", config.base_url());
@@ -749,6 +840,10 @@ fn handle_command(
                     }
                 }
             }
+            println!(
+                "\n  {} Edit interactively: `enchanter config --edit` | set non-interactively: `enchanter config --set model=... --set api_key=...`",
+                "↳".dimmed()
+            );
         }
         Commands::Prompt { budget } => {
             let layers = crate::prompt::build_prompt_layers(
@@ -1003,5 +1098,11 @@ fn print_init_guidance() {
     println!(
         "    {}/memories/     — MEMORY.md & USER.md go here",
         home.display()
+    );
+    // Brief explanation of what these files are and the next step, so a user
+    // who aborted the wizard (or ran non-interactively) still knows the layout.
+    println!(
+        "  {} SOUL.md defines who the agent is (loaded into every session); config.yaml has\n    provider/model/API key plus MCP servers; memories/ accumulates notes about you.\n    Next step: run `enchanter config --edit` to choose a provider and API key.",
+        "↳".dimmed()
     );
 }

@@ -37,7 +37,6 @@ pub enum Source {
     Inferred,
 }
 
-
 impl Source {
     #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
@@ -127,12 +126,10 @@ fn default_confidence() -> f32 {
 }
 
 /// The knowledge store: in-memory HashMap backed by a JSON file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KnowledgeStore {
     pub entries: HashMap<String, KnowledgeEntry>,
 }
-
 
 impl KnowledgeStore {
     /// Load the knowledge store from disk. Returns empty store if file doesn't exist.

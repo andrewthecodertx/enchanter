@@ -368,119 +368,119 @@ async fn handle_connection(
     };
 
     match request {
-            Request::Chat {
-                prompt,
-                model,
-                system,
-                no_stream,
-                no_tools,
-            } => {
-                // For stateless per-request behavior (matching inline -p mode),
-                // we reset the agent's messages to just the system prompt for each request.
-                // This ensures no history bleed between independent -p calls.
-                // Build the system prompt fresh for this request.
-                let system_prompt = if let Some(sys_prompt) = system {
-                    sys_prompt
-                } else {
-                    prompt::build_system_prompt_with_model(
-                        &agent.soul,
-                        &agent.memory,
-                        &agent.kstore,
-                        &agent.skills,
-                        &agent.config,
-                        &agent.resolved.model,
-                    )
-                };
+        Request::Chat {
+            prompt,
+            model,
+            system,
+            no_stream,
+            no_tools,
+        } => {
+            // For stateless per-request behavior (matching inline -p mode),
+            // we reset the agent's messages to just the system prompt for each request.
+            // This ensures no history bleed between independent -p calls.
+            // Build the system prompt fresh for this request.
+            let system_prompt = if let Some(sys_prompt) = system {
+                sys_prompt
+            } else {
+                prompt::build_system_prompt_with_model(
+                    &agent.soul,
+                    &agent.memory,
+                    &agent.kstore,
+                    &agent.skills,
+                    &agent.config,
+                    &agent.resolved.model,
+                )
+            };
 
-                // Reset messages to just the system prompt for stateless operation
-                agent.messages = vec![Message::system(&system_prompt)];
-                agent.tool_cache.invalidate();
+            // Reset messages to just the system prompt for stateless operation
+            agent.messages = vec![Message::system(&system_prompt)];
+            agent.tool_cache.invalidate();
 
-                // Switch model if requested, save previous for restoration
-                let prev_model = if let Some(new_model) = model {
-                    let prev = agent.resolved.model.clone();
-                    if let Err(e) = agent.switch_model(&new_model) {
-                        let err_event = Event::Error {
-                            message: format!("Failed to switch model: {}", e),
-                        };
-                        if let Ok(jsonl) = err_event.to_jsonl() {
-                            let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
-                        }
-                        return;
+            // Switch model if requested, save previous for restoration
+            let prev_model = if let Some(new_model) = model {
+                let prev = agent.resolved.model.clone();
+                if let Err(e) = agent.switch_model(&new_model) {
+                    let err_event = Event::Error {
+                        message: format!("Failed to switch model: {}", e),
+                    };
+                    if let Ok(jsonl) = err_event.to_jsonl() {
+                        let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
                     }
-                    Some(prev)
-                } else {
-                    None
-                };
+                    return;
+                }
+                Some(prev)
+            } else {
+                None
+            };
 
-                // Apply overrides
-                let prev_no_stream = agent.no_stream;
-                let prev_no_tools = agent.no_tools;
-                agent.no_stream = no_stream;
-                agent.no_tools = no_tools;
+            // Apply overrides
+            let prev_no_stream = agent.no_stream;
+            let prev_no_tools = agent.no_tools;
+            agent.no_stream = no_stream;
+            agent.no_tools = no_tools;
 
-                // Run chat via event-yielding method
-                match agent.chat_events(&prompt).await {
-                    Ok((_result, mut rx)) => {
-                        // Forward events to client
-                        while let Some(event) = rx.recv().await {
-                            if let Ok(jsonl) = event.to_jsonl()
-                                && writer
-                                    .write_all(format!("{}\n", jsonl).as_bytes())
-                                    .await
-                                    .is_err()
-                            {
-                                break; // Client disconnected
-                            }
-                        }
-                        // Report this turn's token usage before Done.
-                        let est = agent.estimated_context_tokens();
-                        let budget = agent.context_budget();
-                        let usage_event = match agent.last_usage() {
-                            Some(u) => Event::Usage {
-                                prompt_tokens: u.prompt_tokens,
-                                completion_tokens: u.completion_tokens,
-                                total_tokens: u.total_tokens,
-                                estimated_context_tokens: est,
-                                model: agent.resolved.model.clone(),
-                                context_budget: budget,
-                            },
-                            None => Event::Usage {
-                                prompt_tokens: est.saturating_sub(100),
-                                completion_tokens: 0,
-                                total_tokens: 0,
-                                estimated_context_tokens: est,
-                                model: agent.resolved.model.clone(),
-                                context_budget: budget,
-                            },
-                        };
-                        if let Ok(jsonl) = usage_event.to_jsonl() {
-                            let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
+            // Run chat via event-yielding method
+            match agent.chat_events(&prompt).await {
+                Ok((_result, mut rx)) => {
+                    // Forward events to client
+                    while let Some(event) = rx.recv().await {
+                        if let Ok(jsonl) = event.to_jsonl()
+                            && writer
+                                .write_all(format!("{}\n", jsonl).as_bytes())
+                                .await
+                                .is_err()
+                        {
+                            break; // Client disconnected
                         }
                     }
-                    Err(e) => {
-                        let err_event = Event::Error {
-                            message: format!("Chat error: {}", e),
-                        };
-                        if let Ok(jsonl) = err_event.to_jsonl() {
-                            let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
-                        }
+                    // Report this turn's token usage before Done.
+                    let est = agent.estimated_context_tokens();
+                    let budget = agent.context_budget();
+                    let usage_event = match agent.last_usage() {
+                        Some(u) => Event::Usage {
+                            prompt_tokens: u.prompt_tokens,
+                            completion_tokens: u.completion_tokens,
+                            total_tokens: u.total_tokens,
+                            estimated_context_tokens: est,
+                            model: agent.resolved.model.clone(),
+                            context_budget: budget,
+                        },
+                        None => Event::Usage {
+                            prompt_tokens: est.saturating_sub(100),
+                            completion_tokens: 0,
+                            total_tokens: 0,
+                            estimated_context_tokens: est,
+                            model: agent.resolved.model.clone(),
+                            context_budget: budget,
+                        },
+                    };
+                    if let Ok(jsonl) = usage_event.to_jsonl() {
+                        let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
                     }
                 }
-
-                // Restore overrides
-                agent.no_stream = prev_no_stream;
-                agent.no_tools = prev_no_tools;
-                if let Some(prev_model) = prev_model {
-                    let _ = agent.switch_model(&prev_model);
+                Err(e) => {
+                    let err_event = Event::Error {
+                        message: format!("Chat error: {}", e),
+                    };
+                    if let Ok(jsonl) = err_event.to_jsonl() {
+                        let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
+                    }
                 }
             }
-            Request::Ping => {
-                let event = Event::Pong;
-                if let Ok(jsonl) = event.to_jsonl() {
-                    let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
-                }
+
+            // Restore overrides
+            agent.no_stream = prev_no_stream;
+            agent.no_tools = prev_no_tools;
+            if let Some(prev_model) = prev_model {
+                let _ = agent.switch_model(&prev_model);
             }
+        }
+        Request::Ping => {
+            let event = Event::Pong;
+            if let Ok(jsonl) = event.to_jsonl() {
+                let _ = writer.write_all(format!("{}\n", jsonl).as_bytes()).await;
+            }
+        }
         Request::Status => {
             let info = agent.info();
             let event = Event::StatusInfo {

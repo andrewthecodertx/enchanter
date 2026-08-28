@@ -111,6 +111,19 @@ struct McpServer {
     restart_count: u32,
 }
 
+/// Read-only summary of a connected MCP server, for the web UI sidebar.
+pub struct McpServerSummary {
+    pub name: String,
+    pub transport: String, // "stdio" | "http"
+    pub tools: Vec<McpToolSummary>,
+}
+
+/// Read-only summary of a single MCP tool.
+pub struct McpToolSummary {
+    pub name: String,
+    pub description: String,
+}
+
 // ── Connection lifecycle ────────────────────────────────────────
 
 /// Connect to an MCP server using the appropriate transport.
@@ -194,6 +207,14 @@ async fn connect_http(name: &str, config: &McpServerConfig) -> Result<McpTranspo
 // ── JSON-RPC send ──────────────────────────────────────────────
 
 impl McpTransport {
+    /// Human-readable transport label: "stdio" or "http".
+    fn transport_label(&self) -> &'static str {
+        match self {
+            McpTransport::Stdio { .. } => "stdio",
+            McpTransport::Http { .. } => "http",
+        }
+    }
+
     /// Send a JSON-RPC request and wait for the matching response.
     async fn send_request(&self, server_name: &str, request: &JsonRpcRequest) -> Result<Value> {
         match self {
@@ -635,10 +656,7 @@ impl McpManager {
             match McpServer::new(name, config).await {
                 Ok(server) => {
                     let tool_count = server.tools.len();
-                    let transport_label = match config.transport_type() {
-                        crate::config::McpTransportType::Stdio => "stdio",
-                        crate::config::McpTransportType::Http => "http",
-                    };
+                    let transport_label = server.transport.transport_label();
                     eprintln!(
                         "  {} MCP: {} ({}, {} tools)",
                         "⟡".bright_magenta(),
@@ -791,6 +809,27 @@ impl McpManager {
     pub fn server_names(&self) -> Vec<&str> {
         self.servers.iter().map(|s| s.name.as_str()).collect()
     }
+
+    /// Read-only summaries of connected servers and their tools.
+    /// Tool names are the raw MCP tool names (no `server__tool` prefix — the
+    /// client adds the server grouping).
+    pub fn summaries(&self) -> Vec<McpServerSummary> {
+        self.servers
+            .iter()
+            .map(|server| McpServerSummary {
+                name: server.name.clone(),
+                transport: server.transport.transport_label().to_string(),
+                tools: server
+                    .tools
+                    .iter()
+                    .map(|t| McpToolSummary {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
 }
 
 /// Extract text content from an MCP tools/call response.
@@ -915,6 +954,7 @@ mod tests {
         assert_eq!(mgr.total_tool_count(), 0);
         assert!(mgr.server_names().is_empty());
         assert!(mgr.all_tools_json().is_empty());
+        assert!(mgr.summaries().is_empty());
     }
 
     #[test]

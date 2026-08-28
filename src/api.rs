@@ -429,7 +429,7 @@ impl LlmClient {
                 None
             } else {
                 let prompt = crate::agent::estimate_messages_tokens(messages);
-                let completion = (full_content.len() as u64 + 3) / 4;
+                let completion = (full_content.len() as u64).div_ceil(4);
                 Some(TokenUsage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,

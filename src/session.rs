@@ -48,6 +48,9 @@ pub enum SessionEntry {
     /// Metadata about the session (model, timestamp).
     #[serde(rename = "meta")]
     Meta { model: String, started_at: String },
+    /// Session display title (persisted). The latest Title entry wins.
+    #[serde(rename = "title")]
+    Title { title: String },
 }
 
 /// Summary of a session file for listing.
@@ -57,6 +60,7 @@ pub struct SessionMeta {
     pub started_at: Option<String>,
     #[allow(dead_code)]
     pub model: Option<String>,
+    pub title: Option<String>,
     pub message_count: usize,
     pub file_size: u64,
 }
@@ -67,6 +71,7 @@ pub struct Session {
     file: File,
     path: PathBuf,
     message_count: usize,
+    title: Option<String>,
 }
 
 fn sessions_dir() -> PathBuf {
@@ -105,17 +110,34 @@ impl Session {
             .open(&path)
             .with_context(|| format!("reopening session file {}", path.display()))?;
 
-        // Count existing message entries (excluding meta) for accurate message_count.
+        // Count existing message entries (excluding meta and title) for
+        // accurate message_count.
         let msg_count = entries
             .iter()
-            .filter(|e| !matches!(e, SessionEntry::Meta { .. }))
+            .filter(|e| !matches!(e, SessionEntry::Meta { .. } | SessionEntry::Title { .. }))
             .count();
+
+        // Title: the last Title entry wins, else derive from the first User entry.
+        let title = entries
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                SessionEntry::Title { title } => Some(title.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                entries.iter().find_map(|e| match e {
+                    SessionEntry::User { content } => Some(derive_title(content)),
+                    _ => None,
+                })
+            });
 
         let session = Self {
             id: id.to_string(),
             file,
             path,
             message_count: msg_count,
+            title,
         };
 
         Ok((session, entries))
@@ -142,6 +164,7 @@ impl Session {
             file,
             path,
             message_count: 0,
+            title: None,
         };
 
         // Write meta entry as the first line
@@ -165,13 +188,29 @@ impl Session {
         &self.path
     }
 
-    /// Number of messages recorded in this session (excluding meta).
+    /// Number of messages recorded in this session (excluding meta and title).
     #[allow(dead_code)]
     pub fn message_count(&self) -> usize {
         self.message_count
     }
 
+    /// Current display title, if any.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Persist a new display title by appending a Title entry.
+    pub fn set_title(&mut self, title: &str) -> Result<()> {
+        self.append_entry(&SessionEntry::Title {
+            title: title.to_string(),
+        })?;
+        self.title = Some(title.to_string());
+        Ok(())
+    }
+
     /// Append a single session entry. Low-level write.
+    /// Only real message entries (not Meta/Title bookkeeping) count toward
+    /// message_count, keeping the live count consistent with resume/list.
     fn append_entry(&mut self, entry: &SessionEntry) -> Result<()> {
         let mut line = serde_json::to_string(entry).context("serializing session entry")?;
         line.push('\n');
@@ -181,7 +220,12 @@ impl Session {
         self.file
             .flush()
             .with_context(|| format!("flushing session file {}", self.path.display()))?;
-        self.message_count += 1;
+        if !matches!(
+            entry,
+            SessionEntry::Meta { .. } | SessionEntry::Title { .. }
+        ) {
+            self.message_count += 1;
+        }
         Ok(())
     }
 
@@ -232,7 +276,7 @@ impl Session {
     pub fn entries_to_messages(entries: &[SessionEntry]) -> Vec<Message> {
         let mut messages = Vec::new();
         let mut i = 0;
-        
+
         while i < entries.len() {
             match &entries[i] {
                 SessionEntry::System { content } => {
@@ -251,11 +295,15 @@ impl Session {
                     // Group consecutive ToolCall entries (and possibly following Assistant content)
                     let mut tool_calls = Vec::new();
                     let mut assistant_content = None;
-                    
+
                     // Collect all consecutive ToolCall entries
                     while i < entries.len() {
                         match &entries[i] {
-                            SessionEntry::ToolCall { id, name, arguments } => {
+                            SessionEntry::ToolCall {
+                                id,
+                                name,
+                                arguments,
+                            } => {
                                 let tc = crate::api::ToolCall {
                                     id: id.clone(),
                                     call_type: "function".to_string(),
@@ -268,7 +316,7 @@ impl Session {
                                 i += 1;
                             }
                             SessionEntry::Assistant { content } => {
-                                // If there's an Assistant entry right after the tool calls, 
+                                // If there's an Assistant entry right after the tool calls,
                                 // include it as the content for this assistant message
                                 assistant_content = Some(content.clone());
                                 i += 1;
@@ -280,7 +328,7 @@ impl Session {
                             }
                         }
                     }
-                    
+
                     // Create the assistant message with all collected tool calls
                     if let Some(content) = assistant_content {
                         messages.push(Message::assistant_with_tools(tool_calls, Some(content)));
@@ -296,9 +344,13 @@ impl Session {
                     // Skip meta entries
                     i += 1;
                 }
+                SessionEntry::Title { .. } => {
+                    // Skip title entries (display metadata, not conversation)
+                    i += 1;
+                }
             }
         }
-        
+
         messages
     }
 
@@ -343,6 +395,8 @@ impl Session {
             let mut started_at = None;
             let mut model = None;
             let mut message_count = 0;
+            let mut persisted_title = None;
+            let mut first_user = None;
 
             for line in content.lines() {
                 let line = line.trim();
@@ -350,14 +404,27 @@ impl Session {
                     continue;
                 }
                 if let Ok(entry) = serde_json::from_str::<SessionEntry>(line) {
-                    message_count += 1;
-                    if let SessionEntry::Meta {
-                        started_at: sa,
-                        model: m,
-                    } = entry
-                    {
-                        started_at = Some(sa);
-                        model = Some(m);
+                    if !matches!(
+                        &entry,
+                        SessionEntry::Meta { .. } | SessionEntry::Title { .. }
+                    ) {
+                        message_count += 1;
+                    }
+                    match entry {
+                        SessionEntry::Meta {
+                            started_at: sa,
+                            model: m,
+                        } => {
+                            started_at = Some(sa);
+                            model = Some(m);
+                        }
+                        SessionEntry::Title { title } => {
+                            persisted_title = Some(title);
+                        }
+                        SessionEntry::User { content } if first_user.is_none() => {
+                            first_user = Some(content);
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -366,6 +433,7 @@ impl Session {
                 id,
                 started_at,
                 model,
+                title: persisted_title.or_else(|| first_user.map(|s| derive_title(&s))),
                 message_count,
                 file_size,
             });
@@ -373,6 +441,19 @@ impl Session {
 
         sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         Ok(sessions)
+    }
+}
+
+/// Truncate a prompt into a short session title.
+pub(crate) fn derive_title(prompt: &str) -> String {
+    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.chars().count() > 60 {
+        let mut truncated: String = trimmed.chars().take(60).collect();
+        truncated.push('…');
+        truncated
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -449,7 +530,7 @@ mod tests {
         session.append(&user).unwrap();
         session.append(&assistant).unwrap();
 
-        assert!(session.message_count() >= 4); // meta + 3 messages
+        assert!(session.message_count() >= 3); // meta excluded; system + user + assistant
     }
 
     #[test]
@@ -564,5 +645,56 @@ mod tests {
     fn resume_fails_for_nonexistent_session() {
         let result = Session::resume_from_dir("does-not-exist", std::path::Path::new("/tmp"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn derive_title_behavior() {
+        assert_eq!(derive_title("  hello    world  "), "hello world");
+        assert_eq!(derive_title(""), "");
+        let long = "x".repeat(100);
+        let t = derive_title(&long);
+        assert_eq!(t.chars().count(), 61); // 60 + ellipsis
+        assert!(t.ends_with('…'));
+        assert_eq!(derive_title(&"y".repeat(40)), "y".repeat(40));
+    }
+
+    #[test]
+    fn set_title_roundtrip_via_resume_and_list() {
+        let (_dir, sdir) = setup_test_sessions_dir();
+        let mut session = Session::new_in_dir("test-model-title", &sdir, None).unwrap();
+        session
+            .append(&Message::user(
+                "first message that derives a fallback title",
+            ))
+            .unwrap();
+        session.append(&Message::assistant("ok")).unwrap();
+        let id = session.id().to_string();
+
+        // No persisted title yet → derived from first user message.
+        assert_eq!(session.title(), None);
+        let (resumed, _) = Session::resume_from_dir(&id, &sdir).unwrap();
+        assert_eq!(
+            resumed.title(),
+            Some("first message that derives a fallback title")
+        );
+
+        // Persist an explicit title; resume again → the persisted one wins.
+        session.set_title("my custom title").unwrap();
+        assert_eq!(session.title(), Some("my custom title"));
+        let (resumed2, _) = Session::resume_from_dir(&id, &sdir).unwrap();
+        assert_eq!(resumed2.title(), Some("my custom title"));
+
+        // The latest Title entry wins.
+        session.set_title("updated title").unwrap();
+        let (resumed3, _) = Session::resume_from_dir(&id, &sdir).unwrap();
+        assert_eq!(resumed3.title(), Some("updated title"));
+
+        // list_all_in_dir reflects the persisted title and message count
+        // excludes Meta/Title entries.
+        let list = Session::list_all_in_dir(&sdir).unwrap();
+        let found = list.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(found.title.as_deref(), Some("updated title"));
+        // meta + 2 user/assistant + 2 title entries → message_count = 2
+        assert_eq!(found.message_count, 2);
     }
 }

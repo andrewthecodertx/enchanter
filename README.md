@@ -102,6 +102,20 @@ cargo build --release
 
 The binary will be at `target\release\enchanter.exe`. Copy it anywhere on your `PATH`.
 
+### Prebuilt binaries
+
+Drop-in binaries for Linux (x86_64, arm64), macOS (x86_64, arm64), and Windows
+(x86_64, arm64) are attached to every [GitHub Release](https://github.com/andrewthecodertx/enchanter/releases).
+Download the one for your platform, put it on your `PATH`, and run:
+
+```bash
+enchanter
+```
+
+> **Note:** the arm64 (Apple Silicon / Windows ARM / Linux ARM64) binaries
+> are experimental. They are cross-compiled in CI and smoke-tested only on
+> x86_64. If you hit a problem on Apple Silicon or ARM, please open an issue.
+
 ## Running
 
 ```bash
@@ -147,6 +161,8 @@ enchanter --record session.jsonl --record-redact
 | `/retry`           | Re-send the last user message                         |
 | `/undo`            | Remove last exchange from history                     |
 | `/config`           | Show resolved configuration (includes context usage)  |
+| `/cost`            | Show estimated token cost for the session             |
+| `/models`          | Query the active provider for its real model list      |
 | `/sessions`        | List session history                                  |
 | `/exit`, `/quit`, `/bye` | Quit (also Ctrl+D for clean exit)             |
 

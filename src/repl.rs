@@ -233,6 +233,7 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
             println!("  /retry       Retry last exchange");
             println!("  /undo        Undo last exchange");
             println!("  /ctx         Show context token usage");
+            println!("  /cost        Show total tokens and estimated cost");
             println!("  /config      Show current config");
             println!("  /memory      Show memory");
             println!("  /soul        Show soul file");
@@ -354,6 +355,27 @@ fn handle_slash_command(cmd: &str, agent: &mut AgentSession) {
                 println!("── undid last exchange ──");
             } else {
                 eprintln!("✗ nothing to undo");
+            }
+        }
+        "/cost" => {
+            let model = &agent.resolved.model;
+            let u = agent.token_usage();
+            println!("── session cost ──");
+            println!(
+                "  tokens:  {} in / {} out / {} total",
+                status_bar::fmt_tokens(u.prompt_tokens),
+                status_bar::fmt_tokens(u.completion_tokens),
+                status_bar::fmt_tokens(u.total_tokens)
+            );
+            match status_bar::estimate_cost(model, u.prompt_tokens, u.completion_tokens) {
+                Some(cost) => {
+                    println!("  model:   {}", model);
+                    println!("  cost:    ${:.6} (estimated)", cost);
+                }
+                None => {
+                    println!("  model:   {}", model);
+                    println!("  cost:    unknown (no price data for this model)");
+                }
             }
         }
         "/log" => {

@@ -81,6 +81,9 @@ pub struct ProviderConfig {
     /// Provider-level headers override model-level headers with the same key.
     #[serde(default)]
     pub extra_headers: Option<std::collections::HashMap<String, String>>,
+    /// Declared context window in tokens for this provider's model.
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -94,6 +97,10 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Declared context window in tokens (e.g. 200000). Used for token
+    /// budget display; overrides the built-in model table.
+    #[serde(default)]
+    pub context_window: Option<u64>,
     /// Extra HTTP headers sent on every API request (e.g. for prompt caching,
     /// provider-specific features). Values support ${VAR} expansion.
     #[serde(default)]
@@ -312,6 +319,9 @@ pub struct ResolvedModel {
     pub api_key: Option<String>,
     /// Extra HTTP headers (expanded, ready to send).
     pub extra_headers: Vec<(String, String)>,
+    /// Config-declared context window (tokens). Overrides the built-in
+    /// MODEL_CONTEXT_SIZES table when set.
+    pub context_window: Option<u64>,
 }
 
 /// Merge extra_headers from model-level and provider-level configs.
@@ -448,7 +458,10 @@ impl Config {
         // and inherit the global API key. That's a credential leak.
         if let Some(_key) = &api_key {
             let url = &base_url;
-            if url.starts_with("http://") && !url.starts_with("http://localhost") && !url.starts_with("http://127.0.0.1") {
+            if url.starts_with("http://")
+                && !url.starts_with("http://localhost")
+                && !url.starts_with("http://127.0.0.1")
+            {
                 eprintln!(
                     "\x1b[33mwarning:\x1b[0m provider '{}' uses plain HTTP base_url ({}) but would inherit an API key. Refusing to send credentials over plaintext. Use HTTPS or set api_key explicitly for this provider.",
                     name, url
@@ -462,6 +475,7 @@ impl Config {
             base_url,
             api_key,
             extra_headers,
+            context_window: provider.context_window.or(self.model.context_window),
         })
     }
 
@@ -476,6 +490,7 @@ impl Config {
             base_url,
             api_key,
             extra_headers,
+            context_window: self.model.context_window,
         }
     }
 
@@ -595,6 +610,7 @@ mod tests {
                 base_url: Some("http://localhost:11434/v1".to_string()),
                 api_key: None,
                 extra_headers: None,
+                context_window: None,
             },
         );
         let resolved = c.resolve_provider("ollama").unwrap();
@@ -650,6 +666,7 @@ mod tests {
                         .into_iter()
                         .collect(),
                 ),
+                context_window: None,
             },
         );
         let resolved = c.resolve_provider("test-prov").unwrap();
@@ -685,6 +702,7 @@ mod tests {
                 base_url: Some("http://attacker.tld/v1/chat/completions".to_string()),
                 api_key: None,
                 extra_headers: None,
+                context_window: None,
             },
         );
         // Should refuse and return None
@@ -702,6 +720,7 @@ mod tests {
                 base_url: Some("http://localhost:11434/v1/chat/completions".to_string()),
                 api_key: None,
                 extra_headers: None,
+                context_window: None,
             },
         );
         // Localhost HTTP should be allowed
@@ -720,9 +739,13 @@ mod tests {
                 base_url: Some("https://api.openai.com/v1/chat/completions".to_string()),
                 api_key: None,
                 extra_headers: None,
+                context_window: None,
             },
         );
         let resolved = c.resolve_provider("secure-prov").unwrap();
-        assert_eq!(resolved.base_url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            resolved.base_url,
+            "https://api.openai.com/v1/chat/completions"
+        );
     }
 }

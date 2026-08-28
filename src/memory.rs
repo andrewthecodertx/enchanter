@@ -353,47 +353,47 @@ mod tests {
 
     #[test]
     fn total_entry_count() {
-            let store = MemoryStore {
-                user_entries: vec!["u1".to_string(), "u2".to_string()],
-                memory_entries: vec!["m1".to_string()],
-                summary: None,
-            };
-            assert_eq!(store.total_entry_count(), 3);
-        }
-
-        #[test]
-        fn truncate_chars_utf8_safe() {
-            // Multi-byte chars at the boundary must not panic
-            let cjk = "你好世界"; // 4 chars, 12 bytes
-            let truncated = crate::summary::truncate_chars(cjk, 2);
-            assert_eq!(truncated.chars().count(), 2);
-            assert!(!truncated.ends_with("…"));
-
-            let emoji = "😀😃😄"; // 3 chars, 12 bytes
-            let truncated = crate::summary::truncate_chars(emoji, 1);
-            assert_eq!(truncated.chars().count(), 1);
-            assert!(truncated.contains("😀"));
-
-            // Boundary exactly at multi-byte char
-            let mixed = "abc你好def"; // 10 chars
-            let truncated = crate::summary::truncate_chars(mixed, 5);
-            assert_eq!(truncated.chars().count(), 5);
-        }
-    }
-    #[test]
-    fn cap_under_max_no_change() {
         let store = MemoryStore {
-            memory_entries: (0..10).map(|i| format!("entry {}", i)).collect(),
-            user_entries: vec![],
+            user_entries: vec!["u1".to_string(), "u2".to_string()],
+            memory_entries: vec!["m1".to_string()],
             summary: None,
         };
-        let config = MemoryConfig {
-            max_entries: 50,
-            summarize_threshold: 40,
-        };
-        // total is 10, under max_entries — manage should be a no-op
-        // (but manage is async and needs a client, just test the logic indirectly)
-        assert_eq!(store.memory_entries.len(), 10);
-        let _ = &config; // verify it compiles
-        let _ = &store;
+        assert_eq!(store.total_entry_count(), 3);
+    }
+
+    #[test]
+    fn truncate_chars_utf8_safe() {
+        // Multi-byte chars at the boundary must not panic
+        let cjk = "你好世界"; // 4 chars, 12 bytes
+        let truncated = crate::summary::truncate_chars(cjk, 2);
+        assert_eq!(truncated.chars().count(), 2);
+        assert!(!truncated.ends_with("…"));
+
+        let emoji = "😀😃😄"; // 3 chars, 12 bytes
+        let truncated = crate::summary::truncate_chars(emoji, 1);
+        assert_eq!(truncated.chars().count(), 1);
+        assert!(truncated.contains("😀"));
+
+        // Boundary exactly at multi-byte char
+        let mixed = "abc你好def"; // 10 chars
+        let truncated = crate::summary::truncate_chars(mixed, 5);
+        assert_eq!(truncated.chars().count(), 5);
+    }
+}
+#[test]
+fn cap_under_max_no_change() {
+    let store = MemoryStore {
+        memory_entries: (0..10).map(|i| format!("entry {}", i)).collect(),
+        user_entries: vec![],
+        summary: None,
+    };
+    let config = MemoryConfig {
+        max_entries: 50,
+        summarize_threshold: 40,
+    };
+    // total is 10, under max_entries — manage should be a no-op
+    // (but manage is async and needs a client, just test the logic indirectly)
+    assert_eq!(store.memory_entries.len(), 10);
+    let _ = &config; // verify it compiles
+    let _ = &store;
 }
