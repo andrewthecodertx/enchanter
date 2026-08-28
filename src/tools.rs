@@ -1043,18 +1043,18 @@ mod tests {
 
     /// Broad allow-list for tests: permits any path so file/exec tools run.
     fn allowed() -> Vec<PathBuf> {
-        // Root of the current filesystem so tests can touch temp files and CWD.
-        // On Unix this is `/`; on Windows it's the drive root of CWD (e.g. `C:\`),
-        // which `starts_with` matching requires for temp-dir paths.
+        // Allow the whole filesystem in unit tests. On Unix, `/` is a prefix
+        // of every path. On Windows, canonical temp paths can carry a `\\?\`
+        // verbatim prefix and live on another drive, so a bare drive-root prefix
+        // is not reliable — use the empty-root Path that `starts_with` treats
+        // as matching everything (see path_is_allowed).
         #[cfg(unix)]
         {
             vec![PathBuf::from("/")]
         }
         #[cfg(windows)]
         {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let root = cwd.ancestors().last().unwrap_or(&cwd).to_path_buf();
-            vec![root]
+            vec![PathBuf::from("")]
         }
     }
 
