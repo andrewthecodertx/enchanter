@@ -274,6 +274,7 @@
     <span id="sessionTitle" class="dim"></span>
     <span id="ctxInfo" class="dim"></span>
     <span class="spacer"></span>
+    <button id="tokenBtn" title="Set the API token (stored in localStorage)">🔑</button>
     <button id="undoBtn" title="Undo last exchange">Undo</button>
     <button id="retryBtn" title="Retry last user message">Retry</button>
     <button id="clearBtn" title="Start a new session">New session</button>
@@ -320,6 +321,37 @@
   let lastUser = "";
   let streamRow = null; // { row, text, cursor } for the active assistant stream
   let lastResources = ""; // serialized /api/resources payload for flicker-free re-render
+
+  // ── token auth ──
+  // Optional shared secret for /api/* routes, stored in localStorage. When set,
+  // every fetch() gets `Authorization: Bearer <token>`. 401s prompt to re-set.
+  const TOKEN_KEY = "enchanter_token";
+  let token = localStorage.getItem(TOKEN_KEY) || "";
+
+  function headersWithAuth(extra) {
+    const h = Object.assign({}, extra || {});
+    if (token) h["Authorization"] = "Bearer " + token;
+    return h;
+  }
+
+  function isUnauthorized(resp) {
+    return resp.status === 401;
+  }
+
+  function handleUnauthorized() {
+    alert("Invalid or missing token — set it with the 🔑 button");
+    token = "";
+    localStorage.removeItem(TOKEN_KEY);
+  }
+
+  function setToken() {
+    const entered = prompt("Token (shared secret for this server):", token);
+    if (entered == null) return;
+    token = entered.trim();
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+    location.reload();
+  }
 
   function setStatus(msg, cls) {
     statusEl.textContent = msg || "";
@@ -472,10 +504,13 @@
       rejectBtn.textContent = "…";
       fetch("/api/tool/approve", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: headersWithAuth({ "Content-Type": "application/json" }),
         body: JSON.stringify({ index: index, approve: approve }),
       })
-        .then((r) => r.json().catch(() => ({})))
+        .then((r) => {
+          if (isUnauthorized(r)) { handleUnauthorized(); throw new Error("unauthorized"); }
+          return r.json().catch(() => ({}));
+        })
         .then((j) => {
           if (approve) approveBtn.textContent = "Approved";
           else rejectBtn.textContent = "Rejected";
@@ -507,11 +542,12 @@
 
     fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headersWithAuth({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     })
       .then((resp) => {
         if (!resp.ok) {
+          if (isUnauthorized(resp)) { handleUnauthorized(); throw new Error("unauthorized"); }
           return resp.json().then((j) => {
             throw new Error(j.error || ("HTTP " + resp.status));
           });
@@ -613,8 +649,11 @@
 
   function undo() {
     if (busy) return;
-    fetch("/api/undo", { method: "POST" })
-      .then((r) => r.json())
+    fetch("/api/undo", { method: "POST", headers: headersWithAuth() })
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); throw new Error("unauthorized"); }
+        return r.json();
+      })
       .then((j) => {
         if (j.ok) pollStatus();
         else setStatus("undo: " + (j.error || "failed"), "error");
@@ -625,8 +664,11 @@
   function clearChat() {
     if (busy) return;
     if (!confirm("Start a new session? The current one is kept on disk.")) return;
-    fetch("/api/clear", { method: "POST" })
-      .then((r) => r.json())
+    fetch("/api/clear", { method: "POST", headers: headersWithAuth() })
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); throw new Error("unauthorized"); }
+        return r.json();
+      })
       .then((j) => {
         if (!j.ok) { setStatus("clear: " + (j.error || "failed"), "error"); return; }
         messagesEl.innerHTML = "";
@@ -642,10 +684,13 @@
   function switchModel(name) {
     fetch("/api/model", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headersWithAuth({ "Content-Type": "application/json" }),
       body: JSON.stringify({ name }),
     })
-      .then((r) => r.json())
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); throw new Error("unauthorized"); }
+        return r.json();
+      })
       .then((j) => {
         if (j.ok) {
           note("switched model → " + (j.label || name));
@@ -662,10 +707,13 @@
     if (busy || !id) return;
     fetch("/api/chat/resume", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headersWithAuth({ "Content-Type": "application/json" }),
       body: JSON.stringify({ session_id: id }),
     })
-      .then((r) => r.json())
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); throw new Error("unauthorized"); }
+        return r.json();
+      })
       .then((j) => {
         if (!j.ok) { setStatus("resume: " + (j.error || "failed"), "error"); return; }
         messagesEl.innerHTML = "";
@@ -686,16 +734,23 @@
   // ── polling ──
   function pollStatus() {
     if (busy) return;
-    fetch("/api/status")
-      .then((r) => r.json())
-      .then(renderStatus)
+    fetch("/api/status", { headers: headersWithAuth() })
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); return null; }
+        return r.json();
+      })
+      .then((j) => { if (j) renderStatus(j); })
       .catch(() => {});
   }
 
   function loadModels() {
-    fetch("/api/models")
-      .then((r) => r.json())
+    fetch("/api/models", { headers: headersWithAuth() })
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); return null; }
+        return r.json();
+      })
       .then((j) => {
+        if (!j) return;
         modelSel.innerHTML = "";
         (j.providers || []).forEach((p) => {
           const opt = document.createElement("option");
@@ -715,9 +770,13 @@
   }
 
   function loadSessions() {
-    fetch("/api/sessions")
-      .then((r) => r.json())
+    fetch("/api/sessions", { headers: headersWithAuth() })
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); return null; }
+        return r.json();
+      })
       .then((j) => {
+        if (!j) return;
         sessionSel.innerHTML = '<option value="">new session</option>';
         (j.sessions || []).forEach((s) => {
           const opt = document.createElement("option");
@@ -792,9 +851,13 @@
   }
 
   function loadResources() {
-    fetch("/api/resources")
-      .then((r) => r.json())
+    fetch("/api/resources", { headers: headersWithAuth() })
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); return null; }
+        return r.json();
+      })
       .then((j) => {
+        if (!j) return;
         const key = JSON.stringify(j);
         if (key === lastResources) return;
         lastResources = key;
@@ -810,10 +873,13 @@
     if (title == null) return;
     fetch("/api/session/title", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headersWithAuth({ "Content-Type": "application/json" }),
       body: JSON.stringify({ title: title.trim() }),
     })
-      .then((r) => r.json())
+      .then((r) => {
+        if (isUnauthorized(r)) { handleUnauthorized(); throw new Error("unauthorized"); }
+        return r.json();
+      })
       .then((j) => {
         if (j.ok) {
           pollStatus();
@@ -844,6 +910,7 @@
   $("retryBtn").addEventListener("click", retry);
   $("clearBtn").addEventListener("click", clearChat);
   $("titleBtn").addEventListener("click", renameSession);
+  $("tokenBtn").addEventListener("click", setToken);
 
   setInterval(pollStatus, 3000);
   setInterval(loadResources, 3000);

@@ -137,6 +137,10 @@ pub enum Commands {
         /// Address to bind. Defaults to loopback; the interface has no auth.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Optional shared secret required by the web UI (Authorization: Bearer).
+        /// Default: disabled.
+        #[arg(long, default_value = "")]
+        token: String,
         /// Do not attempt to open a browser
         #[arg(long)]
         no_browser: bool,
@@ -662,10 +666,19 @@ async fn handle_command(
         Commands::Serve {
             port,
             host,
+            token,
             no_browser,
         } => {
             // Resolve initial model: config default (no -m flag in serve).
             let resolved = config.resolve_default();
+
+            // Optional web UI auth token: non-empty CLI flag wins over config.
+            let auth_token = if token.trim().is_empty() {
+                config.web.auth_token.clone()
+            } else {
+                Some(token.clone())
+            };
+
             let mut agent = AgentSession::new(
                 config.clone(),
                 soul.clone(),
@@ -699,6 +712,7 @@ async fn handle_command(
                 host.clone(),
                 *port,
                 *no_browser,
+                auth_token,
             )
             .await?;
         }

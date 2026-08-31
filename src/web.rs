@@ -11,7 +11,10 @@
 //! mutex, taken for the duration of a turn and restored when it completes.
 //!
 //! Security: binds 127.0.0.1 by default and has no authentication. It is a
-//! local development interface — do not expose the port publicly.
+//! local development interface — do not expose the port publicly. When a
+//! shared-secret token is configured (CLI `--token` or config `web.auth_token`),
+//! all /api/* routes require `Authorization: Bearer <token>`. When no token is
+//! configured (the default) behavior is unchanged.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -26,8 +29,8 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -70,11 +73,23 @@ struct WebState {
     /// at most ONE approval is pending at a time — an extra bool just sits in
     /// the channel and is consumed by the next approval wait.
     approval_tx: Mutex<Option<mpsc::UnboundedSender<bool>>>,
+    /// Optional shared secret for /api/* routes (`Authorization: Bearer`).
+    /// Immutable after construction; None/Some("") = auth disabled.
+    auth_token: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
 struct ChatReq {
     prompt: String,
+}
+
+/// Query-param fallback for the chat SSE endpoints. `EventSource` cannot set
+/// the Authorization header, so the token is accepted via `?token=…` for
+/// /api/chat and its retry/resume siblings. Tradeoff: the token appears in
+/// request URLs (and thus server logs) — acceptable for localhost tooling.
+#[derive(serde::Deserialize)]
+struct TokenQuery {
+    token: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -141,6 +156,7 @@ pub async fn serve(
     host: String,
     port: u16,
     no_browser: bool,
+    auth_token: Option<String>,
 ) -> Result<()> {
     let model = agent.resolved.model.clone();
     let provider = short_provider(&agent.resolved.base_url);
@@ -166,10 +182,22 @@ pub async fn serve(
         provider,
         tool_count
     );
-    println!(
-        "{} No authentication — local development only. Do not expose publicly.",
-        "Warning:".yellow()
-    );
+    let auth_enabled = auth_token
+        .as_ref()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false);
+    if auth_enabled {
+        println!(
+            "  {} {}",
+            "Auth:".dimmed(),
+            "enabled (Authorization: Bearer <token>)".green()
+        );
+    } else {
+        println!(
+            "{} No authentication — local development only. Do not expose publicly.",
+            "Warning:".yellow()
+        );
+    }
     println!();
 
     #[cfg(unix)]
@@ -209,6 +237,7 @@ pub async fn serve(
         snapshot: Mutex::new(Value::Null),
         resources: Mutex::new(json!({ "skills": skills_json, "mcp": [] })),
         approval_tx: Mutex::new(None),
+        auth_token,
     });
 
     let app = router(state);
@@ -249,6 +278,59 @@ fn short_provider(base_url: &str) -> String {
         .replace("https://api.groq.com/openai/v1", "groq")
 }
 
+// ── Token auth ────────────────────────────────────────────────
+
+/// Whether token auth is enabled for this server.
+fn auth_enabled(state: &WebState) -> bool {
+    state
+        .auth_token
+        .as_ref()
+        .map(|t| !t.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// Check the Authorization header against the configured shared secret.
+/// No-op when auth is disabled. Returns a 401 WebError when enabled and the
+/// header is missing or != "Bearer <token>".
+fn check_auth(state: &WebState, headers: &HeaderMap) -> Result<(), WebError> {
+    if !auth_enabled(state) {
+        return Ok(());
+    }
+    let expected = state.auth_token.as_deref().unwrap_or("");
+    match bearer_token(headers) {
+        Some(token) if token == expected => Ok(()),
+        _ => Err(WebError::new(StatusCode::UNAUTHORIZED, "unauthorized")),
+    }
+}
+
+/// Auth check for the streaming chat endpoints: accepts the Authorization
+/// header OR (when no header is present) the `?token=` query param, which
+/// exists for clients that cannot set headers (EventSource).
+fn check_stream_auth(
+    state: &WebState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Result<(), WebError> {
+    if !auth_enabled(state) {
+        return Ok(());
+    }
+    let expected = state.auth_token.as_deref().unwrap_or("");
+    let header_token = bearer_token(headers);
+    let candidate = header_token.or(query_token);
+    match candidate {
+        Some(token) if token == expected => Ok(()),
+        _ => Err(WebError::new(StatusCode::UNAUTHORIZED, "unauthorized")),
+    }
+}
+
+/// Extract the Bearer token from the Authorization header, if present.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
 // ── Pages & status ────────────────────────────────────────────
 
 async fn index() -> impl IntoResponse {
@@ -258,8 +340,12 @@ async fn index() -> impl IntoResponse {
     )
 }
 
-async fn api_status(State(state): State<Arc<WebState>>) -> Json<Value> {
-    match state.agent.try_lock() {
+async fn api_status(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
+    Ok(match state.agent.try_lock() {
         Ok(guard) => match guard.as_ref() {
             Some(agent) => {
                 let v = status_json(agent);
@@ -270,7 +356,7 @@ async fn api_status(State(state): State<Arc<WebState>>) -> Json<Value> {
         },
         // Lock held by a streaming turn — return the last snapshot.
         Err(_) => Json(state.snapshot.lock().await.clone()),
-    }
+    })
 }
 
 async fn snapshot_or_idle(state: &WebState) -> Value {
@@ -355,7 +441,11 @@ fn status_json(agent: &AgentSession) -> Value {
 
 // ── Session endpoints ─────────────────────────────────────────
 
-async fn api_sessions() -> Result<Json<Value>, WebError> {
+async fn api_sessions(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let sessions = Session::list_all().map_err(WebError::from)?;
     let list: Vec<Value> = sessions
         .iter()
@@ -373,7 +463,12 @@ async fn api_sessions() -> Result<Json<Value>, WebError> {
     Ok(Json(json!({ "sessions": list })))
 }
 
-async fn api_history(Path(id): Path<String>) -> Result<Json<Value>, WebError> {
+async fn api_history(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let entries = Session::load(&id).map_err(|e| {
         WebError::new(
             StatusCode::NOT_FOUND,
@@ -386,7 +481,11 @@ async fn api_history(Path(id): Path<String>) -> Result<Json<Value>, WebError> {
     })))
 }
 
-async fn api_resources(State(state): State<Arc<WebState>>) -> Json<Value> {
+async fn api_resources(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let skills_json: Vec<Value> = state
         .skills
         .skills
@@ -429,13 +528,15 @@ async fn api_resources(State(state): State<Arc<WebState>>) -> Json<Value> {
         // Lock held by a streaming turn — return the cached snapshot.
         Err(_) => state.resources.lock().await.clone(),
     };
-    Json(mcp)
+    Ok(Json(mcp))
 }
 
 async fn api_session_title(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(req): Json<TitleReq>,
 ) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let mut guard = match state.agent.try_lock() {
         Ok(guard) => guard,
         Err(_) => {
@@ -459,8 +560,10 @@ async fn api_session_title(
 
 async fn api_chat_resume(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(req): Json<ResumeReq>,
 ) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let mut agent = AgentSession::resume(
         state.config.clone(),
         state.soul.clone(),
@@ -533,7 +636,11 @@ fn history_from_messages(messages: &[crate::api::Message]) -> Vec<Value> {
 
 // ── Model & session controls ──────────────────────────────────
 
-async fn api_models(State(state): State<Arc<WebState>>) -> Json<Value> {
+async fn api_models(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let current = match state.agent.try_lock() {
         Ok(guard) => guard
             .as_ref()
@@ -559,13 +666,15 @@ async fn api_models(State(state): State<Arc<WebState>>) -> Json<Value> {
                 .map(|r| json!({ "name": name, "model": r.model }))
         })
         .collect();
-    Json(json!({ "providers": providers, "current": current }))
+    Ok(Json(json!({ "providers": providers, "current": current })))
 }
 
 async fn api_model(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(req): Json<ModelReq>,
 ) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let mut guard = state.agent.lock().await;
     let agent = guard
         .as_mut()
@@ -578,7 +687,11 @@ async fn api_model(
     ))
 }
 
-async fn api_undo(State(state): State<Arc<WebState>>) -> Result<Json<Value>, WebError> {
+async fn api_undo(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let mut guard = state.agent.lock().await;
     let agent = guard
         .as_mut()
@@ -588,7 +701,11 @@ async fn api_undo(State(state): State<Arc<WebState>>) -> Result<Json<Value>, Web
     Ok(Json(json!({ "ok": true, "undone": undone })))
 }
 
-async fn api_clear(State(state): State<Arc<WebState>>) -> Result<Json<Value>, WebError> {
+async fn api_clear(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let mut guard = state.agent.lock().await;
     let agent = guard
         .as_mut()
@@ -599,24 +716,32 @@ async fn api_clear(State(state): State<Arc<WebState>>) -> Result<Json<Value>, We
     Ok(Json(json!({ "ok": true, "status": status })))
 }
 
-async fn api_stop(State(state): State<Arc<WebState>>) -> Json<Value> {
+async fn api_stop(
+    State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let abort = state.abort.lock().await.take();
     match abort {
         Some(tx) => {
             let _ = tx.send(());
-            Json(json!({ "ok": true, "stopped": true }))
+            Ok(Json(json!({ "ok": true, "stopped": true })))
         }
-        None => {
-            Json(json!({ "ok": true, "stopped": false, "message": "no conversation in flight" }))
-        }
+        None => Ok(Json(json!({
+            "ok": true,
+            "stopped": false,
+            "message": "no conversation in flight"
+        }))),
     }
 }
 
 /// Accept an approval decision for the pending dangerous tool call.
 async fn api_tool_approve(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
     Json(req): Json<ToolApproveReq>,
 ) -> Result<Json<Value>, WebError> {
+    check_auth(&state, &headers)?;
     let approval_tx = {
         let guard = state.approval_tx.lock().await;
         guard.clone()
@@ -644,17 +769,29 @@ async fn api_tool_approve(
 
 // ── Chat / SSE ────────────────────────────────────────────────
 
+/// All chat streaming is fetch-based (POST + ReadableStream reader), so the
+/// Authorization header works for /api/chat, /api/chat/retry and
+/// /api/chat/resume. The `?token=` query param is accepted as a fallback in
+/// case a client (e.g. a future EventSource consumer) cannot set headers;
+/// tradeoff: the token leaks into request logs — acceptable for localhost
+/// tooling.
 async fn api_chat(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Query(query): Query<TokenQuery>,
     Json(req): Json<ChatReq>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, WebError> {
+    check_stream_auth(&state, &headers, query.token.as_deref())?;
     let rx = spawn_turn(state, Some(req.prompt)).await?;
     Ok(Sse::new(sse_stream(rx)).keep_alive(KeepAlive::default()))
 }
 
 async fn api_chat_retry(
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
+    Query(query): Query<TokenQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>, WebError> {
+    check_stream_auth(&state, &headers, query.token.as_deref())?;
     let rx = spawn_turn(state, None).await?;
     Ok(Sse::new(sse_stream(rx)).keep_alive(KeepAlive::default()))
 }
@@ -858,6 +995,7 @@ mod tests {
             snapshot: Mutex::new(Value::Null),
             resources: Mutex::new(json!({ "skills": [], "mcp": [] })),
             approval_tx: Mutex::new(None),
+            auth_token: None,
         }
     }
 
@@ -1032,6 +1170,99 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/models")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_status_requires_token_when_configured() {
+        use tower::ServiceExt;
+
+        let mut state = test_state();
+        state.auth_token = Some("secret".into());
+        let app = router(Arc::new(state));
+
+        // No Authorization header -> 401.
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        // Rejection renders as the standard JSON error shape.
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "{\"error\":\"unauthorized\"}"
+        );
+
+        // Wrong token -> 401.
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer wrong")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct Bearer token -> 200.
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .header("Authorization", "Bearer secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_status_open_when_no_token_configured() {
+        use tower::ServiceExt;
+
+        let app = router(Arc::new(test_state()));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/status")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn index_page_requires_no_auth() {
+        use tower::ServiceExt;
+
+        let mut state = test_state();
+        state.auth_token = Some("secret".into());
+        let app = router(Arc::new(state));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )

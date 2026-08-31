@@ -60,10 +60,21 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 fn default_config_version() -> u32 {
     1
+}
+
+/// Web UI (`enchanter serve`) settings.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct WebConfig {
+    /// Optional shared secret required by /api/* routes, sent as
+    /// `Authorization: Bearer <token>`. Empty/missing = auth disabled.
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 /// A named provider preset: model + base_url + api_key.
@@ -822,6 +833,17 @@ mod tests {
         assert_eq!(cfg.agent.retry.max_attempts, 5);
         assert_eq!(cfg.agent.retry.base_delay_ms, 500);
         assert_eq!(cfg.agent.retry.max_delay_ms, 8000);
+    }
+
+    #[test]
+    fn web_config_parses_auth_token() {
+        // Present auth_token -> Some.
+        let cfg: Config = serde_yaml::from_str("web:\n  auth_token: sekrit\n").unwrap();
+        assert_eq!(cfg.web.auth_token.as_deref(), Some("sekrit"));
+
+        // Missing web block -> None (auth disabled).
+        let cfg: Config = serde_yaml::from_str("model:\n  default: gpt-4.1-mini\n").unwrap();
+        assert_eq!(cfg.web.auth_token, None);
     }
 
     #[test]
