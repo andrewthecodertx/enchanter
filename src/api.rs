@@ -19,6 +19,9 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
+
+use crate::config::RetryConfig;
 
 // ── Message model ──────────────────────────────────────────────
 
@@ -221,7 +224,83 @@ struct DeltaToolCallFunction {
     arguments: Option<String>,
 }
 
-// ── Client ─────────────────────────────────────────────────────
+// ── Retry/backoff ──────────────────────────────────────────────
+
+/// Which HTTP statuses are worth retrying. 429 (rate limited) and every 5xx
+/// are transient server-side conditions; other 4xx client errors (400, 401,
+/// 403, 404, 422, …) are not.
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+/// Whether an error from `client.send()` warrants a retry: network-level
+/// failures (connect/read timeouts, failed request dispatch). Non-transient
+/// errors (auth, TLS, DNS) return immediately.
+fn is_retryable_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect() || err.is_request()
+}
+
+/// xorshift64* PRNG for backoff jitter — avoids pulling in a rand dependency
+/// just for ±20% noise. Seeded once per thread from the system clock.
+fn jitter_rand() -> f64 {
+    use std::cell::Cell;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    thread_local! {
+        static STATE: Cell<u64> = const { Cell::new(0) };
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        if x == 0 {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0) as u64;
+            x = nanos | 1;
+        }
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        s.set(x);
+        ((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11) as f64) / ((1u64 << 53) as f64)
+    })
+}
+
+/// Backoff delay (including ±20% jitter) for a retry attempt.
+///
+/// Exponential: `base_delay_ms * 2^attempt`, capped at `max_delay_ms`.
+/// A `Retry-After` header value (seconds) overrides the exponential delay
+/// when present (still capped at `max_delay_ms`). Returns a duration within
+/// `[expected * 0.8, expected * 1.2]` of the un-jittered delay.
+fn compute_backoff_delay(
+    attempt: u32,
+    base_delay_ms: u64,
+    max_delay_ms: u64,
+    retry_after: Option<u64>,
+) -> Duration {
+    let base_ms = match retry_after {
+        Some(secs) => secs.saturating_mul(1000).min(max_delay_ms),
+        None => base_delay_ms
+            .saturating_mul(2u64.saturating_pow(attempt))
+            .min(max_delay_ms),
+    };
+    let scaled = base_ms as f64 * (0.8 + 0.4 * jitter_rand());
+    Duration::from_millis(scaled.round() as u64)
+}
+
+/// Read the `Retry-After` header (seconds) from a response, if present.
+fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// Pause for the computed backoff (the delay already includes jitter).
+async fn sleep_backoff(delay: Duration) {
+    tokio::time::sleep(delay).await;
+}
 
 pub struct LlmClient {
     client: Client,
@@ -280,6 +359,7 @@ impl LlmClient {
         &self,
         messages: &[Message],
         tools: Option<&Value>,
+        retry: &RetryConfig,
         mut on_token: F,
     ) -> Result<ChatResult>
     where
@@ -295,22 +375,63 @@ impl LlmClient {
             tools,
         };
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&request);
-        let response = self
-            .apply_auth(response)
-            .send()
-            .await
-            .with_context(|| format!("connecting to {}", url))?;
+        // Rebuild the RequestBuilder per attempt — it isn't Clone.
+        let build_request = || {
+            self.client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&request)
+        };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error {}: {}", status, body);
-        }
+        // Retry loop around the request phase only. Once we have a successful
+        // response the stream is consumed below without retries.
+        let attempts = retry.max_attempts.max(1);
+        let mut last_error: Option<anyhow::Error> = None;
+        let response = 'retry: {
+            for attempt in 0..attempts {
+                let response = match self.apply_auth(build_request()).send().await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let retryable = is_retryable_error(&e);
+                        let err = anyhow::Error::new(e).context(format!("connecting to {}", url));
+                        if !retryable || attempt + 1 >= attempts {
+                            return Err(err);
+                        }
+                        last_error = Some(err);
+                        sleep_backoff(compute_backoff_delay(
+                            attempt,
+                            retry.base_delay_ms,
+                            retry.max_delay_ms,
+                            None,
+                        ))
+                        .await;
+                        continue;
+                    }
+                };
+
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let retry_after = retry_after_secs(&response);
+                    let body = response.text().await.unwrap_or_default();
+                    let err = anyhow::anyhow!("API error {}: {}", status, body);
+                    if !is_retryable_status(status.as_u16()) || attempt + 1 >= attempts {
+                        return Err(err);
+                    }
+                    last_error = Some(err);
+                    sleep_backoff(compute_backoff_delay(
+                        attempt,
+                        retry.base_delay_ms,
+                        retry.max_delay_ms,
+                        retry_after,
+                    ))
+                    .await;
+                    continue;
+                }
+
+                break 'retry response;
+            }
+            return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("API request failed")));
+        };
 
         let mut full_content = String::new();
         let mut tool_calls_accum: std::collections::BTreeMap<u64, ToolCallAccum> =
@@ -456,10 +577,11 @@ impl LlmClient {
         &self,
         messages: &[Message],
         tools: Option<&Value>,
+        retry: &RetryConfig,
     ) -> Result<ChatResult> {
         use std::io::Write;
         let result = self
-            .chat_stream_with(messages, tools, |token| {
+            .chat_stream_with(messages, tools, retry, |token| {
                 print!("{}", token);
                 std::io::stdout().flush().ok();
             })
@@ -471,7 +593,12 @@ impl LlmClient {
     }
 
     /// Non-streaming chat.
-    pub async fn chat(&self, messages: &[Message], tools: Option<&Value>) -> Result<ChatResult> {
+    pub async fn chat(
+        &self,
+        messages: &[Message],
+        tools: Option<&Value>,
+        retry: &RetryConfig,
+    ) -> Result<ChatResult> {
         let url = self.base_url.clone();
 
         let request = ChatRequest {
@@ -485,23 +612,65 @@ impl LlmClient {
         // Non-streaming requests get a 5-minute total timeout as a safety net.
         const NON_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-        let req_builder = self
-            .client
-            .post(&url)
-            .timeout(NON_STREAM_TIMEOUT)
-            .header("Content-Type", "application/json")
-            .json(&request);
-        let response = self
-            .apply_auth(req_builder)
-            .send()
-            .await
-            .with_context(|| format!("connecting to {}", url))?;
+        // Rebuild the RequestBuilder per attempt — it isn't Clone.
+        let build_request = || {
+            self.client
+                .post(&url)
+                .timeout(NON_STREAM_TIMEOUT)
+                .header("Content-Type", "application/json")
+                .json(&request)
+        };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error {}: {}", status, body);
-        }
+        // Retry loop around the request phase only (send + status check + error
+        // mapping). 429/5xx and network errors back off and retry; 4xx client
+        // errors and parse failures return immediately.
+        let attempts = retry.max_attempts.max(1);
+        let mut last_error: Option<anyhow::Error> = None;
+        let response = 'retry: {
+            for attempt in 0..attempts {
+                let response = match self.apply_auth(build_request()).send().await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let retryable = is_retryable_error(&e);
+                        let err = anyhow::Error::new(e).context(format!("connecting to {}", url));
+                        if !retryable || attempt + 1 >= attempts {
+                            return Err(err);
+                        }
+                        last_error = Some(err);
+                        sleep_backoff(compute_backoff_delay(
+                            attempt,
+                            retry.base_delay_ms,
+                            retry.max_delay_ms,
+                            None,
+                        ))
+                        .await;
+                        continue;
+                    }
+                };
+
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let retry_after = retry_after_secs(&response);
+                    let body = response.text().await.unwrap_or_default();
+                    let err = anyhow::anyhow!("API error {}: {}", status, body);
+                    if !is_retryable_status(status.as_u16()) || attempt + 1 >= attempts {
+                        return Err(err);
+                    }
+                    last_error = Some(err);
+                    sleep_backoff(compute_backoff_delay(
+                        attempt,
+                        retry.base_delay_ms,
+                        retry.max_delay_ms,
+                        retry_after,
+                    ))
+                    .await;
+                    continue;
+                }
+
+                break 'retry response;
+            }
+            return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("API request failed")));
+        };
 
         let chat_response: ChatResponse = response.json().await.context("parsing API response")?;
 
@@ -602,5 +771,64 @@ mod tests {
         let resp: ChatResponse =
             serde_json::from_str(r#"{"choices": [{"message": {"content": "hi"}}]}"#).unwrap();
         assert!(resp.usage.is_none());
+    }
+
+    /// Assert a backoff delay is within [expected_ms * 0.8, expected_ms * 1.2]
+    /// — the jitter bounds for a ±20% swing around the un-jittered delay.
+    fn assert_delay_within(delay: Duration, expected_ms: u64) {
+        let actual_ms = delay.as_millis() as u64;
+        let lo = (expected_ms as f64 * 0.8) as u64;
+        let hi = (expected_ms as f64 * 1.2) as u64;
+        assert!(
+            (lo..=hi).contains(&actual_ms),
+            "delay {actual_ms}ms outside [{lo}, {hi}]ms for expected {expected_ms}ms"
+        );
+    }
+
+    #[test]
+    fn backoff_exponential_growth() {
+        // Base 500ms doubles per attempt, capped at 8000ms.
+        assert_delay_within(compute_backoff_delay(0, 500, 8000, None), 500);
+        assert_delay_within(compute_backoff_delay(1, 500, 8000, None), 1000);
+        assert_delay_within(compute_backoff_delay(2, 500, 8000, None), 2000);
+        assert_delay_within(compute_backoff_delay(3, 500, 8000, None), 4000);
+    }
+
+    #[test]
+    fn backoff_caps_at_max_delay() {
+        // 500 * 2^5 = 16000ms → capped at max_delay_ms = 8000ms.
+        assert_delay_within(compute_backoff_delay(5, 500, 8000, None), 8000);
+        assert_delay_within(compute_backoff_delay(10, 500, 8000, None), 8000);
+    }
+
+    #[test]
+    fn backoff_retry_after_override() {
+        // Retry-After (seconds) overrides the exponential delay, still capped
+        // at max_delay_ms (8000ms = 8s).
+        assert_delay_within(compute_backoff_delay(0, 500, 8000, Some(3)), 3000);
+        assert_delay_within(compute_backoff_delay(4, 500, 8000, Some(50)), 8000);
+    }
+
+    #[test]
+    fn backoff_jitter_bounds() {
+        // Jitter must keep every sample within ±20% of the expected delay.
+        for _ in 0..1000 {
+            assert_delay_within(compute_backoff_delay(0, 1000, 8000, None), 1000);
+            assert_delay_within(compute_backoff_delay(2, 500, 8000, None), 2000);
+            assert_delay_within(compute_backoff_delay(0, 500, 8000, Some(2)), 2000);
+        }
+    }
+
+    #[test]
+    fn retryable_status_classification() {
+        // Retryable: 429 and all 5xx.
+        assert!(is_retryable_status(429));
+        for code in [500, 502, 503, 504, 529] {
+            assert!(is_retryable_status(code), "{code} should be retryable");
+        }
+        // Not retryable: 2xx/3xx (never an error path) and 4xx client errors.
+        for code in [200, 204, 301, 400, 401, 403, 404, 422] {
+            assert!(!is_retryable_status(code), "{code} should not be retryable");
+        }
     }
 }

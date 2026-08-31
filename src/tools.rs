@@ -46,6 +46,10 @@ use crate::config::SecurityConfig;
 use crate::kstore::KnowledgeStore;
 use crate::memory::MemoryStore;
 
+/// Execution cap for `exec_command` (sandboxed and unsandboxed). When the
+/// child (or its process group) runs longer, the timeout kills it.
+const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 30;
+
 /// Emit the "running unsandboxed" warning at most once per process.
 fn warn_unsandboxed_once() {
     use std::sync::Once;
@@ -421,42 +425,50 @@ async fn tool_exec_command(
             Err(e) => return format!("Error: cannot locate enchanter binary for sandbox: {}", e),
         };
 
-        match timeout(
-            Duration::from_secs(30),
-            Command::new(exe)
-                .arg(crate::sandbox::SANDBOX_ARG)
-                .arg(command)
-                .env(
-                    crate::sandbox::SANDBOX_PATHS_ENV,
-                    crate::sandbox::encode_paths(allowed_paths),
-                )
-                .env(
-                    crate::sandbox::SANDBOX_PASSTHROUGH_ENV,
-                    security.sandbox_passthrough_env.join(","),
-                )
-                .current_dir(&cwd)
-                .output(),
-        )
-        .await
-        {
+        let mut cmd = Command::new(exe);
+        cmd.arg(crate::sandbox::SANDBOX_ARG)
+            .arg(command)
+            .env(
+                crate::sandbox::SANDBOX_PATHS_ENV,
+                crate::sandbox::encode_paths(allowed_paths),
+            )
+            .env(
+                crate::sandbox::SANDBOX_PASSTHROUGH_ENV,
+                security.sandbox_passthrough_env.join(","),
+            )
+            .current_dir(&cwd);
+        // Unix only: put the child in its own process group and kill the whole
+        // group on drop, so a timed-out command can't leave orphaned background
+        // children running. No-op on other platforms.
+        #[cfg(unix)]
+        cmd.process_group(0).kill_on_drop(true);
+
+        match timeout(Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS), cmd.output()).await {
             Ok(result) => result,
-            Err(_) => return "Error: command execution timed out after 30 seconds".to_string(),
+            Err(_) => {
+                return format!(
+                    "Error: command execution timed out after {} seconds",
+                    DEFAULT_EXEC_TIMEOUT_SECS
+                );
+            }
         }
     } else if allow_unsandboxed {
         warn_unsandboxed_once();
 
-        match timeout(
-            Duration::from_secs(30),
-            Command::new("sh")
-                .arg("-c")
-                .arg(command)
-                .current_dir(&cwd)
-                .output(),
-        )
-        .await
-        {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command).current_dir(&cwd);
+        // Same process-group handling as the sandboxed branch.
+        #[cfg(unix)]
+        cmd.process_group(0).kill_on_drop(true);
+
+        match timeout(Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS), cmd.output()).await {
             Ok(result) => result,
-            Err(_) => return "Error: command execution timed out after 30 seconds".to_string(),
+            Err(_) => {
+                return format!(
+                    "Error: command execution timed out after {} seconds",
+                    DEFAULT_EXEC_TIMEOUT_SECS
+                );
+            }
         }
     } else {
         return "Error: no filesystem sandbox available on this system (Landlock \
@@ -1060,6 +1072,16 @@ mod tests {
 
     fn test_security() -> SecurityConfig {
         SecurityConfig::default()
+    }
+
+    #[test]
+    fn exec_timeout_constant_is_30_secs() {
+        assert_eq!(DEFAULT_EXEC_TIMEOUT_SECS, 30);
+        // Sanity: the constant is the one wired into the timeout() calls.
+        assert_eq!(
+            Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

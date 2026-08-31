@@ -125,6 +125,49 @@ pub struct AgentConfig {
     pub summarize_on_exit: Option<bool>,
     #[serde(default)]
     pub context: ContextConfig,
+    /// Retry/backoff policy for transient API failures (HTTP 429, 5xx,
+    /// connect/read timeouts, network errors).
+    #[serde(default)]
+    pub retry: RetryConfig,
+}
+
+/// Retry/backoff policy for transient API failures.
+/// Attempts after the first are delayed by an exponentially growing amount
+/// (capped at `max_delay_ms`) plus ±20% jitter. A `Retry-After` response
+/// header overrides the computed delay when present.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetryConfig {
+    /// Total number of attempts (including the initial one).
+    #[serde(default = "default_retry_max_attempts")]
+    pub max_attempts: u32,
+    /// Base delay in ms; doubles each retry.
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub base_delay_ms: u64,
+    /// Upper bound on the delay in ms.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+}
+
+fn default_retry_max_attempts() -> u32 {
+    3
+}
+
+fn default_retry_base_delay_ms() -> u64 {
+    500
+}
+
+fn default_retry_max_delay_ms() -> u64 {
+    8000
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_retry_max_attempts(),
+            base_delay_ms: default_retry_base_delay_ms(),
+            max_delay_ms: default_retry_max_delay_ms(),
+        }
+    }
 }
 
 fn default_true() -> Option<bool> {
@@ -269,6 +312,13 @@ pub struct SecurityConfig {
     /// platforms where Landlock is unavailable.
     #[serde(default)]
     pub allow_unsandboxed_exec: bool,
+
+    /// When true, dangerous tools (exec_command, write_file, edit_file, memory,
+    /// knowledge, and all MCP tools) require user approval before running.
+    /// Default: false (pass-through, no behavior change).
+    #[serde(default)]
+    #[allow(dead_code)] // consumed by the tool-approval feature (agent tool dispatch)
+    pub require_tool_approval: bool,
 
     /// MCP servers that project overlays (.enchanter/config.yaml) are allowed
     /// to define. A project's config file is untrusted input: a stdio MCP
@@ -747,5 +797,43 @@ mod tests {
             resolved.base_url,
             "https://api.openai.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn retry_config_defaults() {
+        let r = RetryConfig::default();
+        assert_eq!(r.max_attempts, 3);
+        assert_eq!(r.base_delay_ms, 500);
+        assert_eq!(r.max_delay_ms, 8000);
+        // Agent-level default also populates the retry policy.
+        let agent = AgentConfig::default();
+        assert_eq!(agent.retry.max_attempts, 3);
+    }
+
+    #[test]
+    fn agent_retry_defaults_from_yaml() {
+        // Missing retry block falls back to RetryConfig::default().
+        let cfg: Config = serde_yaml::from_str("agent:\n  max_turns: 5\n").unwrap();
+        assert_eq!(cfg.agent.retry.max_attempts, 3);
+        assert_eq!(cfg.agent.retry.base_delay_ms, 500);
+        assert_eq!(cfg.agent.retry.max_delay_ms, 8000);
+
+        // Partial retry block fills unset fields from defaults.
+        let cfg: Config = serde_yaml::from_str("agent:\n  retry:\n    max_attempts: 5\n").unwrap();
+        assert_eq!(cfg.agent.retry.max_attempts, 5);
+        assert_eq!(cfg.agent.retry.base_delay_ms, 500);
+        assert_eq!(cfg.agent.retry.max_delay_ms, 8000);
+    }
+
+    #[test]
+    fn require_tool_approval_defaults_false() {
+        // Absent field -> false.
+        let cfg: Config = serde_yaml::from_str("security: {}\n").unwrap();
+        assert!(!cfg.security.require_tool_approval);
+
+        // Present true -> true.
+        let cfg: Config =
+            serde_yaml::from_str("security:\n  require_tool_approval: true\n").unwrap();
+        assert!(cfg.security.require_tool_approval);
     }
 }

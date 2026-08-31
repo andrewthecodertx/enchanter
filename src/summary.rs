@@ -96,7 +96,11 @@ pub async fn generate_session_summary(client: &LlmClient, messages: &[Message]) 
     // Non-streaming call — we don't need to display it
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        client.chat(&summary_messages, None),
+        client.chat(
+            &summary_messages,
+            None,
+            &crate::config::RetryConfig::default(),
+        ),
     )
     .await??;
 
@@ -183,7 +187,11 @@ pub async fn summarize_for_compaction(client: &LlmClient, messages: &[Message]) 
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        client.chat(&summary_messages, None),
+        client.chat(
+            &summary_messages,
+            None,
+            &crate::config::RetryConfig::default(),
+        ),
     )
     .await??;
 

@@ -265,7 +265,9 @@ impl MemoryStore {
         let messages = vec![Message::system(system_prompt), Message::user(&user_prompt)];
 
         // Use non-streaming for summarization — we don't need to display it
-        let result = client.chat(&messages, None).await?;
+        let result = client
+            .chat(&messages, None, &crate::config::RetryConfig::default())
+            .await?;
 
         Ok(result.content.unwrap_or_default())
     }

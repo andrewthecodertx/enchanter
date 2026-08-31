@@ -713,22 +713,35 @@ impl AgentSession {
 
             let result = if self.no_stream {
                 self.client
-                    .chat(&self.messages, tools_payload.as_ref())
+                    .chat(
+                        &self.messages,
+                        tools_payload.as_ref(),
+                        &self.config.agent.retry,
+                    )
                     .await
             } else {
                 match &sink {
                     EventSink::Channel(tx) => {
                         self.client
-                            .chat_stream_with(&self.messages, tools_payload.as_ref(), |token| {
-                                let _ = tx.send(Event::Content {
-                                    text: token.to_string(),
-                                });
-                            })
+                            .chat_stream_with(
+                                &self.messages,
+                                tools_payload.as_ref(),
+                                &self.config.agent.retry,
+                                |token| {
+                                    let _ = tx.send(Event::Content {
+                                        text: token.to_string(),
+                                    });
+                                },
+                            )
                             .await
                     }
                     EventSink::Silent => {
                         self.client
-                            .chat_stream(&self.messages, tools_payload.as_ref())
+                            .chat_stream(
+                                &self.messages,
+                                tools_payload.as_ref(),
+                                &self.config.agent.retry,
+                            )
                             .await
                     }
                 }
