@@ -431,6 +431,39 @@ that this means the LLM can run any command your user can.
 File tools (`read_file`, `write_file`, `edit_file`, `search_files`,
 `list_directory`) always check `allowed_paths` regardless of platform.
 
+For a full threat model — what Landlock covers, what it does not, and the
+prompt-injection picture — see [docs/security.md](docs/security.md).
+
+### Tool approval mode
+
+Want a human in the loop for every dangerous action?
+
+```yaml
+security:
+  require_tool_approval: true
+```
+
+With this set, `exec_command`, `write_file`, `edit_file`, `memory`,
+`knowledge`, and every MCP tool pause and ask before running. Read-only
+tools (`read_file`, `search_files`, `list_directory`) run freely. The REPL
+prompts `y/N`; the web UI shows Approve/Reject cards. Calls are rejected
+(fail-closed) if no approval channel is connected.
+
+### Web UI auth
+
+`enchanter serve` binds `127.0.0.1` by default. To require a bearer token
+(e.g. on a shared machine):
+
+```bash
+enchanter serve --token "$(openssl rand -hex 32)"
+# or in config.yaml:
+# web:
+#   auth_token: "…"
+```
+
+When set, every `/api/*` route needs `Authorization: Bearer <token>`. The
+frontend stores the token in `localStorage` (use the 🔑 button to set it).
+
 ## Agent configuration
 
 The `agent` section of `config.yaml` controls the agent loop and conversation
@@ -446,6 +479,10 @@ agent:
   context:                            # Rolling conversation context (long sessions)
     max_tokens: 96000      # Compact older turns when estimated tokens exceed this
     keep_last_turns: 20    # Always keep this many recent messages verbatim
+  retry:                              # API retry/backoff (transient failures only)
+    max_attempts: 3        # Total attempts incl. initial (default: 3)
+    base_delay_ms: 500     # First delay; doubles per retry (default: 500)
+    max_delay_ms: 8000     # Cap on the delay (default: 8000)
 ```
 
 `max_turns` sets a hard limit on how many agent loop iterations (model calls)

@@ -5,6 +5,41 @@ All notable changes to enchanter are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-08-31
+
+Security and robustness release, closing the findings from the v1.0.0
+security code review.
+
+### Added
+- **Tool approval mode** — `security.require_tool_approval: true` asks the
+  user before running dangerous tools (`exec_command`, `write_file`,
+  `edit_file`, `memory`, `knowledge`, and all MCP tools). REPL prompts
+  y/N; web UI renders Approve/Reject cards. Read-only tools are exempt.
+  Fail-closed: no approval channel, timeout, or rejection denies the call.
+- **Optional web UI token auth** — `enchanter serve --token <TOKEN>` (or
+  `web.auth_token` in config) requires `Authorization: Bearer` on all
+  `/api/*` routes. SSE endpoints also accept `?token=`. Loopback-only
+  default unchanged when no token is set.
+- **API retry/backoff** — transient failures (429, 5xx, connect/read
+  timeouts) retry with exponential backoff plus jitter, honoring
+  `Retry-After`. Configurable via `agent.retry` (`max_attempts`,
+  `base_delay_ms`, `max_delay_ms`). 4xx client errors are never retried.
+- **`docs/security.md`** — full threat-model page: Landlock scope and
+  limits, non-Linux fallback semantics, approval mode, web auth, secrets
+  handling, prompt-injection hardening, timeouts, token estimation.
+
+### Changed
+- `exec_command` timeout (30s) now kills the child's **process group** on
+  Unix so `sh -c` cannot orphan background children. Timeout value is a
+  named constant.
+- `security.require_tool_approval` field added (default `false` — no
+  behavior change).
+
+### Security
+- Human-in-the-loop gate for dangerous tools (opt-in).
+- Optional shared-secret auth for the web UI (loopback default unchanged).
+- Process-group cleanup on exec timeout.
+
 ## [1.0.0] - 2026-08-28
 
 First stable release. Web UI, setup wizard, token usage tracking, and
