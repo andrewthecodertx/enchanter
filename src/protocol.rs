@@ -48,6 +48,17 @@ pub enum Event {
         name: String,
         arguments: String,
     },
+    /// The model made a dangerous tool call that needs user approval before
+    /// execution (only emitted when security.require_tool_approval is true).
+    ToolApprovalRequired {
+        id: String,
+        name: String,
+        arguments: String,
+        /// Position of the tool call within the current turn's tool_calls
+        /// array (0-based), used by the web UI to correlate an approval
+        /// response with the tool call that prompted it.
+        index: usize,
+    },
     /// A tool call has completed with a result.
     ToolResult { id: String, content: String },
     /// Older conversation turns were rolled up into a summary to stay within the
@@ -253,6 +264,33 @@ mod tests {
     }
 
     #[test]
+    fn tool_approval_required_event_roundtrip() {
+        let event = Event::ToolApprovalRequired {
+            id: "call_1".into(),
+            name: "exec_command".into(),
+            arguments: r#"{"command":"rm -rf /tmp/x"}"#.into(),
+            index: 2,
+        };
+        let jsonl = event.to_jsonl().unwrap();
+        assert!(jsonl.contains(r#""type":"tool_approval_required""#));
+        let decoded = Event::from_jsonl(&jsonl).unwrap();
+        match decoded {
+            Event::ToolApprovalRequired {
+                id,
+                name,
+                arguments,
+                index,
+            } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "exec_command");
+                assert_eq!(arguments, r#"{"command":"rm -rf /tmp/x"}"#);
+                assert_eq!(index, 2);
+            }
+            _ => panic!("expected ToolApprovalRequired variant"),
+        }
+    }
+
+    #[test]
     fn tool_result_event_roundtrip() {
         let event = Event::ToolResult {
             id: "call_1".into(),
@@ -399,6 +437,10 @@ mod tests {
                 "tool_call",
             ),
             (
+                r#"{"type":"tool_approval_required","id":"1","name":"exec_command","arguments":"{}","index":0}"#,
+                "tool_approval_required",
+            ),
+            (
                 r#"{"type":"tool_result","id":"1","content":"ok"}"#,
                 "tool_result",
             ),
@@ -419,6 +461,9 @@ mod tests {
             match label {
                 "content" => assert!(matches!(evt, Event::Content { .. })),
                 "tool_call" => assert!(matches!(evt, Event::ToolCall { .. })),
+                "tool_approval_required" => {
+                    assert!(matches!(evt, Event::ToolApprovalRequired { .. }))
+                }
                 "tool_result" => assert!(matches!(evt, Event::ToolResult { .. })),
                 "done" => assert!(matches!(evt, Event::Done)),
                 "pong" => assert!(matches!(evt, Event::Pong)),

@@ -27,6 +27,46 @@ use crate::tools;
 /// changes (which a mutating tool call would do, invalidating the cache).
 const CACHEABLE_TOOLS: &[&str] = &["read_file", "list_directory", "search_files"];
 
+/// Tools that mutate persistent state and are never safe to run without human
+/// approval when `security.require_tool_approval` is true.
+const APPROVAL_TOOLS: &[&str] = &[
+    "exec_command",
+    "write_file",
+    "edit_file",
+    "memory",
+    "knowledge",
+];
+
+/// The full built-in tool set (approval-required + read-only).
+const BUILTIN_TOOLS: &[&str] = &[
+    "exec_command",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "search_files",
+    "list_directory",
+    "memory",
+    "knowledge",
+];
+
+/// Built-in tools that are read-only and never require approval.
+const READONLY_TOOLS: &[&str] = &["read_file", "search_files", "list_directory"];
+
+/// Decide whether a tool call must be paused for human approval.
+///
+/// Only consulted when the flag is on: one of the mutating built-ins, an MCP
+/// tool (uses the `__` server separator), or any tool not in the built-in set
+/// at all. Read-only built-ins never require approval.
+fn is_approval_required(flag: bool, name: &str) -> bool {
+    if !flag {
+        return false;
+    }
+    if READONLY_TOOLS.contains(&name) {
+        return false;
+    }
+    APPROVAL_TOOLS.contains(&name) || name.contains("__") || !BUILTIN_TOOLS.contains(&name)
+}
+
 /// Cache for read-only tool results within a single agent session.
 ///
 /// When the model calls `read_file("src/main.rs")` twice, the second call
@@ -104,6 +144,13 @@ pub struct AgentSession {
     /// Context window size reported by the provider's /models endpoint,
     /// if queried successfully. Layered under config-declared context_window.
     api_context_size: Option<u64>,
+    /// Tool-approval channel, set per-invocation by
+    /// `chat_events_spawned_with_approval` (not part of SessionOptions).
+    /// `approval_tx` keeps the sender alive so the agent's receiver doesn't
+    /// see a closed channel while the UI holds the other end.
+    pub approval_tx: Option<mpsc::UnboundedSender<bool>>,
+    /// Receives the user's approve/reject decision for dangerous tool calls.
+    pub approval_rx: Option<mpsc::UnboundedReceiver<bool>>,
 }
 
 /// Runtime options for an agent session, separate from the loaded core state.
@@ -205,6 +252,8 @@ impl AgentSession {
             token_usage: TokenUsage::default(),
             last_usage: None,
             api_context_size: None,
+            approval_tx: None,
+            approval_rx: None,
         })
     }
 
@@ -291,6 +340,8 @@ impl AgentSession {
             token_usage: TokenUsage::default(),
             last_usage: None,
             api_context_size: None,
+            approval_tx: None,
+            approval_rx: None,
         })
     }
 
@@ -414,12 +465,31 @@ impl AgentSession {
     /// Returns the JoinHandle (which yields the AgentSession back when done)
     /// and the event receiver.
     pub fn chat_events_spawned(
-        mut self,
+        self,
         user_prompt: &str,
     ) -> Result<(
         tokio::task::JoinHandle<Result<AgentSession>>,
         mpsc::UnboundedReceiver<Event>,
     )> {
+        self.chat_events_spawned_with_approval(user_prompt, None, None)
+    }
+
+    /// Like [`Self::chat_events_spawned`], but wires up a tool-approval channel
+    /// so dangerous tool calls pause and ask the caller (REPL/web UI) before
+    /// executing when `security.require_tool_approval` is true. `approval_tx`
+    /// and `approval_rx` are the two ends of the same unbounded channel; the
+    /// receiver is consumed by the agent loop, the sender stays with the UI.
+    pub fn chat_events_spawned_with_approval(
+        mut self,
+        user_prompt: &str,
+        approval_tx: Option<mpsc::UnboundedSender<bool>>,
+        approval_rx: Option<mpsc::UnboundedReceiver<bool>>,
+    ) -> Result<(
+        tokio::task::JoinHandle<Result<AgentSession>>,
+        mpsc::UnboundedReceiver<Event>,
+    )> {
+        self.approval_tx = approval_tx;
+        self.approval_rx = approval_rx;
         let user_msg = Message::user(user_prompt);
         self.session.append(&user_msg)?;
         self.messages.push(user_msg);
@@ -439,11 +509,26 @@ impl AgentSession {
     /// Start a retry and immediately return the event receiver, spawning the
     /// agent loop on a background task.
     pub fn retry_events_spawned(
-        mut self,
+        self,
     ) -> Result<(
         tokio::task::JoinHandle<Result<AgentSession>>,
         mpsc::UnboundedReceiver<Event>,
     )> {
+        self.retry_events_spawned_with_approval(None, None)
+    }
+
+    /// Like [`Self::retry_events_spawned`], but with a tool-approval channel
+    /// wired up (see [`Self::chat_events_spawned_with_approval`]).
+    pub fn retry_events_spawned_with_approval(
+        mut self,
+        approval_tx: Option<mpsc::UnboundedSender<bool>>,
+        approval_rx: Option<mpsc::UnboundedReceiver<bool>>,
+    ) -> Result<(
+        tokio::task::JoinHandle<Result<AgentSession>>,
+        mpsc::UnboundedReceiver<Event>,
+    )> {
+        self.approval_tx = approval_tx;
+        self.approval_rx = approval_rx;
         let last_user_idx = self.messages.iter().rposition(|m| m.role == "user");
         if let Some(idx) = last_user_idx
             && idx + 1 < self.messages.len()
@@ -790,10 +875,63 @@ impl AgentSession {
                 self.session.append(&assistant_msg)?;
                 self.messages.push(assistant_msg);
 
-                for tc in &tool_calls {
+                for (index, tc) in tool_calls.iter().enumerate() {
                     let tc_args: Value =
                         serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
                     let tool_name = &tc.function.name;
+
+                    // Tool approval: when security.require_tool_approval is
+                    // on, pause before executing dangerous tool calls (and
+                    // before serving them from the cache — the user wants to
+                    // know what the agent is doing). Rejected calls never
+                    // touch the cache or the activity-log guard.
+                    if is_approval_required(self.config.security.require_tool_approval, tool_name) {
+                        sink.send(Event::ToolApprovalRequired {
+                            id: tc.id.clone(),
+                            name: tool_name.clone(),
+                            arguments: tc.function.arguments.clone(),
+                            index,
+                        });
+                        let output = match &mut self.approval_rx {
+                            Some(rx) => {
+                                match tokio::time::timeout(
+                                    tokio::time::Duration::from_secs(300),
+                                    rx.recv(),
+                                )
+                                .await
+                                {
+                                    Ok(Some(true)) => {
+                                        // Approved — fall through to normal dispatch below.
+                                        None
+                                    }
+                                    Ok(Some(false)) => {
+                                        Some("Error: tool call rejected by user".to_string())
+                                    }
+                                    Ok(None) => {
+                                        Some("Error: tool call rejected by user".to_string())
+                                    }
+                                    Err(_) => Some(
+                                        "Error: tool call timed out waiting for approval".to_string(),
+                                    ),
+                                }
+                            }
+                            None => Some(
+                                "Error: tool call requires approval but no approval channel is connected"
+                                    .to_string(),
+                            ),
+                        };
+                        if let Some(rejected) = output {
+                            sink.send(Event::ToolResult {
+                                id: tc.id.clone(),
+                                content: rejected.clone(),
+                            });
+                            let tool_msg = Message::tool_result(&tc.id, rejected);
+                            self.session.append(&tool_msg)?;
+                            self.messages.push(tool_msg);
+                            total_tool_calls += 1;
+                            continue;
+                        }
+                    }
 
                     // Check the read-only tool cache first. If this exact
                     // tool+args was already called in this session, return
@@ -1147,5 +1285,65 @@ mod tests {
         cache.insert("read_file", &args1, "content A");
         assert_eq!(cache.get("read_file", &args1), Some("content A"));
         assert!(cache.get("read_file", &args2).is_none());
+    }
+
+    #[test]
+    fn approval_required_mutating_builtins_when_flag_on() {
+        for name in [
+            "exec_command",
+            "write_file",
+            "edit_file",
+            "memory",
+            "knowledge",
+        ] {
+            assert!(
+                is_approval_required(true, name),
+                "{} should require approval",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn approval_required_mcp_and_unknown_tools_when_flag_on() {
+        // MCP tools use the `__` server/tool separator.
+        assert!(is_approval_required(true, "github__create_issue"));
+        assert!(is_approval_required(true, "images__generate"));
+        // Unknown tools (not in the built-in set at all) also require approval.
+        assert!(is_approval_required(true, "mystery_tool"));
+        assert!(is_approval_required(true, "some_other_thing"));
+    }
+
+    #[test]
+    fn approval_not_required_for_readonly_tools_when_flag_on() {
+        for name in ["read_file", "search_files", "list_directory"] {
+            assert!(
+                !is_approval_required(true, name),
+                "{} must never require approval",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn approval_never_required_when_flag_off() {
+        for name in [
+            "exec_command",
+            "write_file",
+            "edit_file",
+            "memory",
+            "knowledge",
+            "read_file",
+            "search_files",
+            "list_directory",
+            "github__create_issue",
+            "mystery_tool",
+        ] {
+            assert!(
+                !is_approval_required(false, name),
+                "{} must pass through when the flag is off",
+                name
+            );
+        }
     }
 }

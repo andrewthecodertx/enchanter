@@ -97,9 +97,13 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
             }
             Action::Retry => {
                 let a = agent.take().expect("agent must be Some when idle");
-                match a.retry_events_spawned() {
+                let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+                match a.retry_events_spawned_with_approval(
+                    Some(approval_tx.clone()),
+                    Some(approval_rx),
+                ) {
                     Ok((handle, mut rx)) => {
-                        stream_events(&mut rx).await;
+                        stream_events(&mut rx, approval_tx).await;
                         match handle.await {
                             Ok(Ok(returned_agent)) => {
                                 agent = Some(returned_agent);
@@ -119,9 +123,14 @@ pub async fn run_repl(agent: AgentSession) -> Result<AgentSession> {
             }
             Action::Send(msg) => {
                 let a = agent.take().expect("agent must be Some when idle");
-                match a.chat_events_spawned(&msg) {
+                let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+                match a.chat_events_spawned_with_approval(
+                    &msg,
+                    Some(approval_tx.clone()),
+                    Some(approval_rx),
+                ) {
                     Ok((handle, mut rx)) => {
-                        stream_events(&mut rx).await;
+                        stream_events(&mut rx, approval_tx).await;
                         match handle.await {
                             Ok(Ok(returned_agent)) => {
                                 agent = Some(returned_agent);
@@ -159,7 +168,15 @@ fn draw_status_bar(agent: &AgentSession) {
 }
 
 /// Drain and print streaming events from the agent.
-async fn stream_events(rx: &mut UnboundedReceiver<Event>) {
+///
+/// `approval_tx` is the tool-approval channel the agent waits on; it is passed
+/// through so `Event::ToolApprovalRequired` can prompt the user right here.
+/// When approval is disabled the agent never emits those events and the
+/// channel just goes unused.
+async fn stream_events(
+    rx: &mut UnboundedReceiver<Event>,
+    approval_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+) {
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(300), rx.recv()).await {
             Ok(Some(event)) => match event {
@@ -174,6 +191,11 @@ async fn stream_events(rx: &mut UnboundedReceiver<Event>) {
                 } => {
                     println!();
                     println!("  ⟩ {}", name);
+                }
+                Event::ToolApprovalRequired {
+                    name, arguments, ..
+                } => {
+                    prompt_approval(approval_tx.clone(), &name, &arguments).await;
                 }
                 Event::ToolResult { id: _, content } => {
                     for line in content.lines().take(5) {
@@ -217,6 +239,51 @@ async fn stream_events(rx: &mut UnboundedReceiver<Event>) {
                 return;
             }
         }
+    }
+}
+
+/// Ask the user to approve a dangerous tool call, then send the decision back
+/// on `approval_tx`. Prints the tool name and its (pretty-printed, truncated)
+/// arguments, then loops until the user answers `y`/`Y` (approve) or anything
+/// else (reject). If the channel is gone the decision defaults to reject.
+async fn prompt_approval(
+    approval_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    name: &str,
+    arguments: &str,
+) {
+    println!();
+    println!("── approval required ──");
+    println!("  tool: {}", name);
+    let args_str = match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| arguments.to_string()),
+        Err(_) => arguments.to_string(),
+    };
+    let mut shown = args_str;
+    if shown.chars().count() > 500 {
+        shown = shown.chars().take(500).collect();
+        shown.push_str(" …(truncated)");
+    }
+    println!("  {}", shown);
+    loop {
+        print!("  Approve? [y/N] ");
+        io::stdout().flush().ok();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            // EOF — reject so the agent doesn't hang forever.
+            let _ = approval_tx.send(false);
+            return;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
+            let _ = approval_tx.send(true);
+            return;
+        }
+        println!("  Rejected.");
+        let _ = approval_tx.send(false);
+        return;
     }
 }
 

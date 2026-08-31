@@ -21,7 +21,7 @@ use colored::Colorize;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::BroadcastStream;
 
 use axum::Json;
@@ -63,6 +63,13 @@ struct WebState {
     /// Cached skills + MCP summaries, for /api/resources when the agent lock
     /// is held by a streaming turn.
     resources: Mutex<Value>,
+    /// Tool-approval channel for the in-flight turn, if any. `Some` while a
+    /// turn is running with `security.require_tool_approval` enabled; the
+    /// agent task holds the receiving end and POST /api/tool/approve sends
+    /// decisions here. Because the agent processes tool calls sequentially,
+    /// at most ONE approval is pending at a time — an extra bool just sits in
+    /// the channel and is consumed by the next approval wait.
+    approval_tx: Mutex<Option<mpsc::UnboundedSender<bool>>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -83,6 +90,12 @@ struct ResumeReq {
 #[derive(serde::Deserialize)]
 struct TitleReq {
     title: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ToolApproveReq {
+    index: usize,
+    approve: bool,
 }
 
 /// HTTP error that renders as a JSON `{ "error": ... }` response.
@@ -195,6 +208,7 @@ pub async fn serve(
         abort: Mutex::new(None),
         snapshot: Mutex::new(Value::Null),
         resources: Mutex::new(json!({ "skills": skills_json, "mcp": [] })),
+        approval_tx: Mutex::new(None),
     });
 
     let app = router(state);
@@ -221,6 +235,7 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/api/undo", post(api_undo))
         .route("/api/clear", post(api_clear))
         .route("/api/stop", post(api_stop))
+        .route("/api/tool/approve", post(api_tool_approve))
         .with_state(state)
 }
 
@@ -597,6 +612,36 @@ async fn api_stop(State(state): State<Arc<WebState>>) -> Json<Value> {
     }
 }
 
+/// Accept an approval decision for the pending dangerous tool call.
+async fn api_tool_approve(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ToolApproveReq>,
+) -> Result<Json<Value>, WebError> {
+    let approval_tx = {
+        let guard = state.approval_tx.lock().await;
+        guard.clone()
+    };
+    match approval_tx {
+        Some(tx) => {
+            // The agent consumes exactly one bool on its next approval wait;
+            // an extra one (e.g. after a timeout) just sits in the channel
+            // and is consumed by the next approval. `index` is the pending
+            // tool call's position in the turn's tool_calls array; it is
+            // validated in the UI (buttons disable after one click), so we
+            // don't resequence here — the sequential agent loop makes stale
+            // indices harmless.
+            let _ = tx.send(req.approve);
+            Ok(Json(
+                json!({ "ok": true, "approved": req.approve, "index": req.index }),
+            ))
+        }
+        None => Err(WebError::new(
+            StatusCode::CONFLICT,
+            "no tool approval is pending",
+        )),
+    }
+}
+
 // ── Chat / SSE ────────────────────────────────────────────────
 
 async fn api_chat(
@@ -664,9 +709,28 @@ async fn spawn_turn(
             eprintln!("{} web: failed to set session title: {}", "⚠".yellow(), e);
         }
 
-        let handle_and_rx = match &prompt {
-            Some(prompt) => agent.chat_events_spawned(prompt),
-            None => agent.retry_events_spawned(),
+        // When tool approval is required, create a per-turn channel and hand
+        // the sender to the approval endpoint; the receiver goes into the
+        // agent task. Otherwise the turn runs with no approval channel.
+        let handle_and_rx = if agent.config.security.require_tool_approval {
+            let (approval_tx, approval_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+            *state2.approval_tx.lock().await = Some(approval_tx.clone());
+            match &prompt {
+                Some(prompt) => agent.chat_events_spawned_with_approval(
+                    prompt,
+                    Some(approval_tx),
+                    Some(approval_rx),
+                ),
+                None => {
+                    agent.retry_events_spawned_with_approval(Some(approval_tx), Some(approval_rx))
+                }
+            }
+        } else {
+            *state2.approval_tx.lock().await = None;
+            match &prompt {
+                Some(prompt) => agent.chat_events_spawned(prompt),
+                None => agent.retry_events_spawned(),
+            }
         };
         let (handle, mut rx) = match handle_and_rx {
             Ok(pair) => pair,
@@ -674,6 +738,7 @@ async fn spawn_turn(
                 eprintln!("{} web: failed to start turn: {}", "✗".red(), e);
                 *state2.agent.lock().await = build_agent(&state2).await.ok();
                 *state2.abort.lock().await = None;
+                *state2.approval_tx.lock().await = None;
                 let _ = tx.send(Event::Error {
                     message: e.to_string(),
                 });
@@ -732,6 +797,7 @@ async fn spawn_turn(
         }
         drop(guard);
         *state2.abort.lock().await = None;
+        *state2.approval_tx.lock().await = None;
     });
 
     Ok(bcast_rx)
@@ -791,6 +857,7 @@ mod tests {
             abort: Mutex::new(None),
             snapshot: Mutex::new(Value::Null),
             resources: Mutex::new(json!({ "skills": [], "mcp": [] })),
+            approval_tx: Mutex::new(None),
         }
     }
 

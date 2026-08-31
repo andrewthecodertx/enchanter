@@ -180,6 +180,40 @@
   .tool .ok { color: var(--green); }
   .tool .err { color: var(--red); }
   .note { color: var(--dim); font-size: 12px; font-style: italic; }
+  .approval-card {
+    margin: 10px 0;
+    border: 1px solid var(--red);
+    border-radius: 4px;
+    background: var(--panel);
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+  .approval-card .approval-name { color: var(--cyan); font-weight: bold; }
+  .approval-card pre {
+    margin: 6px 0;
+    padding: 6px 8px;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #b8b8b8;
+  }
+  .approval-card button {
+    background: #000;
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 12px;
+    cursor: pointer;
+    margin-right: 8px;
+  }
+  .approval-card button.approve:hover { border-color: var(--green); color: var(--green); }
+  .approval-card button.reject:hover { border-color: var(--red); color: var(--red); }
+  .approval-card button:disabled { opacity: .4; cursor: default; }
+  .approval-card .approval-pending { color: var(--dim); font-style: italic; }
   .err-row { color: var(--red); }
   .cursor {
     display: inline-block;
@@ -405,6 +439,65 @@
     scrollBottom();
   }
 
+  // ── tool approval (human-in-the-loop) ──
+  function renderApproval(ev) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const body = document.createElement("div");
+    body.className = "bubble";
+    const card = document.createElement("div");
+    card.className = "approval-card";
+
+    const title = document.createElement("div");
+    title.innerHTML = "⚠ approval required: <span class=\"approval-name\">" + esc(ev.name) + "()</span>";
+    card.appendChild(title);
+
+    const pre = document.createElement("pre");
+    let argsStr = ev.arguments || "";
+    try { argsStr = JSON.stringify(JSON.parse(argsStr), null, 2); } catch (e) { /* keep raw */ }
+    pre.textContent = argsStr.length > 500 ? argsStr.slice(0, 500) + " …(truncated)" : argsStr;
+    card.appendChild(pre);
+
+    const approveBtn = document.createElement("button");
+    approveBtn.className = "approve";
+    approveBtn.textContent = "Approve";
+    const rejectBtn = document.createElement("button");
+    rejectBtn.className = "reject";
+    rejectBtn.textContent = "Reject";
+
+    const decide = (index, approve) => (e) => {
+      approveBtn.disabled = true;
+      rejectBtn.disabled = true;
+      approveBtn.textContent = "…";
+      rejectBtn.textContent = "…";
+      fetch("/api/tool/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ index: index, approve: approve }),
+      })
+        .then((r) => r.json().catch(() => ({})))
+        .then((j) => {
+          if (approve) approveBtn.textContent = "Approved";
+          else rejectBtn.textContent = "Rejected";
+          if (!j.ok) setStatus("approval: " + (j.error || "failed"), "error");
+        })
+        .catch(() => {
+          if (approve) approveBtn.textContent = "Approved";
+          else rejectBtn.textContent = "Rejected";
+          setStatus("approval request failed", "error");
+        });
+    };
+
+    approveBtn.addEventListener("click", decide(ev.index, true));
+    rejectBtn.addEventListener("click", decide(ev.index, false));
+    card.appendChild(approveBtn);
+    card.appendChild(rejectBtn);
+    body.appendChild(card);
+    row.appendChild(body);
+    messagesEl.appendChild(row);
+    scrollBottom();
+  }
+
   // ── SSE streaming ──
   function startStream(url, body) {
     busy = true;
@@ -457,6 +550,10 @@
         break;
       case "tool_call":
         addTool({ id: ev.id, name: ev.name, arguments: ev.arguments });
+        break;
+      case "tool_approval_required":
+        setStatus("approval required…", "busy");
+        renderApproval(ev);
         break;
       case "tool_result":
         setStatus("tool result…", "busy");

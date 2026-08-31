@@ -317,7 +317,6 @@ pub struct SecurityConfig {
     /// knowledge, and all MCP tools) require user approval before running.
     /// Default: false (pass-through, no behavior change).
     #[serde(default)]
-    #[allow(dead_code)] // consumed by the tool-approval feature (agent tool dispatch)
     pub require_tool_approval: bool,
 
     /// MCP servers that project overlays (.enchanter/config.yaml) are allowed
