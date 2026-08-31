@@ -4,7 +4,7 @@ A focused AI agent harness. Single Rust binary, any OpenAI-compatible provider, 
 
 Reads your SOUL, loads your memory, finds your skills, talks to your model. Nothing more.
 
-**[Full documentation →](https://andrewthecoder.com/projects/enchanter)**
+**[Full documentation →](https://andrewthecoder.com/projects/enchanter)** · **[Changelog](CHANGELOG.md)** · **Latest release: [v1.0.1](https://github.com/andrewthecodertx/enchanter/releases)**
 
 ## Setup
 
@@ -121,6 +121,9 @@ enchanter
 ```bash
 # Interactive session
 enchanter
+
+# Launch the web UI (browser opens automatically)
+enchanter serve
 
 # Ask one question and exit
 enchanter -p "Explain Rust ownership in one paragraph"
@@ -250,6 +253,36 @@ enchanter --no-daemon -p "quick question"
 
 The daemon streams responses as JSONL events over the Unix socket, so you
 still see content tokens as they arrive — not just a final blob of text.
+
+## Web UI
+
+Enchanter ships an optional browser interface served by the same binary. No
+separate app or deployment — just run:
+
+```bash
+enchanter serve
+```
+
+It binds `127.0.0.1` on port `3005` by default and opens your browser.
+Features include streaming chat (SSE), a live tool-call panel, session
+resume, model switching, and token/context usage display.
+
+```bash
+# Custom port / host / no browser
+enchanter serve --port 8080 --host 127.0.0.1 --no-browser
+```
+
+On a shared machine, require a bearer token on every `/api/*` route:
+
+```bash
+enchanter serve --token "$(openssl rand -hex 32)"
+# or in config.yaml:
+# web:
+#   auth_token: "…"
+```
+
+The web UI also renders Approve/Reject cards when
+`security.require_tool_approval` is enabled (see below).
 
 ## Info subcommands
 
